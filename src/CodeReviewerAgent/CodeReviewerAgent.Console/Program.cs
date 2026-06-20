@@ -1,47 +1,23 @@
 using CodeReviewerAgent.Console;
-using System.Diagnostics;
-using System.Text;
-using System.Text.Json;
 using System.Text.Json.Serialization;
 
 EnvLoader.Load(Path.Combine(AppContext.BaseDirectory, ".env"));
 
-var requestBody = new
-{
-    max_tokens = 16000,
-    // Not supported on Haiku 4.5 — enable only for Opus/Sonnet 4.6+ models.
-    //thinking = new { type = "adaptive" },
-    //output_config = new { effort = "high" },
-    messages = new[]
-    {
-        new { role = "user", content = "What is the capital of France?" },
-    },
-};
-
-var json = JsonSerializer.Serialize(requestBody);
-using var content = new StringContent(json, Encoding.UTF8, "application/json");
-
 ILlmClient client = LlmClientFactory.Create();
 
-var stopwatch = Stopwatch.StartNew();
-var message = client.Request(requestBody);
-stopwatch.Stop();
+// `pr <number>` reviews a real pull request; no args reviews the local HEAD diff.
+IDiffSource diffSource = args is ["pr", var prArg, ..] && int.TryParse(prArg, out var prNumber)
+    ? new PullRequestDiffSource(prNumber)
+    : new LocalDiffSource();
 
-foreach (var block in message?.Content ?? [])
-    if (block.Type == "text")
-        Console.WriteLine(block.Text);
-
-if (message?.Usage is { } usage)
-{
-    var inputTokens = usage.InputTokens ?? 0;
-    var outputTokens = usage.OutputTokens ?? 0;
-    Console.WriteLine($"[tokens] input: {inputTokens}, output: {outputTokens}, total: {inputTokens + outputTokens}");
-}
-
-Console.WriteLine($"[latency] {stopwatch.ElapsedMilliseconds} ms");
+var reviewer = new CodeReviewer(client, diffSource);
+reviewer.Review();
 
 sealed class MessageResponse
 {
+    [JsonPropertyName("model")]
+    public string? Model { get; set; }
+
     [JsonPropertyName("content")]
     public List<ContentBlock> Content { get; set; } = [];
 

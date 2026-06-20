@@ -9,6 +9,7 @@
 
   <ItemGroup>
     <None Update=".env" CopyToOutputDirectory="PreserveNewest" Condition="Exists('.env')" />
+    <None Include="prompts\**\*.md" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

@@ -6,3 +6,10 @@
 [Dd]ebug/
 [Rr]elease/
 .vs/
+
+# Logs
+logs/
+
+# Docs
+docs/Todo.md
+docs/Insights

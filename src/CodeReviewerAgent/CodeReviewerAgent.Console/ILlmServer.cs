@@ -32,6 +32,21 @@ namespace CodeReviewerAgent.Console
             var node = JsonSerializer.SerializeToNode(requestBody)!.AsObject();
             node["model"] = _model;
 
+            // Translate the neutral json_schema into Claude's structured-output format.
+            if (node["json_schema"] is JsonNode schemaNode)
+            {
+                var schema = schemaNode.DeepClone();
+                node.Remove("json_schema");
+                node["output_config"] = new JsonObject
+                {
+                    ["format"] = new JsonObject
+                    {
+                        ["type"] = "json_schema",
+                        ["schema"] = schema,
+                    },
+                };
+            }
+
             var json = node.ToJsonString();
             using var content = new StringContent(json, Encoding.UTF8, "application/json");
             var response = _http.PostAsync("/v1/messages", content).GetAwaiter().GetResult();
@@ -59,16 +74,37 @@ namespace CodeReviewerAgent.Console
         public MessageResponse Request(object requestBody)
         {
             // The incoming body uses the Anthropic shape; reuse its messages and
-            // translate to Ollama's /api/chat request.
+            // translate to Ollama's /api/chat request. The Anthropic top-level
+            // "system" field becomes a leading system message for Ollama.
             var anthropic = JsonSerializer.SerializeToElement(requestBody);
-            var ollamaRequest = new
+
+            var messages = new List<object>();
+            if (anthropic.TryGetProperty("system", out var system) &&
+                system.ValueKind == JsonValueKind.String)
             {
-                model = _model,
-                messages = anthropic.GetProperty("messages"),
-                stream = false,
+                messages.Add(new { role = "system", content = system.GetString() });
+            }
+            foreach (var message in anthropic.GetProperty("messages").EnumerateArray())
+            {
+                messages.Add(new
+                {
+                    role = message.GetProperty("role").GetString(),
+                    content = message.GetProperty("content").GetString(),
+                });
+            }
+
+            var ollamaRequest = new JsonObject
+            {
+                ["model"] = _model,
+                ["messages"] = JsonSerializer.SerializeToNode(messages),
+                ["stream"] = false,
             };
 
-            var json = JsonSerializer.Serialize(ollamaRequest);
+            // Pass the JSON schema as Ollama's structured-output format.
+            if (anthropic.TryGetProperty("json_schema", out var schema))
+                ollamaRequest["format"] = JsonNode.Parse(schema.GetRawText());
+
+            var json = ollamaRequest.ToJsonString();
             using var content = new StringContent(json, Encoding.UTF8, "application/json");
             var response = _http.PostAsync("/api/chat", content).GetAwaiter().GetResult();
             var responseJson = response.Content.ReadAsStringAsync().GetAwaiter().GetResult();
@@ -80,6 +116,7 @@ namespace CodeReviewerAgent.Console
             var ollamaResponse = JsonSerializer.Deserialize<OllamaResponse>(responseJson);
             return new MessageResponse
             {
+                Model = _model,
                 Content = [new ContentBlock { Type = "text", Text = ollamaResponse?.Message?.Content ?? string.Empty }],
                 Usage = new Usage
                 {
