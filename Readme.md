@@ -4,26 +4,45 @@ An agent for automated code reviewing, powered by an LLM.
 
 > Developed as an activity for the **Rambo EPC method**, specifically **Pilar 3**.
 
-> **Status: early work in progress.** Currently the project only implements the
-> LLM request layer — a small abstraction that sends a prompt to either a local
-> (Ollama) or hosted (Claude) model and logs the response, token usage, and
-> latency. The code-review logic is not built yet.
+It reads a diff (the local working tree or a real pull request), sends it to an
+LLM with a versioned system prompt and a JSON schema, and gets back a structured
+list of findings — each with file, line, severity, category, problem, and
+suggestion. Every run is logged (model, prompt version, tokens, cost, latency).
 
 ## Tech stack
 
 - .NET 10 console application
 - Raw `HttpClient` calls to the LLM APIs (no SDK)
-- Pluggable LLM engines behind a single `ILlmClient` interface
+- Pluggable **LLM engines** behind `ILlmClient` (Ollama / Claude)
+- Pluggable **diff sources** behind `IDiffSource` (local HEAD / pull request)
+- Native **structured output** (JSON schema) → findings as C# records
 
 ## Project layout
 
 ```
 src/CodeReviewerAgent/CodeReviewerAgent.Console/
-├── Program.cs            # Entry point: builds the request, logs output/tokens/latency
-├── ILlmServer.cs         # ILlmClient interface + AnthropicClient and OllamaClient
-├── LlmClientFactory.cs   # Picks the client based on LLM_ENGINE
-└── EnvLoader.cs          # Minimal .env file loader
+├── Program.cs               # Entry point: load .env, pick engine + diff source, run review
+├── CodeReviewer.cs          # Orchestrates: get diff → call LLM → parse → display/log/save
+├── ILlmServer.cs            # ILlmClient + AnthropicClient + OllamaClient
+├── LlmClientFactory.cs      # Picks the LLM client based on LLM_ENGINE
+├── IDiffSource.cs           # Diff source strategy
+├── LocalDiffSource.cs       # git diff HEAD
+├── PullRequestDiffSource.cs # gh pr diff <number>
+├── ProcessRunner.cs         # Runs external commands (git / gh)
+├── Finding.cs               # Finding + ReviewResult records, Severity/Category enums
+├── CostCalculator.cs        # Per-model cost estimate (Ollama = free)
+├── Logger.cs                # Appends JSON log lines (JSONL)
+├── EnvLoader.cs             # Minimal .env loader
+└── prompts/
+    └── review-v1.md         # Versioned review system prompt
 ```
+
+## Prerequisites
+
+- .NET 10 SDK
+- For `LLM_ENGINE=ollama`: a running [Ollama](https://ollama.com) with the model pulled (`ollama pull qwen2.5-coder:7b`)
+- For `LLM_ENGINE=claude`: an Anthropic API key
+- For reviewing pull requests: the [GitHub CLI](https://cli.github.com) installed and authenticated (`gh auth login`)
 
 ## Configuration
 
@@ -33,6 +52,9 @@ fill in your values:
 ```
 # Which engine to use: ollama | claude
 LLM_ENGINE=ollama
+
+# Which versioned prompt to use (prompts/review-<version>.md)
+PROMPT_VERSION=v1
 
 # Claude (used when LLM_ENGINE=claude)
 ANTHROPIC_API_KEY=your-key-here
@@ -49,40 +71,68 @@ OLLAMA_MODEL=qwen2.5-coder:7b
 
 ```bash
 cd src/CodeReviewerAgent/CodeReviewerAgent.Console
-dotnet run
+
+dotnet run             # review the local HEAD diff (git diff HEAD)
+dotnet run -- pr 42    # review pull request #42 (gh pr diff 42)
 ```
 
 Example output:
 
 ```
-The capital of France is Paris.
-[tokens] input: 36, output: 8, total: 44
-[latency] 312 ms
+The diff adds a cost calculator but hardcodes pricing and lacks an unknown-model guard.
+
+Findings: 2
+  [Warning] CostCalculator.cs:12 (Maintainability) — Pricing is hardcoded -> Move prices to configuration
+  [Info] CostCalculator.cs:28 (Bug) — Unknown model silently returns 0 -> Log or surface unmapped models
+Review saved to .../reviews/review-2026-06-20-101500.json
 ```
 
 ## How it works
 
-`LlmClientFactory.Create()` reads `LLM_ENGINE` and returns the matching
-`ILlmClient` implementation:
+The review pipeline (`CodeReviewer.Review()`):
 
-- **`AnthropicClient`** — POSTs to the Claude Messages API, using `ANTHROPIC_MODEL`.
-- **`OllamaClient`** — POSTs to a local Ollama `/api/chat` endpoint, using
-  `OLLAMA_MODEL`, and maps the response back to a common shape.
+1. **Get the diff** from the configured `IDiffSource`
+   (`LocalDiffSource` → `git diff HEAD`, or `PullRequestDiffSource` → `gh pr diff <n>`).
+2. **Build the request** with the versioned system prompt (`prompts/review-<version>.md`)
+   and a JSON schema describing the expected output.
+3. **Call the LLM** through the selected `ILlmClient`. Each engine translates the
+   neutral request into its own API shape (Claude's `output_config.format`,
+   Ollama's `format`) and maps the response back to a shared `MessageResponse`.
+4. **Parse** the structured response into a `ReviewResult` (a summary plus a list
+   of `Finding` records).
+5. **Display, log, and save** — print the summary and findings, append a JSON log
+   line (engine, model, prompt version, tokens, cost, latency, findings count),
+   and write the structured review to `reviews/`.
 
-Both return a shared `MessageResponse`, so the caller logs the text, token
-usage, and latency the same way regardless of engine.
+### Findings schema
 
-### Adding another engine
+```csharp
+record Finding(string File, int Line, Severity Severity, Category Category,
+               string Problem, string Suggestion);
 
-1. Implement `ILlmClient`.
-2. Add a case for it in `LlmClientFactory`.
-3. Document its environment variables in `.env.example`.
+enum Severity { Info, Warning, Critical }
+enum Category { Bug, Security, Performance, Style, Maintainability }
+```
+
+### Structured log (JSONL)
+
+Each run appends one JSON object to `logs/llm-<date>.jsonl`:
+
+```json
+{"timestamp":"2026-06-20T10:15:00Z","engine":"claude","model":"claude-haiku-4-5","prompt_version":"v1","input_tokens":820,"output_tokens":260,"total_tokens":1080,"cost_usd":0.0021,"latency_ms":3100,"findings_count":2}
+```
+
+Logging the prompt + model version per run makes it possible to compare results
+across iterations ("did prompt v2 find more than v1?").
+
+## Extending
+
+- **New LLM engine** — implement `ILlmClient`, add a case in `LlmClientFactory`, document its env vars.
+- **New diff source** — implement `IDiffSource` (e.g. read a `.diff` file) and select it in `Program.cs`.
+- **New prompt version** — add `prompts/review-v2.md` and set `PROMPT_VERSION=v2`.
 
 ## Roadmap
 
-- [ ] Feed source files / diffs to the model instead of a hardcoded prompt
-- [ ] Prompt templates tailored for code review
-- [ ] Structured review output (issues, severity, suggestions)
-- [ ] Integration with git / pull requests
-```
-
+- [ ] Read the diff from a file / stdin (`FileDiffSource`)
+- [ ] Validate finding line numbers against the parsed diff
+- [ ] Post findings back as PR review comments
