@@ -11,30 +11,44 @@ suggestion. Every run is logged (model, prompt version, tokens, cost, latency).
 
 ## Tech stack
 
-- .NET 10 console application
+- .NET 10 solution split into three projects (Core / Console / Tests)
+- **Core** as a reusable class library — the whole review flow lives here, so it can
+  be driven by more than one front end (console, web, desktop, MCP)
 - Raw `HttpClient` calls to the LLM APIs (no SDK)
 - Pluggable **LLM engines** behind `ILlmClient` (Ollama / Claude)
 - Pluggable **diff sources** behind `IDiffSource` (local HEAD / pull request)
 - Native **structured output** (JSON schema) → findings as C# records
+- xUnit tests over the flow with fake `ILlmClient` / `IDiffSource` implementations
 
 ## Project layout
 
 ```
-src/CodeReviewerAgent/CodeReviewerAgent.Console/
-├── Program.cs               # Entry point: load .env, pick engine + diff source, run review
-├── CodeReviewer.cs          # Orchestrates: get diff → call LLM → parse → display/log/save
-├── ILlmServer.cs            # ILlmClient + AnthropicClient + OllamaClient
-├── LlmClientFactory.cs      # Picks the LLM client based on LLM_ENGINE
-├── IDiffSource.cs           # Diff source strategy
-├── LocalDiffSource.cs       # git diff HEAD
-├── PullRequestDiffSource.cs # gh pr diff <number>
-├── ProcessRunner.cs         # Runs external commands (git / gh)
-├── Finding.cs               # Finding + ReviewResult records, Severity/Category enums
-├── CostCalculator.cs        # Per-model cost estimate (Ollama = free)
-├── Logger.cs                # Appends JSON log lines (JSONL)
-├── EnvLoader.cs             # Minimal .env loader
-└── prompts/
-    └── review-v1.md         # Versioned review system prompt
+src/CodeReviewerAgent/
+├── CodeReviewerAgent.slnx               # Solution: Core + Console + Tests
+│
+├── CodeReviewerAgent.Core/              # Class library — the reusable review flow
+│   ├── CodeReviewer.cs                  # Orchestrates: get diff → call LLM → parse → display/log/save
+│   ├── ILlmServer.cs                    # ILlmClient + AnthropicClient + OllamaClient
+│   ├── LlmClientFactory.cs              # Picks the LLM client based on LLM_ENGINE
+│   ├── MessageResponse.cs               # Neutral LLM response shape (model, content, usage)
+│   ├── IDiffSource.cs                   # Diff source strategy
+│   ├── LocalDiffSource.cs               # git diff HEAD
+│   ├── PullRequestDiffSource.cs         # gh pr diff <number>
+│   ├── ProcessRunner.cs                 # Runs external commands (git / gh)
+│   ├── Finding.cs                       # Finding + ReviewResult records, Severity/Category enums
+│   ├── CostCalculator.cs                # Per-model cost estimate (Ollama = free)
+│   ├── Logger.cs                        # Appends JSON log lines (JSONL)
+│   ├── EnvLoader.cs                     # Minimal .env loader
+│   └── prompts/
+│       └── review-v1.md                 # Versioned review system prompt
+│
+├── CodeReviewerAgent.Console/           # Executable — thin entry point over Core
+│   ├── Program.cs                       # Load .env, pick engine + diff source, run review
+│   └── .env.example                     # Sample configuration
+│
+└── CodeReviewerAgent.Tests/             # xUnit tests over the review flow
+    ├── CodeReviewerTests.cs             # Empty diff / valid findings / invalid JSON
+    └── Fakes/                           # FakeLlmClient + FakeDiffSource
 ```
 
 ## Prerequisites
@@ -86,6 +100,17 @@ Findings: 2
   [Info] CostCalculator.cs:28 (Bug) — Unknown model silently returns 0 -> Log or surface unmapped models
 Review saved to .../reviews/review-2026-06-20-101500.json
 ```
+
+## Tests
+
+```bash
+cd src/CodeReviewerAgent
+dotnet test            # runs CodeReviewerAgent.Tests
+```
+
+The tests exercise `CodeReviewer.Review()` end to end with fake `ILlmClient` and
+`IDiffSource` implementations (no network, no git) — covering the empty-diff,
+valid-findings, and invalid-JSON paths.
 
 ## How it works
 

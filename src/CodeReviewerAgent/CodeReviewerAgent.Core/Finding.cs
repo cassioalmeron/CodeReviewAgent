@@ -1,13 +1,13 @@
-namespace CodeReviewerAgent.Console
+namespace CodeReviewerAgent.Core
 {
-    internal enum Severity
+    public enum Severity
     {
         Info,
         Warning,
         Critical,
     }
 
-    internal enum Category
+    public enum Category
     {
         Bug,
         Security,
@@ -19,7 +19,7 @@ namespace CodeReviewerAgent.Console
     /// <summary>
     /// A single code-review finding returned by the LLM.
     /// </summary>
-    internal record Finding(
+    public record Finding(
         string? File,
         int? Line,
         Severity? Severity,
@@ -30,7 +30,7 @@ namespace CodeReviewerAgent.Console
     /// <summary>
     /// The structured result of a review: an overall summary plus the findings.
     /// </summary>
-    internal record ReviewResult(
+    public record ReviewResult(
         string? Summary,
         List<Finding>? Findings);
 }

@@ -1,10 +1,10 @@
-namespace CodeReviewerAgent.Console
+namespace CodeReviewerAgent.Core
 {
     /// <summary>
     /// Estimates the API cost (USD) of a request. Local engines (Ollama) are free;
     /// Claude is priced per model based on input/output tokens.
     /// </summary>
-    internal static class CostCalculator
+    public static class CostCalculator
     {
         // USD per 1M tokens: (input, output). Update when pricing changes.
         private static readonly Dictionary<string, (decimal Input, decimal Output)> ClaudePricing =

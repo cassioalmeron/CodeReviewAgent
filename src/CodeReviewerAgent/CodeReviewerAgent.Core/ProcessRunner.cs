@@ -1,6 +1,6 @@
 using System.Diagnostics;
 
-namespace CodeReviewerAgent.Console
+namespace CodeReviewerAgent.Core
 {
     /// <summary>
     /// Runs an external command and returns its standard output.

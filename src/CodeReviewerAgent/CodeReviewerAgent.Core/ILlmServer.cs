@@ -3,9 +3,9 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 
-namespace CodeReviewerAgent.Console
+namespace CodeReviewerAgent.Core
 {
-    internal interface ILlmClient
+    public interface ILlmClient
     {
         MessageResponse Request(object requestBody);
     }

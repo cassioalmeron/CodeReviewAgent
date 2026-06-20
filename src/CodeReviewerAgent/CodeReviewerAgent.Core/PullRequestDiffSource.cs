@@ -1,9 +1,9 @@
-namespace CodeReviewerAgent.Console
+namespace CodeReviewerAgent.Core
 {
     /// <summary>
     /// The diff of a real pull request, fetched via the GitHub CLI (`gh pr diff`).
     /// </summary>
-    internal class PullRequestDiffSource : IDiffSource
+    public class PullRequestDiffSource : IDiffSource
     {
         private readonly int _prNumber;
 

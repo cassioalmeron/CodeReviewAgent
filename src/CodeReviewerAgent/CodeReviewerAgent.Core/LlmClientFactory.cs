@@ -1,6 +1,6 @@
-namespace CodeReviewerAgent.Console
+namespace CodeReviewerAgent.Core
 {
-    internal static class LlmClientFactory
+    public static class LlmClientFactory
     {
         public static ILlmClient Create()
         {

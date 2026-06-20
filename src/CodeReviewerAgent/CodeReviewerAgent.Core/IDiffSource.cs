@@ -1,10 +1,10 @@
-namespace CodeReviewerAgent.Console
+namespace CodeReviewerAgent.Core
 {
     /// <summary>
     /// Provides the diff to be reviewed. Implementations decide where it comes from
     /// (local working tree, a pull request, etc.).
     /// </summary>
-    internal interface IDiffSource
+    public interface IDiffSource
     {
         string GetDiff();
     }

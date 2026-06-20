@@ -1,6 +1,6 @@
 using System.Text.Json;
 
-namespace CodeReviewerAgent.Console
+namespace CodeReviewerAgent.Core
 {
     /// <summary>
     /// Appends log entries as JSON (one JSON object per line) to a file under the logs directory.

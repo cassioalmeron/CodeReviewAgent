@@ -2,9 +2,9 @@ using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-namespace CodeReviewerAgent.Console
+namespace CodeReviewerAgent.Core
 {
-    internal class CodeReviewer
+    public class CodeReviewer
     {
         private static readonly JsonSerializerOptions JsonOptions = new()
         {
@@ -21,14 +21,14 @@ namespace CodeReviewerAgent.Console
             _diffSource = diffSource;
         }
 
-        public void Review()
+        public ReviewResult Review()
         {
             // Read the diff from the configured source
             var diff = _diffSource.GetDiff();
             if (string.IsNullOrWhiteSpace(diff))
             {
                 System.Console.WriteLine("No changes to review.");
-                return;
+                return new ReviewResult(null, []);
             }
 
             // Send the diff to the LLM, using the versioned system prompt and a JSON
@@ -82,6 +82,8 @@ namespace CodeReviewerAgent.Console
 
             // Write the structured review to a file
             WriteReviewToFile(content);
+
+            return result with { Findings = findings };
         }
 
         private static string LoadSystemPrompt(string version)
