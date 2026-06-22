@@ -32,7 +32,10 @@ src/CodeReviewerAgent/
 │   ├── LlmClientFactory.cs              # Picks the LLM client based on LLM_ENGINE
 │   ├── MessageResponse.cs               # Neutral LLM response shape (model, content, usage)
 │   ├── IDiffSource.cs                   # Diff source strategy
-│   ├── LocalDiffSource.cs               # git diff HEAD
+│   ├── DiffSourceFactory.cs             # Picks the diff source based on the CLI args
+│   ├── LocalDiffSource.cs               # Local repo: staged if any, else git diff HEAD
+│   ├── StagedDiffSource.cs              # git diff --staged
+│   ├── FilesDiffSource.cs               # git diff HEAD -- <paths>
 │   ├── PullRequestDiffSource.cs         # gh pr diff <number>
 │   ├── ProcessRunner.cs                 # Runs external commands (git / gh)
 │   ├── Finding.cs                       # Finding + ReviewResult records, Severity/Category enums
@@ -86,8 +89,10 @@ OLLAMA_MODEL=qwen2.5-coder:7b
 ```bash
 cd src/CodeReviewerAgent/CodeReviewerAgent.Console
 
-dotnet run             # review the local HEAD diff (git diff HEAD)
-dotnet run -- pr 42    # review pull request #42 (gh pr diff 42)
+dotnet run                       # review the local repo (staged if any, else git diff HEAD)
+dotnet run -- staged             # review only the staged changes (git diff --staged)
+dotnet run -- files A.cs B.cs    # review specific files (git diff HEAD -- A.cs B.cs)
+dotnet run -- pr 42              # review pull request #42 (gh pr diff 42)
 ```
 
 Example output:
@@ -110,14 +115,17 @@ dotnet test            # runs CodeReviewerAgent.Tests
 
 The tests exercise `CodeReviewer.Review()` end to end with fake `ILlmClient` and
 `IDiffSource` implementations (no network, no git) — covering the empty-diff,
-valid-findings, and invalid-JSON paths.
+valid-findings, and invalid-JSON paths — plus `DiffSourceFactory`, asserting each
+CLI command routes to the right diff source.
 
 ## How it works
 
 The review pipeline (`CodeReviewer.Review()`):
 
-1. **Get the diff** from the configured `IDiffSource`
-   (`LocalDiffSource` → `git diff HEAD`, or `PullRequestDiffSource` → `gh pr diff <n>`).
+1. **Get the diff** from the `IDiffSource` selected by `DiffSourceFactory` from the
+   CLI args (`LocalDiffSource` → staged or `git diff HEAD`, `StagedDiffSource` →
+   `git diff --staged`, `FilesDiffSource` → `git diff HEAD -- <paths>`, or
+   `PullRequestDiffSource` → `gh pr diff <n>`).
 2. **Build the request** with the versioned system prompt (`prompts/review-<version>.md`)
    and a JSON schema describing the expected output.
 3. **Call the LLM** through the selected `ILlmClient`. Each engine translates the
@@ -153,7 +161,7 @@ across iterations ("did prompt v2 find more than v1?").
 ## Extending
 
 - **New LLM engine** — implement `ILlmClient`, add a case in `LlmClientFactory`, document its env vars.
-- **New diff source** — implement `IDiffSource` (e.g. read a `.diff` file) and select it in `Program.cs`.
+- **New diff source** — implement `IDiffSource` (e.g. read a `.diff` file) and add a case in `DiffSourceFactory`.
 - **New prompt version** — add `prompts/review-v2.md` and set `PROMPT_VERSION=v2`.
 
 ## Roadmap
