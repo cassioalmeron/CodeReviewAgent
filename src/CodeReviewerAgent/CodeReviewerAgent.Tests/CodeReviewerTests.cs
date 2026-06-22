@@ -10,11 +10,9 @@ namespace CodeReviewerAgent.Tests
         public void Review_WithEmptyDiff_DoesNotCallClientAndReturnsNoFindings()
         {
             var client = new FakeLlmClient("{}");
-            var diffSource = new FakeDiffSource("   ");
 
-            var result = new CodeReviewer(client, diffSource).Review();
+            var result = new CodeReviewer(client, "   ").Review();
 
-            Assert.True(diffSource.WasCalled);
             Assert.Null(client.LastRequestBody);
             Assert.Empty(result.Findings!);
         }
@@ -38,9 +36,8 @@ namespace CodeReviewerAgent.Tests
                 }
                 """;
             var client = new FakeLlmClient(response);
-            var diffSource = new FakeDiffSource("diff --git a/App.cs b/App.cs");
 
-            var result = new CodeReviewer(client, diffSource).Review();
+            var result = new CodeReviewer(client, "diff --git a/App.cs b/App.cs").Review();
 
             Assert.NotNull(client.LastRequestBody);
             Assert.Equal("One issue found.", result.Summary);
@@ -55,9 +52,8 @@ namespace CodeReviewerAgent.Tests
         public void Review_WhenClientReturnsInvalidJson_ReturnsEmptyResult()
         {
             var client = new FakeLlmClient("not valid json");
-            var diffSource = new FakeDiffSource("diff --git a/App.cs b/App.cs");
 
-            var result = new CodeReviewer(client, diffSource).Review();
+            var result = new CodeReviewer(client, "diff --git a/App.cs b/App.cs").Review();
 
             Assert.Null(result.Summary);
             Assert.Empty(result.Findings!);

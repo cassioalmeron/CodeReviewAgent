@@ -13,18 +13,17 @@ namespace CodeReviewerAgent.Core
         };
 
         private readonly ILlmClient _client;
-        private readonly IDiffSource _diffSource;
+        private readonly string _diff;
 
-        public CodeReviewer(ILlmClient client, IDiffSource diffSource)
+        public CodeReviewer(ILlmClient client, string diff)
         {
             _client = client;
-            _diffSource = diffSource;
+            _diff = diff;
         }
 
         public ReviewResult Review()
         {
-            // Read the diff from the configured source
-            var diff = _diffSource.GetDiff();
+            var diff = _diff;
             if (string.IsNullOrWhiteSpace(diff))
             {
                 System.Console.WriteLine("No changes to review.");
