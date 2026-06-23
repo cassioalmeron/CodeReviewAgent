@@ -12,6 +12,13 @@ namespace CodeReviewerAgent.Core
             Converters = { new JsonStringEnumConverter() },
         };
 
+        private static readonly JsonSerializerOptions OutputJsonOptions = new()
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+            WriteIndented = true,
+            Converters = { new JsonStringEnumConverter() },
+        };
+
         private readonly ILlmClient _client;
         private readonly string _diff;
 
@@ -32,7 +39,7 @@ namespace CodeReviewerAgent.Core
 
             // Send the diff to the LLM, using the versioned system prompt and a JSON
             // schema so the model returns structured output (summary + findings).
-            var promptVersion = Environment.GetEnvironmentVariable("PROMPT_VERSION") ?? "v1";
+            var promptVersion = Environment.GetEnvironmentVariable("PROMPT_VERSION") ?? "v2";
             var systemPrompt = LoadSystemPrompt(promptVersion);
             var requestBody = new
             {
@@ -55,7 +62,13 @@ namespace CodeReviewerAgent.Core
                 .Select(b => b.Text));
 
             var result = ParseResult(content);
-            var findings = result.Findings ?? [];
+            var rawFindings = result.Findings ?? [];
+
+            // Ground each finding against the parsed diff: keep only those whose cited
+            // snippet matches an added line, deriving the real line number from it.
+            var parsedDiff = DiffParser.Parse(diff);
+            var findings = FindingValidator.Validate(rawFindings, parsedDiff);
+            var droppedFindings = rawFindings.Count - findings.Count;
 
             if (!string.IsNullOrWhiteSpace(result.Summary))
                 System.Console.WriteLine(result.Summary);
@@ -77,12 +90,21 @@ namespace CodeReviewerAgent.Core
                 cost_usd = cost,
                 latency_ms = stopwatch.ElapsedMilliseconds,
                 findings_count = findings.Count,
+                findings_dropped = droppedFindings,
             });
 
-            // Write the structured review to a file
-            WriteReviewToFile(content);
+            var reviewResult = result with { Findings = findings };
 
-            return result with { Findings = findings };
+            // Write the validated review (with derived line numbers) to a file,
+            // plus a human-readable Markdown report.
+            WriteReviewToFile(reviewResult);
+            var metadata = new ReportMetadata(
+                engine, response?.Model, promptVersion, cost, stopwatch.ElapsedMilliseconds,
+                inputTokens, outputTokens, diff);
+            var reportPath = ReportGenerator.Save(reviewResult, metadata);
+            System.Console.WriteLine($"Report saved to {reportPath}");
+
+            return reviewResult;
         }
 
         private static string LoadSystemPrompt(string version)
@@ -109,13 +131,13 @@ namespace CodeReviewerAgent.Core
                         properties = new
                         {
                             file = new { type = "string" },
-                            line = new { type = "integer" },
+                            code_snippet = new { type = "string" },
                             severity = new { type = "string", @enum = new[] { "info", "warning", "critical" } },
                             category = new { type = "string", @enum = new[] { "bug", "security", "performance", "style", "maintainability" } },
                             problem = new { type = "string" },
                             suggestion = new { type = "string" },
                         },
-                        required = new[] { "file", "line", "severity", "category", "problem", "suggestion" },
+                        required = new[] { "file", "code_snippet", "severity", "category", "problem", "suggestion" },
                         additionalProperties = false,
                     },
                 },
@@ -146,12 +168,12 @@ namespace CodeReviewerAgent.Core
                     $"  [{f.Severity}] {f.File}:{f.Line} ({f.Category}) — {f.Problem} -> {f.Suggestion}");
         }
 
-        private static void WriteReviewToFile(string content)
+        private static void WriteReviewToFile(ReviewResult result)
         {
             var directory = Path.Combine(AppContext.BaseDirectory, "reviews");
             Directory.CreateDirectory(directory);
             var path = Path.Combine(directory, $"review-{DateTime.UtcNow:yyyy-MM-dd-HHmmss}.json");
-            File.WriteAllText(path, content);
+            File.WriteAllText(path, JsonSerializer.Serialize(result, OutputJsonOptions));
             System.Console.WriteLine($"Review saved to {path}");
         }
     }

@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace CodeReviewerAgent.Core
 {
     public enum Severity
@@ -17,15 +19,18 @@ namespace CodeReviewerAgent.Core
     }
 
     /// <summary>
-    /// A single code-review finding returned by the LLM.
+    /// A single code-review finding. The LLM cites the affected line verbatim in
+    /// <see cref="CodeSnippet"/>; <see cref="Line"/> is not supplied by the model but
+    /// derived by matching the snippet against the parsed diff.
     /// </summary>
     public record Finding(
         string? File,
-        int? Line,
+        [property: JsonPropertyName("code_snippet")] string? CodeSnippet,
         Severity? Severity,
         Category? Category,
         string? Problem,
-        string? Suggestion);
+        string? Suggestion,
+        int? Line = null);
 
     /// <summary>
     /// The structured result of a review: an overall summary plus the findings.
