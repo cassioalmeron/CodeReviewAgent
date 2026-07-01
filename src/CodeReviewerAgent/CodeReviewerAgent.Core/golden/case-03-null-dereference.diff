@@ -1,0 +1,12 @@
+diff --git a/src/Services/OrderService.cs b/src/Services/OrderService.cs
+index 2b3c4d5..6e7f8a9 100644
+--- a/src/Services/OrderService.cs
++++ b/src/Services/OrderService.cs
+@@ -18,5 +18,6 @@ public class OrderService
+     public string GetCustomerEmail(Order order)
+     {
+-        return order.Customer.Email;
++        var customer = _customers.Find(order.CustomerId);
++        return customer.Email.ToUpperInvariant();
+     }
+ }

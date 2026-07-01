@@ -8,6 +8,8 @@
 
   <ItemGroup>
     <None Include="prompts\**\*.md" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="golden\**\*" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="rubrics\**\*.md" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

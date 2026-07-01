@@ -1,0 +1,13 @@
+diff --git a/src/Utils/ArrayHelper.cs b/src/Utils/ArrayHelper.cs
+index 3c4d5e6..7f8a9b0 100644
+--- a/src/Utils/ArrayHelper.cs
++++ b/src/Utils/ArrayHelper.cs
+@@ -5,6 +5,7 @@ public static class ArrayHelper
+     public static int Sum(int[] values)
+     {
+         var total = 0;
+-        foreach (var v in values) total += v;
++        for (var i = 0; i <= values.Length; i++)
++            total += values[i];
+         return total;
+     }

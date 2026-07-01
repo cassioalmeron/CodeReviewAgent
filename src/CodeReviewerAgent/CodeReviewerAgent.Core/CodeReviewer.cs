@@ -28,6 +28,18 @@ namespace CodeReviewerAgent.Core
             _diff = diff;
         }
 
+        /// <summary>
+        /// Runs a review and writes its Markdown report, returning the result. Keeps
+        /// report generation out of the core <see cref="Review"/> flow.
+        /// </summary>
+        public static ReviewResult ReviewAndReport(ILlmClient client, string diff)
+        {
+            var result = new CodeReviewer(client, diff).Review();
+            var reportPath = ReportGenerator.Save(result);
+            System.Console.WriteLine($"Report saved to {reportPath}");
+            return result;
+        }
+
         public ReviewResult Review()
         {
             var diff = _diff;
@@ -93,16 +105,21 @@ namespace CodeReviewerAgent.Core
                 findings_dropped = droppedFindings,
             });
 
-            var reviewResult = result with { Findings = findings };
+            var reviewResult = result with
+            {
+                Findings = findings,
+                Engine = engine,
+                Model = response?.Model,
+                PromptVersion = promptVersion,
+                Cost = cost,
+                LatencyMs = stopwatch.ElapsedMilliseconds,
+                InputTokens = inputTokens,
+                OutputTokens = outputTokens,
+                Diff = diff,
+            };
 
-            // Write the validated review (with derived line numbers) to a file,
-            // plus a human-readable Markdown report.
+            // Write the validated review (with derived line numbers) to a file.
             WriteReviewToFile(reviewResult);
-            var metadata = new ReportMetadata(
-                engine, response?.Model, promptVersion, cost, stopwatch.ElapsedMilliseconds,
-                inputTokens, outputTokens, diff);
-            var reportPath = ReportGenerator.Save(reviewResult, metadata);
-            System.Console.WriteLine($"Report saved to {reportPath}");
 
             return reviewResult;
         }

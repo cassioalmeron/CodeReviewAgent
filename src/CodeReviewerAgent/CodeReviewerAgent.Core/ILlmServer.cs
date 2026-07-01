@@ -14,12 +14,13 @@ namespace CodeReviewerAgent.Core
     {
         private readonly HttpClient _http;
         private readonly string _model;
-        public AnthropicClient()
+        public AnthropicClient(string? model = null)
         {
             var apiKey = Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY")
                 ?? throw new InvalidOperationException("ANTHROPIC_API_KEY is not configured. Add it to the .env file.");
 
-            _model = Environment.GetEnvironmentVariable("ANTHROPIC_MODEL")
+            _model = model
+                ?? Environment.GetEnvironmentVariable("ANTHROPIC_MODEL")
                 ?? throw new InvalidOperationException("ANTHROPIC_MODEL is not configured. Add it to the .env file.");
 
             _http = new HttpClient { BaseAddress = new Uri("https://api.anthropic.com") };

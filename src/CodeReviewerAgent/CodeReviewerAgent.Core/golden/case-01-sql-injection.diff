@@ -1,0 +1,12 @@
+diff --git a/src/Data/UserRepository.cs b/src/Data/UserRepository.cs
+index a1b2c3d..e4f5a6b 100644
+--- a/src/Data/UserRepository.cs
++++ b/src/Data/UserRepository.cs
+@@ -11,5 +11,6 @@ public class UserRepository
+     public User? FindByName(string name)
+     {
+-        return _users.FirstOrDefault(u => u.Name == name);
++        var sql = "SELECT * FROM Users WHERE Name = '" + name + "'";
++        return _db.Query<User>(sql).FirstOrDefault();
+     }
+ }

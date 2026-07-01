@@ -1,0 +1,37 @@
+[
+  {
+    "name": "sql-injection",
+    "diff": "case-01-sql-injection.diff",
+    "file": "src/Data/UserRepository.cs",
+    "category": "Security",
+    "keywords": ["injection", "sql", "parameter"]
+  },
+  {
+    "name": "hardcoded-secret",
+    "diff": "case-02-hardcoded-secret.diff",
+    "file": "src/Services/PaymentClient.cs",
+    "category": "Security",
+    "keywords": ["secret", "hardcoded", "key", "credential"]
+  },
+  {
+    "name": "null-dereference",
+    "diff": "case-03-null-dereference.diff",
+    "file": "src/Services/OrderService.cs",
+    "category": "Bug",
+    "keywords": ["null"]
+  },
+  {
+    "name": "off-by-one",
+    "diff": "case-04-off-by-one.diff",
+    "file": "src/Utils/ArrayHelper.cs",
+    "category": "Bug",
+    "keywords": ["off-by-one", "out of range", "index", "bounds", "length"]
+  },
+  {
+    "name": "quadratic-loop",
+    "diff": "case-05-quadratic-loop.diff",
+    "file": "src/Services/DuplicateFinder.cs",
+    "category": "Performance",
+    "keywords": ["nested", "quadratic", "performance", "hashset", "o(n"]
+  }
+]

@@ -1,0 +1,14 @@
+diff --git a/src/Services/DuplicateFinder.cs b/src/Services/DuplicateFinder.cs
+index 4d5e6f7..8a9b0c1 100644
+--- a/src/Services/DuplicateFinder.cs
++++ b/src/Services/DuplicateFinder.cs
+@@ -6,4 +6,9 @@ public class DuplicateFinder
+     public bool HasDuplicates(List<string> items)
+     {
+-        return items.Distinct().Count() != items.Count;
++        for (var i = 0; i < items.Count; i++)
++            for (var j = 0; j < items.Count; j++)
++                if (i != j && items[i] == items[j])
++                    return true;
++        return false;
+     }

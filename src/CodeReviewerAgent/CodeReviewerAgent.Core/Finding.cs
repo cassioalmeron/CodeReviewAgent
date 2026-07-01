@@ -33,9 +33,20 @@ namespace CodeReviewerAgent.Core
         int? Line = null);
 
     /// <summary>
-    /// The structured result of a review: an overall summary plus the findings.
+    /// The structured result of a review: an overall summary and the findings, plus
+    /// the run metadata (engine, model, prompt version, cost, latency, token usage).
+    /// The metadata fields default to empty so the record can be deserialized straight
+    /// from the LLM's <c>{ summary, findings }</c> output and enriched afterwards.
     /// </summary>
     public record ReviewResult(
         string? Summary,
-        List<Finding>? Findings);
+        List<Finding>? Findings,
+        string? Engine = null,
+        string? Model = null,
+        string? PromptVersion = null,
+        decimal Cost = 0m,
+        long LatencyMs = 0,
+        int InputTokens = 0,
+        int OutputTokens = 0,
+        string? Diff = null);
 }
