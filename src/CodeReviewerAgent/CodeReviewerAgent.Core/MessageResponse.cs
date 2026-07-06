@@ -16,6 +16,14 @@ namespace CodeReviewerAgent.Core
 
         [JsonPropertyName("usage")]
         public Usage? Usage { get; set; }
+
+        /// <summary>
+        /// Real cost (USD) reported by the provider, when available (Claude Code).
+        /// Null for engines that don't report it — the cost is then estimated from tokens.
+        /// Filled by the client adapter, never deserialized from the API payload.
+        /// </summary>
+        [JsonIgnore]
+        public decimal? Cost { get; set; }
     }
 
     public sealed class Usage

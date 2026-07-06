@@ -89,7 +89,8 @@ namespace CodeReviewerAgent.Core
             var inputTokens = response?.Usage?.InputTokens ?? 0;
             var outputTokens = response?.Usage?.OutputTokens ?? 0;
             var engine = Environment.GetEnvironmentVariable("LLM_ENGINE");
-            var cost = CostCalculator.Estimate(engine, response?.Model, inputTokens, outputTokens);
+            var cost = response?.Cost
+                ?? CostCalculator.Estimate(engine, response?.Model, inputTokens, outputTokens);
             Logger.Log(new
             {
                 timestamp = DateTime.UtcNow,
