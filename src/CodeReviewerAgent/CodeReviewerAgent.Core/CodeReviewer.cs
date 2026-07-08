@@ -42,7 +42,8 @@ namespace CodeReviewerAgent.Core
 
         public ReviewResult Review()
         {
-            var diff = _diff;
+            // Drop Markdown files: they are prose, not code we want reviewed.
+            var diff = DiffFilter.ExcludeMarkdown(_diff);
             if (string.IsNullOrWhiteSpace(diff))
             {
                 System.Console.WriteLine("No changes to review.");

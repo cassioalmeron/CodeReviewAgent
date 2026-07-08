@@ -18,6 +18,24 @@ namespace CodeReviewerAgent.Tests
         }
 
         [Fact]
+        public void Review_WithOnlyMarkdownDiff_DoesNotCallClientAndReturnsNoFindings()
+        {
+            var diff = string.Join("\n",
+                "diff --git a/Readme.md b/Readme.md",
+                "--- a/Readme.md",
+                "+++ b/Readme.md",
+                "@@ -1,1 +1,2 @@",
+                " existing",
+                "+New docs line.");
+            var client = new FakeLlmClient("{}");
+
+            var result = new CodeReviewer(client, diff).Review();
+
+            Assert.Null(client.LastRequestBody);
+            Assert.Empty(result.Findings!);
+        }
+
+        [Fact]
         public void Review_WithValidDiff_DerivesLineFromSnippetAndKeepsGroundedFinding()
         {
             var diff = string.Join("\n",

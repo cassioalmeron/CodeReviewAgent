@@ -1,5 +1,4 @@
-﻿using System.Text;
-using System.Text.Json;
+﻿using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 
@@ -23,7 +22,11 @@ namespace CodeReviewerAgent.Core
                 ?? Environment.GetEnvironmentVariable("ANTHROPIC_MODEL")
                 ?? throw new InvalidOperationException("ANTHROPIC_MODEL is not configured. Add it to the .env file.");
 
-            _http = new HttpClient { BaseAddress = new Uri("https://api.anthropic.com") };
+            _http = new HttpClient
+            {
+                BaseAddress = new Uri("https://api.anthropic.com"),
+                Timeout = TimeSpan.FromSeconds(120),
+            };
             _http.DefaultRequestHeaders.Add("x-api-key", apiKey);
             _http.DefaultRequestHeaders.Add("anthropic-version", "2023-06-01");
         }
@@ -49,9 +52,7 @@ namespace CodeReviewerAgent.Core
             }
 
             var json = node.ToJsonString();
-            using var content = new StringContent(json, Encoding.UTF8, "application/json");
-            var response = _http.PostAsync("/v1/messages", content).GetAwaiter().GetResult();
-            var responseJson = response.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+            var (response, responseJson) = HttpResilience.Post(_http, "/v1/messages", json);
             if (!response.IsSuccessStatusCode)
                 throw new HttpRequestException($"Claude request failed ({(int)response.StatusCode}): {responseJson}");
             return JsonSerializer.Deserialize<MessageResponse>(responseJson);
@@ -69,7 +70,7 @@ namespace CodeReviewerAgent.Core
                 ?? throw new InvalidOperationException("OLLAMA_MODEL is not configured. Add it to the .env file.");
 
             var host = Environment.GetEnvironmentVariable("OLLAMA_HOST") ?? "http://localhost:11434";
-            _http = new HttpClient { BaseAddress = new Uri(host) };
+            _http = new HttpClient { BaseAddress = new Uri(host), Timeout = TimeSpan.FromSeconds(120) };
         }
 
         public MessageResponse Request(object requestBody)
@@ -106,9 +107,7 @@ namespace CodeReviewerAgent.Core
                 ollamaRequest["format"] = JsonNode.Parse(schema.GetRawText());
 
             var json = ollamaRequest.ToJsonString();
-            using var content = new StringContent(json, Encoding.UTF8, "application/json");
-            var response = _http.PostAsync("/api/chat", content).GetAwaiter().GetResult();
-            var responseJson = response.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+            var (response, responseJson) = HttpResilience.Post(_http, "/api/chat", json);
             if (!response.IsSuccessStatusCode)
                 throw new HttpRequestException($"Ollama request failed ({(int)response.StatusCode}): {responseJson}");
 

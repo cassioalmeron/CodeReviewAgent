@@ -27,7 +27,19 @@ if (args is ["all", ..])
 }
 
 IDiffSource diffSource = DiffSourceFactory.Create(args);
-CodeReviewer.ReviewAndReport(client, diffSource.GetDiff());
+try
+{
+    var review = CodeReviewer.ReviewAndReport(client, diffSource.GetDiff());
+
+    // Publish the review to the PR when asked: `pr <n> --publish`.
+    if (args is ["pr", var prArg, ..] && args.Contains("--publish") && int.TryParse(prArg, out var prNumber))
+        PrPublisher.Publish(prNumber, review);
+}
+catch (Exception ex) when (args is ["pr", ..])
+{
+    // Graceful skip: the agent must never block the PR. Log to stderr and exit cleanly.
+    Console.Error.WriteLine($"Review skipped due to an error: {ex.Message}");
+}
 
 static void RunGoldenSet(ILlmClient executor)
 {

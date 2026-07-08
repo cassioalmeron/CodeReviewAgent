@@ -80,10 +80,16 @@ namespace CodeReviewerAgent.Core
             return Run(fileName, startInfo, string.Join(' ', arguments), input);
         }
 
+        private const int TimeoutMs = 120_000;
+
         private static string Run(string fileName, ProcessStartInfo startInfo, string argumentsForError, string? input = null)
         {
             using var process = Process.Start(startInfo)
                 ?? throw new InvalidOperationException($"Failed to start {fileName}.");
+
+            // Drain both streams asynchronously so a full pipe buffer can't deadlock the wait.
+            var outputTask = process.StandardOutput.ReadToEndAsync();
+            var errorTask = process.StandardError.ReadToEndAsync();
 
             if (input is not null)
             {
@@ -91,9 +97,15 @@ namespace CodeReviewerAgent.Core
                 process.StandardInput.Close();
             }
 
-            var output = process.StandardOutput.ReadToEnd();
-            var error = process.StandardError.ReadToEnd();
-            process.WaitForExit();
+            if (!process.WaitForExit(TimeoutMs))
+            {
+                process.Kill(entireProcessTree: true);
+                throw new InvalidOperationException(
+                    $"`{fileName} {argumentsForError}` timed out after {TimeoutMs / 1000}s.");
+            }
+
+            var output = outputTask.GetAwaiter().GetResult();
+            var error = errorTask.GetAwaiter().GetResult();
 
             if (process.ExitCode != 0)
                 throw new InvalidOperationException($"`{fileName} {argumentsForError}` failed: {error}");
