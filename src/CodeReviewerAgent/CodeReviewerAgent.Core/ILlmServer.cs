@@ -9,32 +9,13 @@ namespace CodeReviewerAgent.Core
         MessageResponse Request(object requestBody);
     }
 
-    internal class AnthropicClient : ILlmClient
+    internal class AnthropicClient(IHttpTransport transport, string model) : ILlmClient
     {
-        private readonly HttpClient _http;
-        private readonly string _model;
-        public AnthropicClient(string? model = null)
-        {
-            var apiKey = Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY")
-                ?? throw new InvalidOperationException("ANTHROPIC_API_KEY is not configured. Add it to the .env file.");
-
-            _model = model
-                ?? Environment.GetEnvironmentVariable("ANTHROPIC_MODEL")
-                ?? throw new InvalidOperationException("ANTHROPIC_MODEL is not configured. Add it to the .env file.");
-
-            _http = new HttpClient
-            {
-                BaseAddress = new Uri("https://api.anthropic.com"),
-                Timeout = TimeSpan.FromSeconds(120),
-            };
-            _http.DefaultRequestHeaders.Add("x-api-key", apiKey);
-            _http.DefaultRequestHeaders.Add("anthropic-version", "2023-06-01");
-        }
         public MessageResponse Request(object requestBody)
         {
             // Override the model from the incoming body with the configured one.
             var node = JsonSerializer.SerializeToNode(requestBody)!.AsObject();
-            node["model"] = _model;
+            node["model"] = model;
 
             // Translate the neutral json_schema into Claude's structured-output format.
             if (node["json_schema"] is JsonNode schemaNode)
@@ -51,28 +32,14 @@ namespace CodeReviewerAgent.Core
                 };
             }
 
-            var json = node.ToJsonString();
-            var (response, responseJson) = HttpResilience.Post(_http, "/v1/messages", json);
-            if (!response.IsSuccessStatusCode)
-                throw new HttpRequestException($"Claude request failed ({(int)response.StatusCode}): {responseJson}");
-            return JsonSerializer.Deserialize<MessageResponse>(responseJson);
+            var body = transport.Post("/v1/messages", node.ToJsonString());
+            return JsonSerializer.Deserialize<MessageResponse>(body)
+                ?? throw new InvalidOperationException("Empty response from Claude.");
         }
     }
 
-    internal class OllamaClient : ILlmClient
+    internal class OllamaClient(IHttpTransport transport, string model) : ILlmClient
     {
-        private readonly HttpClient _http;
-        private readonly string _model;
-
-        public OllamaClient()
-        {
-            _model = Environment.GetEnvironmentVariable("OLLAMA_MODEL")
-                ?? throw new InvalidOperationException("OLLAMA_MODEL is not configured. Add it to the .env file.");
-
-            var host = Environment.GetEnvironmentVariable("OLLAMA_HOST") ?? "http://localhost:11434";
-            _http = new HttpClient { BaseAddress = new Uri(host), Timeout = TimeSpan.FromSeconds(120) };
-        }
-
         public MessageResponse Request(object requestBody)
         {
             // The incoming body uses the Anthropic shape; reuse its messages and
@@ -97,7 +64,7 @@ namespace CodeReviewerAgent.Core
 
             var ollamaRequest = new JsonObject
             {
-                ["model"] = _model,
+                ["model"] = model,
                 ["messages"] = JsonSerializer.SerializeToNode(messages),
                 ["stream"] = false,
             };
@@ -106,17 +73,14 @@ namespace CodeReviewerAgent.Core
             if (anthropic.TryGetProperty("json_schema", out var schema))
                 ollamaRequest["format"] = JsonNode.Parse(schema.GetRawText());
 
-            var json = ollamaRequest.ToJsonString();
-            var (response, responseJson) = HttpResilience.Post(_http, "/api/chat", json);
-            if (!response.IsSuccessStatusCode)
-                throw new HttpRequestException($"Ollama request failed ({(int)response.StatusCode}): {responseJson}");
+            var body = transport.Post("/api/chat", ollamaRequest.ToJsonString());
 
             // Ollama uses a different response shape, so deserialize it into its own
             // DTO and map it onto the shared MessageResponse.
-            var ollamaResponse = JsonSerializer.Deserialize<OllamaResponse>(responseJson);
+            var ollamaResponse = JsonSerializer.Deserialize<OllamaResponse>(body);
             return new MessageResponse
             {
-                Model = _model,
+                Model = model,
                 Content = [new ContentBlock { Type = "text", Text = ollamaResponse?.Message?.Content ?? string.Empty }],
                 Usage = new Usage
                 {
