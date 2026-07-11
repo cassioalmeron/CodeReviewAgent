@@ -3,16 +3,23 @@ using System.Diagnostics;
 namespace CodeReviewerAgent.Core
 {
     /// <summary>
-    /// Runs an external command and returns its standard output.
+    /// Runs an external command and returns its standard output. Commands run in the
+    /// repository directory given by the <c>REPO_DIR</c> environment variable, so diffs
+    /// and pull requests can be analyzed from another repository; when it is blank the
+    /// current working directory is used.
     /// </summary>
     internal static class ProcessRunner
     {
+        private static string RepoDirectory =>
+            Environment.GetEnvironmentVariable("REPO_DIR") ?? "";
+
         public static string Run(string fileName, string arguments)
         {
             var startInfo = new ProcessStartInfo
             {
                 FileName = fileName,
                 Arguments = arguments,
+                WorkingDirectory = RepoDirectory,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
@@ -31,6 +38,7 @@ namespace CodeReviewerAgent.Core
             var startInfo = new ProcessStartInfo
             {
                 FileName = fileName,
+                WorkingDirectory = RepoDirectory,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
@@ -42,10 +50,47 @@ namespace CodeReviewerAgent.Core
             return Run(fileName, startInfo, string.Join(' ', arguments));
         }
 
-        private static string Run(string fileName, ProcessStartInfo startInfo, string argumentsForError)
+        /// <summary>
+        /// Runs an external command with each argument passed separately, feeding
+        /// <paramref name="input"/> to its standard input. Used to pass large payloads
+        /// (e.g. a diff) that would overflow the command-line length limit.
+        /// <paramref name="workingDirectory"/> overrides the repository directory — pass a
+        /// neutral path when the command must not pick up the repository's local config.
+        /// <paramref name="removeEnvironmentVariables"/> are dropped from the child's
+        /// environment (e.g. an API key that must not override a subscription login).
+        /// </summary>
+        public static string RunWithInput(string fileName, string input, string workingDirectory,
+            IReadOnlyCollection<string> removeEnvironmentVariables, string[] arguments)
+        {
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = fileName,
+                WorkingDirectory = workingDirectory,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            foreach (var argument in arguments)
+                startInfo.ArgumentList.Add(argument);
+            foreach (var name in removeEnvironmentVariables)
+                startInfo.Environment.Remove(name);
+
+            return Run(fileName, startInfo, string.Join(' ', arguments), input);
+        }
+
+        private static string Run(string fileName, ProcessStartInfo startInfo, string argumentsForError, string? input = null)
         {
             using var process = Process.Start(startInfo)
                 ?? throw new InvalidOperationException($"Failed to start {fileName}.");
+
+            if (input is not null)
+            {
+                process.StandardInput.Write(input);
+                process.StandardInput.Close();
+            }
+
             var output = process.StandardOutput.ReadToEnd();
             var error = process.StandardError.ReadToEnd();
             process.WaitForExit();

@@ -11,8 +11,10 @@ namespace CodeReviewerAgent.Core
             {
                 "ollama" => new OllamaClient(),
                 "claude" => new AnthropicClient(),
+                "claude-code" => new ClaudeCodeClient(),
+                "claude-cli" => new ClaudeCliClient(),
                 _ => throw new InvalidOperationException(
-                    $"Unknown LLM_ENGINE '{engine}'. Supported values: 'ollama', 'claude'."),
+                    $"Unknown LLM_ENGINE '{engine}'. Supported values: 'ollama', 'claude', 'claude-code', 'claude-cli'."),
             };
         }
     }

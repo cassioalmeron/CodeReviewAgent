@@ -7,6 +7,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="ClaudeAgentSdk" Version="0.2.1" />
+  </ItemGroup>
+
+  <ItemGroup>
     <None Include="prompts\**\*.md" CopyToOutputDirectory="PreserveNewest" />
     <None Include="golden\**\*" CopyToOutputDirectory="PreserveNewest" />
     <None Include="rubrics\**\*.md" CopyToOutputDirectory="PreserveNewest" />

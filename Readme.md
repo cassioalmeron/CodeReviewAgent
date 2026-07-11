@@ -9,14 +9,18 @@ LLM with a versioned system prompt and a JSON schema, and gets back a structured
 list of findings — each with file, line, severity, category, problem, and
 suggestion. Every run is logged (model, prompt version, tokens, cost, latency).
 
+It also ships an **evaluation harness** to measure review quality with method, not
+by eye: a deterministic **golden set** (does the agent catch known problems?) and
+an **LLM-as-judge** (are the comments good?).
+
 ## Tech stack
 
 - .NET 10 solution split into three projects (Core / Console / Tests)
-- **Core** as a reusable class library — the whole review flow lives here, so it can
-  be driven by more than one front end (console, web, desktop, MCP)
+- **Core** is a reusable class library — the whole review and evaluation flow lives
+  here, so it can be driven by more than one front end (console, web, desktop, MCP)
 - Raw `HttpClient` calls to the LLM APIs (no SDK)
 - Pluggable **LLM engines** behind `ILlmClient` (Ollama / Claude)
-- Pluggable **diff sources** behind `IDiffSource` (local HEAD / pull request)
+- Pluggable **diff sources** behind `IDiffSource` (local / staged / files / pull request)
 - Native **structured output** (JSON schema) → findings as C# records
 - xUnit tests over the flow with fake `ILlmClient` / `IDiffSource` implementations
 
@@ -24,41 +28,39 @@ suggestion. Every run is logged (model, prompt version, tokens, cost, latency).
 
 ```
 src/CodeReviewerAgent/
-├── CodeReviewerAgent.slnx               # Solution: Core + Console + Tests
-│
-├── CodeReviewerAgent.Core/              # Class library — the reusable review flow
-│   ├── CodeReviewer.cs                  # Orchestrates: get diff → call LLM → parse → display/log/save
+├── CodeReviewerAgent.Core/              # Class library — review + evaluation flow
+│   ├── CodeReviewer.cs                  # Review pipeline: diff → LLM → parse → ground → log/save
 │   ├── ILlmServer.cs                    # ILlmClient + AnthropicClient + OllamaClient
 │   ├── LlmClientFactory.cs              # Picks the LLM client based on LLM_ENGINE
 │   ├── MessageResponse.cs               # Neutral LLM response shape (model, content, usage)
-│   ├── IDiffSource.cs                   # Diff source strategy
-│   ├── DiffSourceFactory.cs             # Picks the diff source based on the CLI args
-│   ├── LocalDiffSource.cs               # Local repo: staged if any, else git diff HEAD
-│   ├── StagedDiffSource.cs              # git diff --staged
-│   ├── FilesDiffSource.cs               # git diff HEAD -- <paths>
-│   ├── PullRequestDiffSource.cs         # gh pr diff <number>
+│   ├── IDiffSource.cs / *DiffSource.cs  # Diff source strategy (local/staged/files/pr) + factory
 │   ├── ProcessRunner.cs                 # Runs external commands (git / gh)
+│   ├── DiffParser.cs                    # Parses a unified diff into files/hunks/lines
+│   ├── FindingValidator.cs             # Grounds findings to added lines; derives the line number
 │   ├── Finding.cs                       # Finding + ReviewResult records, Severity/Category enums
 │   ├── CostCalculator.cs                # Per-model cost estimate (Ollama = free)
 │   ├── Logger.cs                        # Appends JSON log lines (JSONL)
+│   ├── ReportGenerator.cs              # Markdown review report
+│   ├── GoldenEvaluator.cs              # Golden set: detection measurement (computational layer)
+│   ├── Judge.cs                         # LLM-as-judge: quality scoring (inferential layer)
+│   ├── JudgeRunner.cs / JudgeReportGenerator.cs  # Drives + reports the judge
 │   ├── EnvLoader.cs                     # Minimal .env loader
-│   └── prompts/
-│       └── review-v1.md                 # Versioned review system prompt
+│   ├── prompts/review-v1..v5.md         # Versioned review system prompts (v3 is the default)
+│   ├── rubrics/judge-v1.md              # Versioned judge rubric
+│   └── golden/                          # cases.json + the known-problem diffs
 │
 ├── CodeReviewerAgent.Console/           # Executable — thin entry point over Core
-│   ├── Program.cs                       # Load .env, pick engine + diff source, run review
+│   ├── Program.cs                       # Routes CLI args to review / eval / judge / all
 │   └── .env.example                     # Sample configuration
 │
-└── CodeReviewerAgent.Tests/             # xUnit tests over the review flow
-    ├── CodeReviewerTests.cs             # Empty diff / valid findings / invalid JSON
-    └── Fakes/                           # FakeLlmClient + FakeDiffSource
+└── CodeReviewerAgent.Tests/             # xUnit tests with fake ILlmClient / IDiffSource
 ```
 
 ## Prerequisites
 
 - .NET 10 SDK
 - For `LLM_ENGINE=ollama`: a running [Ollama](https://ollama.com) with the model pulled (`ollama pull qwen2.5-coder:7b`)
-- For `LLM_ENGINE=claude`: an Anthropic API key
+- For `LLM_ENGINE=claude` (and the judge): an Anthropic API key
 - For reviewing pull requests: the [GitHub CLI](https://cli.github.com) installed and authenticated (`gh auth login`)
 
 ## Configuration
@@ -67,19 +69,24 @@ Configuration is read from a `.env` file (gitignored). Copy `.env.example` and
 fill in your values:
 
 ```
-# Which engine to use: ollama | claude
-LLM_ENGINE=ollama
+# Which engine runs the review: ollama | claude
+LLM_ENGINE=claude
 
 # Which versioned prompt to use (prompts/review-<version>.md)
-PROMPT_VERSION=v1
+PROMPT_VERSION=v3
 
-# Claude (used when LLM_ENGINE=claude)
+# Claude (used when LLM_ENGINE=claude, and always for the judge)
 ANTHROPIC_API_KEY=your-key-here
-ANTHROPIC_MODEL=claude-opus-4-8
+ANTHROPIC_MODEL=claude-haiku-4-5
 
 # Ollama (used when LLM_ENGINE=ollama)
 OLLAMA_HOST=http://localhost:11434
 OLLAMA_MODEL=qwen2.5-coder:7b
+
+# Evaluation
+GOLDEN_RUNS=3                  # runs per golden case (averages out non-determinism)
+JUDGE_MODEL=claude-sonnet-4-6  # stronger than the executor, to avoid self-preference bias
+RUBRIC_VERSION=v1              # rubrics/judge-<version>.md
 ```
 
 > The API key is never committed — keep it only in your local `.env`.
@@ -89,83 +96,87 @@ OLLAMA_MODEL=qwen2.5-coder:7b
 ```bash
 cd src/CodeReviewerAgent/CodeReviewerAgent.Console
 
-dotnet run                       # review the local repo (staged if any, else git diff HEAD)
-dotnet run -- staged             # review only the staged changes (git diff --staged)
-dotnet run -- files A.cs B.cs    # review specific files (git diff HEAD -- A.cs B.cs)
-dotnet run -- pr 42              # review pull request #42 (gh pr diff 42)
+# Review a diff
+dotnet run                       # local repo (staged if any, else git diff HEAD)
+dotnet run -- staged             # git diff --staged
+dotnet run -- files A.cs B.cs    # git diff HEAD -- A.cs B.cs
+dotnet run -- pr 42              # pull request #42 (gh pr diff 42)
+
+# Evaluate the agent
+dotnet run -- eval               # golden set (detection) → writes reviews/eval-results.json
+dotnet run -- judge             # judge scores the persisted reviews
+dotnet run -- all                # eval + judge in a single run
 ```
 
-Example output:
+## How a review works
 
-```
-The diff adds a cost calculator but hardcodes pricing and lacks an unknown-model guard.
+`CodeReviewer` pipeline:
 
-Findings: 2
-  [Warning] CostCalculator.cs:12 (Maintainability) — Pricing is hardcoded -> Move prices to configuration
-  [Info] CostCalculator.cs:28 (Bug) — Unknown model silently returns 0 -> Log or surface unmapped models
-Review saved to .../reviews/review-2026-06-20-101500.json
-```
-
-## Tests
-
-```bash
-cd src/CodeReviewerAgent
-dotnet test            # runs CodeReviewerAgent.Tests
-```
-
-The tests exercise `CodeReviewer.Review()` end to end with fake `ILlmClient` and
-`IDiffSource` implementations (no network, no git) — covering the empty-diff,
-valid-findings, and invalid-JSON paths — plus `DiffSourceFactory`, asserting each
-CLI command routes to the right diff source.
-
-## How it works
-
-The review pipeline (`CodeReviewer.Review()`):
-
-1. **Get the diff** from the `IDiffSource` selected by `DiffSourceFactory` from the
-   CLI args (`LocalDiffSource` → staged or `git diff HEAD`, `StagedDiffSource` →
-   `git diff --staged`, `FilesDiffSource` → `git diff HEAD -- <paths>`, or
-   `PullRequestDiffSource` → `gh pr diff <n>`).
+1. **Get the diff** from the `IDiffSource` selected by `DiffSourceFactory` from the CLI args.
 2. **Build the request** with the versioned system prompt (`prompts/review-<version>.md`)
    and a JSON schema describing the expected output.
-3. **Call the LLM** through the selected `ILlmClient`. Each engine translates the
-   neutral request into its own API shape (Claude's `output_config.format`,
-   Ollama's `format`) and maps the response back to a shared `MessageResponse`.
-4. **Parse** the structured response into a `ReviewResult` (a summary plus a list
-   of `Finding` records).
-5. **Display, log, and save** — print the summary and findings, append a JSON log
-   line (engine, model, prompt version, tokens, cost, latency, findings count),
-   and write the structured review to `reviews/`.
+3. **Call the LLM** through the selected `ILlmClient`; each engine translates the
+   neutral request into its own API shape (Claude's `output_config.format`, Ollama's
+   `format`) and maps the response back to a shared `MessageResponse`.
+4. **Parse and ground** — deserialize into a `ReviewResult` (summary + findings), then
+   `FindingValidator` keeps only findings whose cited `code_snippet` matches an added
+   line of the diff, deriving the real line number from it.
+5. **Display, log, and save** — print, append a JSON log line, and write the review.
 
 ### Findings schema
 
 ```csharp
-record Finding(string File, int Line, Severity Severity, Category Category,
-               string Problem, string Suggestion);
+record Finding(string? File, string? CodeSnippet, Severity? Severity, Category? Category,
+               string? Problem, string? Suggestion, int? Line);
 
 enum Severity { Info, Warning, Critical }
 enum Category { Bug, Security, Performance, Style, Maintainability }
 ```
 
-### Structured log (JSONL)
+The model cites the affected line verbatim in `CodeSnippet`; `Line` is not trusted
+from the model but derived by matching the snippet against the parsed diff.
 
-Each run appends one JSON object to `logs/llm-<date>.jsonl`:
+## Evaluation
 
-```json
-{"timestamp":"2026-06-20T10:15:00Z","engine":"claude","model":"claude-haiku-4-5","prompt_version":"v1","input_tokens":820,"output_tokens":260,"total_tokens":1080,"cost_usd":0.0021,"latency_ms":3100,"findings_count":2}
+Two layers measure different things on the same diffs:
+
+### Golden set — *does the agent catch the problem?* (computational)
+
+`golden/` holds a handful of diffs, each with a known, planted problem and its
+expectations (`cases.json`). `GoldenEvaluator` runs the agent over each diff
+`GOLDEN_RUNS` times (LLM output is non-deterministic, so one run is a noisy sample)
+and checks, in code, whether some finding points at the right file and mentions an
+expected keyword. The result is a **detection rate** per case (e.g. `2/3`).
+
+### LLM-as-judge — *are the comments good?* (inferential)
+
+`Judge` sends the diff + the agent's review to a **stronger** model (`JUDGE_MODEL`)
+with a versioned rubric (`rubrics/judge-<version>.md`) and gets back structured
+scores (1–5) for **correctness, actionability, calibration, signal-to-noise**, plus
+an overall score and rationale. The judge is intentionally a different, stronger
+model than the executor to avoid **self-preference bias**.
+
+`eval` persists the reviews to `reviews/eval-results.json` so `judge` can score them
+without re-invoking the executor; `all` runs both in one go.
+
+### Iterating prompts
+
+Every run logs `prompt_version` and `model`, so prompt/model changes can be compared
+with numbers, not by eye — the golden set guards detection, the judge guards quality.
+
+## Tests
+
+```bash
+cd src/CodeReviewerAgent
+dotnet test
 ```
 
-Logging the prompt + model version per run makes it possible to compare results
-across iterations ("did prompt v2 find more than v1?").
+The tests exercise the flow end to end with fake `ILlmClient` and `IDiffSource`
+implementations (no network, no git), plus `DiffSourceFactory` routing.
 
 ## Extending
 
 - **New LLM engine** — implement `ILlmClient`, add a case in `LlmClientFactory`, document its env vars.
-- **New diff source** — implement `IDiffSource` (e.g. read a `.diff` file) and add a case in `DiffSourceFactory`.
-- **New prompt version** — add `prompts/review-v2.md` and set `PROMPT_VERSION=v2`.
-
-## Roadmap
-
-- [ ] Read the diff from a file / stdin (`FileDiffSource`)
-- [ ] Validate finding line numbers against the parsed diff
-- [ ] Post findings back as PR review comments
+- **New diff source** — implement `IDiffSource` and add a case in `DiffSourceFactory`.
+- **New prompt / rubric version** — add `prompts/review-v6.md` (or `rubrics/judge-v2.md`) and point the env var at it.
+- **New golden case** — add a `.diff` and an entry in `golden/cases.json`.
