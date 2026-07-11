@@ -1,5 +1,4 @@
-﻿using System.Text;
-using System.Text.Json;
+﻿using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 
@@ -10,28 +9,13 @@ namespace CodeReviewerAgent.Core
         MessageResponse Request(object requestBody);
     }
 
-    internal class AnthropicClient : ILlmClient
+    internal class AnthropicClient(IHttpTransport transport, string model) : ILlmClient
     {
-        private readonly HttpClient _http;
-        private readonly string _model;
-        public AnthropicClient(string? model = null)
-        {
-            var apiKey = Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY")
-                ?? throw new InvalidOperationException("ANTHROPIC_API_KEY is not configured. Add it to the .env file.");
-
-            _model = model
-                ?? Environment.GetEnvironmentVariable("ANTHROPIC_MODEL")
-                ?? throw new InvalidOperationException("ANTHROPIC_MODEL is not configured. Add it to the .env file.");
-
-            _http = new HttpClient { BaseAddress = new Uri("https://api.anthropic.com") };
-            _http.DefaultRequestHeaders.Add("x-api-key", apiKey);
-            _http.DefaultRequestHeaders.Add("anthropic-version", "2023-06-01");
-        }
         public MessageResponse Request(object requestBody)
         {
             // Override the model from the incoming body with the configured one.
             var node = JsonSerializer.SerializeToNode(requestBody)!.AsObject();
-            node["model"] = _model;
+            node["model"] = model;
 
             // Translate the neutral json_schema into Claude's structured-output format.
             if (node["json_schema"] is JsonNode schemaNode)
@@ -48,30 +32,14 @@ namespace CodeReviewerAgent.Core
                 };
             }
 
-            var json = node.ToJsonString();
-            using var content = new StringContent(json, Encoding.UTF8, "application/json");
-            var response = _http.PostAsync("/v1/messages", content).GetAwaiter().GetResult();
-            var responseJson = response.Content.ReadAsStringAsync().GetAwaiter().GetResult();
-            if (!response.IsSuccessStatusCode)
-                throw new HttpRequestException($"Claude request failed ({(int)response.StatusCode}): {responseJson}");
-            return JsonSerializer.Deserialize<MessageResponse>(responseJson);
+            var body = transport.Post("/v1/messages", node.ToJsonString());
+            return JsonSerializer.Deserialize<MessageResponse>(body)
+                ?? throw new InvalidOperationException("Empty response from Claude.");
         }
     }
 
-    internal class OllamaClient : ILlmClient
+    internal class OllamaClient(IHttpTransport transport, string model) : ILlmClient
     {
-        private readonly HttpClient _http;
-        private readonly string _model;
-
-        public OllamaClient()
-        {
-            _model = Environment.GetEnvironmentVariable("OLLAMA_MODEL")
-                ?? throw new InvalidOperationException("OLLAMA_MODEL is not configured. Add it to the .env file.");
-
-            var host = Environment.GetEnvironmentVariable("OLLAMA_HOST") ?? "http://localhost:11434";
-            _http = new HttpClient { BaseAddress = new Uri(host) };
-        }
-
         public MessageResponse Request(object requestBody)
         {
             // The incoming body uses the Anthropic shape; reuse its messages and
@@ -96,7 +64,7 @@ namespace CodeReviewerAgent.Core
 
             var ollamaRequest = new JsonObject
             {
-                ["model"] = _model,
+                ["model"] = model,
                 ["messages"] = JsonSerializer.SerializeToNode(messages),
                 ["stream"] = false,
             };
@@ -105,19 +73,14 @@ namespace CodeReviewerAgent.Core
             if (anthropic.TryGetProperty("json_schema", out var schema))
                 ollamaRequest["format"] = JsonNode.Parse(schema.GetRawText());
 
-            var json = ollamaRequest.ToJsonString();
-            using var content = new StringContent(json, Encoding.UTF8, "application/json");
-            var response = _http.PostAsync("/api/chat", content).GetAwaiter().GetResult();
-            var responseJson = response.Content.ReadAsStringAsync().GetAwaiter().GetResult();
-            if (!response.IsSuccessStatusCode)
-                throw new HttpRequestException($"Ollama request failed ({(int)response.StatusCode}): {responseJson}");
+            var body = transport.Post("/api/chat", ollamaRequest.ToJsonString());
 
             // Ollama uses a different response shape, so deserialize it into its own
             // DTO and map it onto the shared MessageResponse.
-            var ollamaResponse = JsonSerializer.Deserialize<OllamaResponse>(responseJson);
+            var ollamaResponse = JsonSerializer.Deserialize<OllamaResponse>(body);
             return new MessageResponse
             {
-                Model = _model,
+                Model = model,
                 Content = [new ContentBlock { Type = "text", Text = ollamaResponse?.Message?.Content ?? string.Empty }],
                 Usage = new Usage
                 {
@@ -144,5 +107,103 @@ namespace CodeReviewerAgent.Core
     {
         [JsonPropertyName("content")]
         public string? Content { get; set; }
+    }
+
+    internal class OpenAiClient(IHttpTransport transport, string model) : ILlmClient
+    {
+        public MessageResponse Request(object requestBody)
+        {
+            // The incoming body uses the Anthropic shape; translate to OpenAI's
+            // /v1/chat/completions request. The top-level "system" becomes a system message.
+            var anthropic = JsonSerializer.SerializeToElement(requestBody);
+
+            var messages = new List<object>();
+            if (anthropic.TryGetProperty("system", out var system) &&
+                system.ValueKind == JsonValueKind.String)
+            {
+                messages.Add(new { role = "system", content = system.GetString() });
+            }
+            foreach (var message in anthropic.GetProperty("messages").EnumerateArray())
+            {
+                messages.Add(new
+                {
+                    role = message.GetProperty("role").GetString(),
+                    content = message.GetProperty("content").GetString(),
+                });
+            }
+
+            var openAiRequest = new JsonObject
+            {
+                ["model"] = model,
+                ["messages"] = JsonSerializer.SerializeToNode(messages),
+            };
+
+            if (anthropic.TryGetProperty("max_tokens", out var maxTokens))
+                openAiRequest["max_completion_tokens"] = maxTokens.GetInt32();
+
+            // Structured output: OpenAI wraps the schema in response_format.json_schema (strict).
+            if (anthropic.TryGetProperty("json_schema", out var schema))
+            {
+                openAiRequest["response_format"] = new JsonObject
+                {
+                    ["type"] = "json_schema",
+                    ["json_schema"] = new JsonObject
+                    {
+                        ["name"] = "response",
+                        ["strict"] = true,
+                        ["schema"] = JsonNode.Parse(schema.GetRawText()),
+                    },
+                };
+            }
+
+            var body = transport.Post("/v1/chat/completions", openAiRequest.ToJsonString());
+
+            // Map OpenAI's response shape onto the shared MessageResponse.
+            var openAiResponse = JsonSerializer.Deserialize<OpenAiResponse>(body);
+            var content = openAiResponse?.Choices?.FirstOrDefault()?.Message?.Content ?? string.Empty;
+            return new MessageResponse
+            {
+                Model = openAiResponse?.Model ?? model,
+                Content = [new ContentBlock { Type = "text", Text = content }],
+                Usage = new Usage
+                {
+                    InputTokens = openAiResponse?.Usage?.PromptTokens ?? 0,
+                    OutputTokens = openAiResponse?.Usage?.CompletionTokens ?? 0,
+                },
+            };
+        }
+    }
+
+    internal sealed class OpenAiResponse
+    {
+        [JsonPropertyName("model")]
+        public string? Model { get; set; }
+
+        [JsonPropertyName("choices")]
+        public List<OpenAiChoice>? Choices { get; set; }
+
+        [JsonPropertyName("usage")]
+        public OpenAiUsage? Usage { get; set; }
+    }
+
+    internal sealed class OpenAiChoice
+    {
+        [JsonPropertyName("message")]
+        public OpenAiMessage? Message { get; set; }
+    }
+
+    internal sealed class OpenAiMessage
+    {
+        [JsonPropertyName("content")]
+        public string? Content { get; set; }
+    }
+
+    internal sealed class OpenAiUsage
+    {
+        [JsonPropertyName("prompt_tokens")]
+        public int? PromptTokens { get; set; }
+
+        [JsonPropertyName("completion_tokens")]
+        public int? CompletionTokens { get; set; }
     }
 }

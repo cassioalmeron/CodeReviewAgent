@@ -125,7 +125,7 @@ namespace CodeReviewerAgent.Core
 
         private static void AppendSharedDiff(StringBuilder report, string? diff)
         {
-            var fileDiffs = SplitDiffByFile(diff);
+            var fileDiffs = DiffSplitter.ByFile(diff);
             if (fileDiffs.Count == 0)
                 return;
 
@@ -143,7 +143,7 @@ namespace CodeReviewerAgent.Core
         }
 
         private static string DiffFileList(string? diff) =>
-            string.Join(", ", SplitDiffByFile(diff).Select(d => d.Path));
+            string.Join(", ", DiffSplitter.ByFile(diff).Select(d => d.Path));
 
         private static void AppendReview(
             StringBuilder report, ReviewResult result, Func<ReviewResult, string?>? noteFor = null)
@@ -156,7 +156,7 @@ namespace CodeReviewerAgent.Core
             }
 
             var findings = result.Findings ?? [];
-            var fileDiffs = SplitDiffByFile(result.Diff);
+            var fileDiffs = DiffSplitter.ByFile(result.Diff);
             var findingsByFile = findings
                 .GroupBy(f => f.File ?? "(unknown)")
                 .ToDictionary(g => g.Key, g => g.ToList());
@@ -284,59 +284,5 @@ namespace CodeReviewerAgent.Core
             }
         }
 
-        // Splits a unified diff into per-file blocks, keyed by the file path, preserving order.
-        private static List<(string Path, string Text)> SplitDiffByFile(string? diff)
-        {
-            var result = new List<(string Path, string Text)>();
-            if (string.IsNullOrWhiteSpace(diff))
-                return result;
-
-            var lines = diff.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
-            StringBuilder? current = null;
-            var path = "(unknown)";
-
-            void Flush()
-            {
-                if (current is not null)
-                    result.Add((path, current.ToString()));
-            }
-
-            foreach (var line in lines)
-            {
-                if (line.StartsWith("diff --git"))
-                {
-                    Flush();
-                    current = new StringBuilder();
-                    path = "(unknown)";
-                }
-
-                if (current is null)
-                    continue;
-
-                current.AppendLine(line);
-
-                // Prefer the new path; fall back to the old path for deletions.
-                if (line.StartsWith("+++ "))
-                    path = ParsePath(line[4..]) ?? path;
-                else if (line.StartsWith("--- ") && path == "(unknown)")
-                    path = ParsePath(line[4..]) ?? path;
-            }
-
-            Flush();
-            return result;
-        }
-
-        // Parses a path from a `---`/`+++` header line: drops trailing metadata,
-        // maps /dev/null to null, and strips the a//b/ prefix.
-        private static string? ParsePath(string raw)
-        {
-            var path = raw.Trim();
-            var tab = path.IndexOf('\t');
-            if (tab >= 0)
-                path = path[..tab];
-            if (path == "/dev/null")
-                return null;
-            return path.StartsWith("a/") || path.StartsWith("b/") ? path[2..] : path;
-        }
     }
 }

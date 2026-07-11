@@ -36,7 +36,7 @@ namespace CodeReviewerAgent.Core
 
             var judgeModel = Environment.GetEnvironmentVariable("JUDGE_MODEL") ?? "claude-sonnet-4-6";
             var rubricVersion = Environment.GetEnvironmentVariable("RUBRIC_VERSION") ?? "v1";
-            var judge = new Judge(new AnthropicClient(judgeModel), rubricVersion);
+            var judge = new Judge(LlmClientFactory.CreateClaude(judgeModel), rubricVersion);
 
             System.Console.WriteLine("=== Judge ===");
             // Group reviews by diff (= golden case); each diff was reviewed several times.
