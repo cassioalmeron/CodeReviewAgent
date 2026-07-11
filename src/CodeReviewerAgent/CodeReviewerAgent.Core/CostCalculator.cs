@@ -1,8 +1,9 @@
 namespace CodeReviewerAgent.Core
 {
     /// <summary>
-    /// Estimates the API cost (USD) of a request. Local engines (Ollama) are free;
-    /// Claude is priced per model based on input/output tokens.
+    /// Estimates the API cost (USD) of a request. Local (Ollama) and subscription
+    /// (claude-code / claude-cli) engines are free; metered engines (Claude, OpenAI)
+    /// are priced per model based on input/output tokens.
     /// </summary>
     public static class CostCalculator
     {
@@ -20,14 +21,35 @@ namespace CodeReviewerAgent.Core
                 ["claude-haiku-4-5"] = (1m, 5m),
             };
 
+        private static readonly Dictionary<string, (decimal Input, decimal Output)> OpenAiPricing =
+            new(StringComparer.OrdinalIgnoreCase)
+            {
+                ["gpt-4o-mini"] = (0.15m, 0.60m),
+                ["gpt-4o"] = (2.50m, 10m),
+                ["gpt-4.1-nano"] = (0.10m, 0.40m),
+                ["gpt-4.1-mini"] = (0.40m, 1.60m),
+                ["gpt-4.1"] = (2m, 8m),
+            };
+
         public static decimal Estimate(string? engine, string? model, int inputTokens, int outputTokens)
         {
-            // Local models (Ollama) have no API cost.
-            if (!string.Equals(engine, "claude", StringComparison.OrdinalIgnoreCase) || model is null)
+            if (model is null)
                 return 0m;
 
-            var match = ClaudePricing.FirstOrDefault(
-                p => model.Contains(p.Key, StringComparison.OrdinalIgnoreCase));
+            var pricing = engine?.ToLowerInvariant() switch
+            {
+                "claude" => ClaudePricing,
+                "openai" => OpenAiPricing,
+                _ => null, // Ollama (local) and subscription engines have no metered cost.
+            };
+            if (pricing is null)
+                return 0m;
+
+            // Longest matching key wins, so "gpt-4o" doesn't shadow "gpt-4o-mini".
+            var match = pricing
+                .Where(p => model.Contains(p.Key, StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(p => p.Key.Length)
+                .FirstOrDefault();
             if (match.Key is null)
                 return 0m;
 

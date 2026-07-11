@@ -18,8 +18,8 @@ an **LLM-as-judge** (are the comments good?).
 - .NET 10 solution split into three projects (Core / Console / Tests)
 - **Core** is a reusable class library — the whole review and evaluation flow lives
   here, so it can be driven by more than one front end (console, web, desktop, MCP)
-- Raw `HttpClient` calls to the LLM APIs (no SDK)
-- Pluggable **LLM engines** behind `ILlmClient` (Ollama / Claude)
+- HTTP engines call the LLM APIs with raw `HttpClient` (no SDK), behind a resilient transport (retry + exponential backoff on transient failures)
+- Pluggable **LLM engines** behind `ILlmClient` — Ollama / Claude / OpenAI over HTTP, plus Claude via your local CLI/subscription
 - Pluggable **diff sources** behind `IDiffSource` (local / staged / files / pull request)
 - Native **structured output** (JSON schema) → findings as C# records
 - xUnit tests over the flow with fake `ILlmClient` / `IDiffSource` implementations
@@ -30,7 +30,9 @@ an **LLM-as-judge** (are the comments good?).
 src/CodeReviewerAgent/
 ├── CodeReviewerAgent.Core/              # Class library — review + evaluation flow
 │   ├── CodeReviewer.cs                  # Review pipeline: diff → LLM → parse → ground → log/save
-│   ├── ILlmServer.cs                    # ILlmClient + AnthropicClient + OllamaClient
+│   ├── ILlmServer.cs                    # ILlmClient + Anthropic / Ollama / OpenAI HTTP clients
+│   ├── HttpTransport.cs                 # IHttpTransport + resilient decorator (retry / backoff)
+│   ├── ClaudeCliClient.cs / ClaudeCodeClient.cs  # Subscription engines (Claude CLI / SDK)
 │   ├── LlmClientFactory.cs              # Picks the LLM client based on LLM_ENGINE
 │   ├── MessageResponse.cs               # Neutral LLM response shape (model, content, usage)
 │   ├── IDiffSource.cs / *DiffSource.cs  # Diff source strategy (local/staged/files/pr) + factory
@@ -38,7 +40,7 @@ src/CodeReviewerAgent/
 │   ├── DiffParser.cs                    # Parses a unified diff into files/hunks/lines
 │   ├── FindingValidator.cs             # Grounds findings to added lines; derives the line number
 │   ├── Finding.cs                       # Finding + ReviewResult records, Severity/Category enums
-│   ├── CostCalculator.cs                # Per-model cost estimate (Ollama = free)
+│   ├── CostCalculator.cs                # Per-model cost (Claude + OpenAI; Ollama/subscription = free)
 │   ├── Logger.cs                        # Appends JSON log lines (JSONL)
 │   ├── ReportGenerator.cs              # Markdown review report
 │   ├── GoldenEvaluator.cs              # Golden set: detection measurement (computational layer)
@@ -61,6 +63,8 @@ src/CodeReviewerAgent/
 - .NET 10 SDK
 - For `LLM_ENGINE=ollama`: a running [Ollama](https://ollama.com) with the model pulled (`ollama pull qwen2.5-coder:7b`)
 - For `LLM_ENGINE=claude` (and the judge): an Anthropic API key
+- For `LLM_ENGINE=openai`: an OpenAI API key
+- For `LLM_ENGINE=claude-code` / `claude-cli`: a logged-in [Claude CLI](https://claude.com/claude-code) (uses your subscription, no API key)
 - For reviewing pull requests: the [GitHub CLI](https://cli.github.com) installed and authenticated (`gh auth login`)
 
 ## Configuration
@@ -69,7 +73,7 @@ Configuration is read from a `.env` file (gitignored). Copy `.env.example` and
 fill in your values:
 
 ```
-# Which engine runs the review: ollama | claude
+# Which engine runs the review: ollama | claude | openai | claude-code | claude-cli
 LLM_ENGINE=claude
 
 # Which versioned prompt to use (prompts/review-<version>.md)
@@ -82,6 +86,10 @@ ANTHROPIC_MODEL=claude-haiku-4-5
 # Ollama (used when LLM_ENGINE=ollama)
 OLLAMA_HOST=http://localhost:11434
 OLLAMA_MODEL=qwen2.5-coder:7b
+
+# OpenAI (used when LLM_ENGINE=openai)
+OPENAI_API_KEY=your-key-here
+OPENAI_MODEL=gpt-4o-mini
 
 # Evaluation
 GOLDEN_RUNS=3                  # runs per golden case (averages out non-determinism)
@@ -117,7 +125,9 @@ dotnet run -- all                # eval + judge in a single run
    and a JSON schema describing the expected output.
 3. **Call the LLM** through the selected `ILlmClient`; each engine translates the
    neutral request into its own API shape (Claude's `output_config.format`, Ollama's
-   `format`) and maps the response back to a shared `MessageResponse`.
+   `format`, OpenAI's `response_format.json_schema`) and maps the response back to a
+   shared `MessageResponse`. HTTP engines send through a resilient transport that
+   retries transient failures (429 / 5xx / network / timeout) with backoff.
 4. **Parse and ground** — deserialize into a `ReviewResult` (summary + findings), then
    `FindingValidator` keeps only findings whose cited `code_snippet` matches an added
    line of the diff, deriving the real line number from it.
@@ -176,7 +186,7 @@ implementations (no network, no git), plus `DiffSourceFactory` routing.
 
 ## Extending
 
-- **New LLM engine** — implement `ILlmClient`, add a case in `LlmClientFactory`, document its env vars.
+- **New LLM engine** — implement `ILlmClient`, add a case in `LlmClientFactory`, document its env vars. HTTP engines take an `IHttpTransport` and are wrapped with the resilient transport in the factory; CLI/SDK engines self-heal and skip it.
 - **New diff source** — implement `IDiffSource` and add a case in `DiffSourceFactory`.
 - **New prompt / rubric version** — add `prompts/review-v6.md` (or `rubrics/judge-v2.md`) and point the env var at it.
 - **New golden case** — add a `.diff` and an entry in `golden/cases.json`.

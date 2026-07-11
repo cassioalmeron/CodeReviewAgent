@@ -11,10 +11,11 @@ namespace CodeReviewerAgent.Core
             {
                 "ollama" => CreateOllama(),
                 "claude" => CreateClaude(),
+                "openai" => CreateOpenAi(),
                 "claude-code" => new ClaudeCodeClient(),
                 "claude-cli" => new ClaudeCliClient(),
                 _ => throw new InvalidOperationException(
-                    $"Unknown LLM_ENGINE '{engine}'. Supported values: 'ollama', 'claude', 'claude-code', 'claude-cli'."),
+                    $"Unknown LLM_ENGINE '{engine}'. Supported values: 'ollama', 'claude', 'openai', 'claude-code', 'claude-cli'."),
             };
         }
 
@@ -46,6 +47,23 @@ namespace CodeReviewerAgent.Core
 
             var http = new HttpClient { BaseAddress = new Uri(host), Timeout = TimeSpan.FromSeconds(120) };
             return new OllamaClient(Resilient(http), model);
+        }
+
+        private static ILlmClient CreateOpenAi()
+        {
+            var apiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY")
+                ?? throw new InvalidOperationException("OPENAI_API_KEY is not configured. Add it to the .env file.");
+            var model = Environment.GetEnvironmentVariable("OPENAI_MODEL")
+                ?? throw new InvalidOperationException("OPENAI_MODEL is not configured. Add it to the .env file.");
+
+            var http = new HttpClient
+            {
+                BaseAddress = new Uri("https://api.openai.com"),
+                Timeout = TimeSpan.FromSeconds(120),
+            };
+            http.DefaultRequestHeaders.Add("Authorization", $"Bearer {apiKey}");
+
+            return new OpenAiClient(Resilient(http), model);
         }
 
         // Composes the resilient HTTP transport shared by every HTTP-based client.
