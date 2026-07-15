@@ -12,13 +12,6 @@ namespace CodeReviewerAgent.Core
             Converters = { new JsonStringEnumConverter() },
         };
 
-        private static readonly JsonSerializerOptions OutputJsonOptions = new()
-        {
-            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-            WriteIndented = true,
-            Converters = { new JsonStringEnumConverter() },
-        };
-
         private readonly ILlmClient _client;
         private readonly string _diff;
 
@@ -81,7 +74,6 @@ namespace CodeReviewerAgent.Core
             // snippet matches an added line, deriving the real line number from it.
             var parsedDiff = DiffParser.Parse(diff);
             var findings = FindingValidator.Validate(rawFindings, parsedDiff);
-            var droppedFindings = rawFindings.Count - findings.Count;
 
             if (!string.IsNullOrWhiteSpace(result.Summary))
                 System.Console.WriteLine(result.Summary);
@@ -92,22 +84,10 @@ namespace CodeReviewerAgent.Core
             var engine = Environment.GetEnvironmentVariable("LLM_ENGINE");
             var cost = response?.Cost
                 ?? CostCalculator.Estimate(engine, response?.Model, inputTokens, outputTokens);
-            Logger.Log(new
-            {
-                timestamp = DateTime.UtcNow,
-                engine,
-                model = response?.Model,
-                prompt_version = promptVersion,
-                input_tokens = inputTokens,
-                output_tokens = outputTokens,
-                total_tokens = inputTokens + outputTokens,
-                cost_usd = cost,
-                latency_ms = stopwatch.ElapsedMilliseconds,
-                findings_count = findings.Count,
-                findings_dropped = droppedFindings,
-            });
 
-            var reviewResult = result with
+            // Return the validated review (with derived line numbers). Persistence is a
+            // separate step: the caller stores it through the repository.
+            return result with
             {
                 Findings = findings,
                 Engine = engine,
@@ -119,11 +99,6 @@ namespace CodeReviewerAgent.Core
                 OutputTokens = outputTokens,
                 Diff = diff,
             };
-
-            // Write the validated review (with derived line numbers) to a file.
-            WriteReviewToFile(reviewResult);
-
-            return reviewResult;
         }
 
         private static string LoadSystemPrompt(string version)
@@ -187,13 +162,5 @@ namespace CodeReviewerAgent.Core
                     $"  [{f.Severity}] {f.File}:{f.Line} ({f.Category}) — {f.Problem} -> {f.Suggestion}");
         }
 
-        private static void WriteReviewToFile(ReviewResult result)
-        {
-            var directory = Path.Combine(AppContext.BaseDirectory, "reviews");
-            Directory.CreateDirectory(directory);
-            var path = Path.Combine(directory, $"review-{DateTime.UtcNow:yyyy-MM-dd-HHmmss}.json");
-            File.WriteAllText(path, JsonSerializer.Serialize(result, OutputJsonOptions));
-            System.Console.WriteLine($"Review saved to {path}");
-        }
     }
 }

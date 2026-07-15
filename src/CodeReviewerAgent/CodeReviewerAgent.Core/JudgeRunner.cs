@@ -45,7 +45,7 @@ namespace CodeReviewerAgent.Core
             {
                 var label = FirstFile(group.Key);
                 var outcomes = group.Select(r => judge.Evaluate(r.Diff ?? "", r)).ToList();
-                groups.Add(new JudgeReportGroup(label, outcomes));
+                groups.Add(new JudgeReportGroup(label, group.Key, outcomes));
                 System.Console.WriteLine($"{label}: overall {Utils.FormatScore(Avg(outcomes, j => j.Overall))}");
             }
 

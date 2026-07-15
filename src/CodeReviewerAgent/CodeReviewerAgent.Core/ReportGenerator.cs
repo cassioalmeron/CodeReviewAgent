@@ -91,14 +91,18 @@ namespace CodeReviewerAgent.Core
                 report.AppendLine();
             }
 
-            // The diff and the engine/model/prompt are shared by every round over this
-            // diff, so they are shown once, up front.
-            AppendSharedDiff(report, rounds[0].Diff);
+            // The engine/model/prompt are shared by every round over this diff, so they are
+            // shown once, up front. For a single review each file shows its own diff inside
+            // its section; for multiple rounds the diff is shown once here so it isn't
+            // repeated per round.
+            var multipleRounds = rounds.Count > 1;
+            if (multipleRounds)
+                AppendSharedDiff(report, rounds[0].Diff);
             AppendConfiguration(report, rounds[0]);
 
-            if (rounds.Count == 1)
+            if (!multipleRounds)
             {
-                AppendReview(report, rounds[0], noteFor);
+                AppendReview(report, rounds[0], noteFor, includeDiff: true);
                 return;
             }
 
@@ -106,7 +110,7 @@ namespace CodeReviewerAgent.Core
             {
                 report.AppendLine($"# Round {i + 1}");
                 report.AppendLine();
-                AppendReview(report, rounds[i], noteFor);
+                AppendReview(report, rounds[i], noteFor, includeDiff: false);
             }
         }
 
@@ -146,7 +150,7 @@ namespace CodeReviewerAgent.Core
             string.Join(", ", DiffSplitter.ByFile(diff).Select(d => d.Path));
 
         private static void AppendReview(
-            StringBuilder report, ReviewResult result, Func<ReviewResult, string?>? noteFor = null)
+            StringBuilder report, ReviewResult result, Func<ReviewResult, string?>? noteFor, bool includeDiff)
         {
             var note = noteFor?.Invoke(result);
             if (!string.IsNullOrWhiteSpace(note))
@@ -187,7 +191,8 @@ namespace CodeReviewerAgent.Core
             foreach (var path in fileOrder)
             {
                 var fileFindings = findingsByFile.GetValueOrDefault(path, []);
-                AppendFile(report, path, fileFindings);
+                var diffText = includeDiff ? fileDiffs.FirstOrDefault(d => d.Path == path).Text : null;
+                AppendFile(report, path, fileFindings, diffText);
             }
         }
 
@@ -230,10 +235,22 @@ namespace CodeReviewerAgent.Core
             report.AppendLine();
         }
 
-        private static void AppendFile(StringBuilder report, string path, List<Finding> findings)
+        private static void AppendFile(
+            StringBuilder report, string path, List<Finding> findings, string? diffText)
         {
             report.AppendLine($"## `{path}`");
             report.AppendLine();
+
+            // The diff comes first, within the scope of the file it belongs to.
+            if (!string.IsNullOrWhiteSpace(diffText))
+            {
+                report.AppendLine("### Diff");
+                report.AppendLine();
+                report.AppendLine("```diff");
+                report.AppendLine(diffText.TrimEnd());
+                report.AppendLine("```");
+                report.AppendLine();
+            }
 
             report.AppendLine($"### Findings ({findings.Count})");
             report.AppendLine();

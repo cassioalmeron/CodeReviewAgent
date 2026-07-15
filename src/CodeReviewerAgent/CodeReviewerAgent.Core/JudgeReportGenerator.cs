@@ -2,8 +2,8 @@ using System.Text;
 
 namespace CodeReviewerAgent.Core
 {
-    /// <summary>A diff's judge outcomes, with a readable label (typically its first file).</summary>
-    public record JudgeReportGroup(string Label, IReadOnlyList<JudgeOutcome> Outcomes);
+    /// <summary>A diff's judge outcomes, with a readable label (typically its first file) and the reviewed diff.</summary>
+    public record JudgeReportGroup(string Label, string? Diff, IReadOnlyList<JudgeOutcome> Outcomes);
 
     /// <summary>
     /// Renders judge outcomes as a Markdown report: per-diff average scores and rationales,
@@ -26,7 +26,10 @@ namespace CodeReviewerAgent.Core
             foreach (var group in groups)
             {
                 var judgments = group.Outcomes.Select(o => o.Judgment).ToList();
-                AppendScores(report, $"## {group.Label}", judgments);
+                report.AppendLine($"## {group.Label}");
+                report.AppendLine();
+                AppendReviewedDiff(report, group.Diff);
+                AppendScores(report, judgments);
                 report.AppendLine(
                     $"_Cost: {Utils.Money(group.Outcomes.Sum(o => o.Cost))} · Latency: {group.Outcomes.Sum(o => o.LatencyMs)} ms_");
                 report.AppendLine();
@@ -36,7 +39,9 @@ namespace CodeReviewerAgent.Core
             var allOutcomes = groups.SelectMany(g => g.Outcomes).ToList();
             var allJudgments = allOutcomes.Select(o => o.Judgment).ToList();
             report.AppendLine("---");
-            AppendScores(report, "# Overall", allJudgments);
+            report.AppendLine("# Overall");
+            report.AppendLine();
+            AppendScores(report, allJudgments);
             AppendTotals(report, allOutcomes);
 
             return report.ToString();
@@ -55,10 +60,8 @@ namespace CodeReviewerAgent.Core
             return path;
         }
 
-        private static void AppendScores(StringBuilder report, string heading, IReadOnlyList<Judgment> judgments)
+        private static void AppendScores(StringBuilder report, IReadOnlyList<Judgment> judgments)
         {
-            report.AppendLine(heading);
-            report.AppendLine();
             report.AppendLine("| Criterion | Avg |");
             report.AppendLine("|-----------|-----|");
             report.AppendLine($"| Correctness | {Utils.FormatScore(Avg(judgments, j => j.Correctness))} |");
@@ -93,5 +96,104 @@ namespace CodeReviewerAgent.Core
 
         private static double Avg(IReadOnlyList<Judgment> judgments, Func<Judgment, int> selector) =>
             judgments.Count == 0 ? 0 : judgments.Average(selector);
+
+        // --- Store-backed report: the persisted evaluations of one analysis, with the reviewed diff ---
+
+        /// <summary>
+        /// Renders the judge report for one analysis's stored <see cref="JudgeEvaluation"/>s (one or
+        /// many), including the reviewed diff. Averages/totals are appended when there is more than one.
+        /// </summary>
+        public static string GenerateForAnalysis(
+            int analysisId, string? diff, IReadOnlyList<JudgeEvaluation> evaluations)
+        {
+            var report = new StringBuilder();
+            report.AppendLine("# Judge Report");
+            report.AppendLine();
+            report.AppendLine(
+                $"_Generated {DateTime.UtcNow:yyyy-MM-dd HH:mm} UTC — analysis {analysisId}, {evaluations.Count} evaluation(s)_");
+            report.AppendLine();
+
+            AppendReviewedDiff(report, diff);
+            foreach (var evaluation in evaluations)
+                AppendEvaluation(report, evaluation);
+            if (evaluations.Count > 1)
+                AppendAverages(report, evaluations);
+
+            return report.ToString();
+        }
+
+        /// <summary>
+        /// Generates the analysis judge report and writes it to the reports directory,
+        /// returning the file path.
+        /// </summary>
+        public static string SaveForAnalysis(
+            int analysisId, string? diff, IReadOnlyList<JudgeEvaluation> evaluations)
+        {
+            var directory = Path.Combine(AppContext.BaseDirectory, "reports");
+            Directory.CreateDirectory(directory);
+            var path = Path.Combine(directory, $"judge-{DateTime.UtcNow:yyyy-MM-dd-HHmmss}.md");
+            File.WriteAllText(path, GenerateForAnalysis(analysisId, diff, evaluations));
+            return path;
+        }
+
+        private static void AppendReviewedDiff(StringBuilder report, string? diff)
+        {
+            var fileDiffs = DiffSplitter.ByFile(diff);
+            if (fileDiffs.Count == 0)
+                return;
+
+            report.AppendLine("## Reviewed diff");
+            report.AppendLine();
+            foreach (var (path, text) in fileDiffs)
+            {
+                report.AppendLine($"### `{path}`");
+                report.AppendLine();
+                report.AppendLine("```diff");
+                report.AppendLine(text.TrimEnd());
+                report.AppendLine("```");
+                report.AppendLine();
+            }
+        }
+
+        private static void AppendEvaluation(StringBuilder report, JudgeEvaluation e)
+        {
+            report.AppendLine($"## Evaluation {e.Id}");
+            report.AppendLine();
+            report.AppendLine(
+                $"_Judge {e.JudgeModel ?? "—"}, rubric {e.RubricVersion ?? "—"} · {Utils.Money(e.Cost)} · {e.LatencyMs} ms_");
+            report.AppendLine();
+            report.AppendLine("| Criterion | Score |");
+            report.AppendLine("|-----------|-------|");
+            report.AppendLine($"| Correctness | {e.Correctness} |");
+            report.AppendLine($"| Actionability | {e.Actionability} |");
+            report.AppendLine($"| Calibration | {e.Calibration} |");
+            report.AppendLine($"| Signal-to-noise | {e.SignalToNoise} |");
+            report.AppendLine($"| **Overall** | **{e.Overall}** |");
+            report.AppendLine();
+            if (!string.IsNullOrWhiteSpace(e.Rationale))
+            {
+                report.AppendLine($"**Rationale:** {e.Rationale}");
+                report.AppendLine();
+            }
+        }
+
+        private static void AppendAverages(StringBuilder report, IReadOnlyList<JudgeEvaluation> evaluations)
+        {
+            report.AppendLine("---");
+            report.AppendLine("## Averages");
+            report.AppendLine();
+            report.AppendLine("| Criterion | Avg |");
+            report.AppendLine("|-----------|-----|");
+            report.AppendLine($"| Correctness | {Utils.FormatScore(evaluations.Average(e => e.Correctness))} |");
+            report.AppendLine($"| Actionability | {Utils.FormatScore(evaluations.Average(e => e.Actionability))} |");
+            report.AppendLine($"| Calibration | {Utils.FormatScore(evaluations.Average(e => e.Calibration))} |");
+            report.AppendLine($"| Signal-to-noise | {Utils.FormatScore(evaluations.Average(e => e.SignalToNoise))} |");
+            report.AppendLine($"| **Overall** | **{Utils.FormatScore(evaluations.Average(e => e.Overall))}** |");
+            report.AppendLine();
+            report.AppendLine(
+                $"_Total: {Utils.Money(evaluations.Sum(e => e.Cost))} · {evaluations.Sum(e => e.LatencyMs)} ms · " +
+                $"{evaluations.Sum(e => e.InputTokens + e.OutputTokens)} tokens_");
+            report.AppendLine();
+        }
     }
 }

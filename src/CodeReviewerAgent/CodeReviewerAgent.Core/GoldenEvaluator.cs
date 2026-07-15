@@ -34,7 +34,8 @@ namespace CodeReviewerAgent.Core
             Converters = { new JsonStringEnumConverter() },
         };
 
-        public static IReadOnlyList<GoldenCaseResult> Run(ILlmClient client)
+        public static IReadOnlyList<GoldenCaseResult> Run(
+            ILlmClient client, IDiffRepository diffs, IAnalysisRepository analyses)
         {
             var runs = int.TryParse(Environment.GetEnvironmentVariable("GOLDEN_RUNS"), out var n) && n > 0 ? n : 3;
 
@@ -50,6 +51,15 @@ namespace CodeReviewerAgent.Core
             {
                 var diff = File.ReadAllText(Path.Combine(directory, golden.Diff));
 
+                // The golden diff is stable: store it once (reused by content hash across runs),
+                // then attach each run's analysis to it.
+                var diffId = diffs.GetOrAdd(new Diff
+                {
+                    Content = diff,
+                    Source = $"golden:{golden.Name}",
+                    CreatedAt = DateTime.UtcNow,
+                });
+
                 // Run each case multiple times: the LLM output is non-deterministic, so a
                 // single run is a noisy sample. The detection rate (e.g. 2/3) is the signal.
                 var detections = 0;
@@ -58,6 +68,7 @@ namespace CodeReviewerAgent.Core
                 {
                     var review = new CodeReviewer(client, diff).Review();
                     reviews.Add(review);
+                    analyses.Save(Analysis.FromReview(diffId, review));
                     var findings = review.Findings ?? [];
 
                     if (findings.Any(f => Matches(f, golden)))

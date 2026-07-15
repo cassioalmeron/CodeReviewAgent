@@ -91,7 +91,7 @@ namespace CodeReviewerAgent.Tests
         }
 
         [Fact]
-        public void Generate_PutsTheDiffBeforeTheFindings()
+        public void Generate_PutsTheDiffInsideTheFileSectionBeforeTheFindings()
         {
             var diff = string.Join("\n",
                 "diff --git a/App.cs b/App.cs",
@@ -104,9 +104,12 @@ namespace CodeReviewerAgent.Tests
 
             var report = ReportGenerator.Generate(result);
 
-            var diffSection = report.IndexOf("## Analyzed diff");
-            var runDetails = report.IndexOf("## Run details");
-            Assert.True(diffSection >= 0 && runDetails > diffSection);
+            // No separate top-level diff section; the diff lives inside the file's scope.
+            Assert.DoesNotContain("## Analyzed diff", report);
+            var fileSection = report.IndexOf("## `App.cs`");
+            var diffSection = report.IndexOf("### Diff");
+            var findings = report.IndexOf("### Findings");
+            Assert.True(fileSection >= 0 && diffSection > fileSection && findings > diffSection);
             Assert.Contains("```diff", report);
         }
 
