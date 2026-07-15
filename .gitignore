@@ -11,6 +11,11 @@
 # Logs
 logs/
 
+# Local storage (SQLite databases)
+*.db
+*.db-shm
+*.db-wal
+
 # Docs
 docs/Todo.md
 docs/Insights
