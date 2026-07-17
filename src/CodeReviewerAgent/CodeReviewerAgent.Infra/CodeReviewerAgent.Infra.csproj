@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk.Web">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
@@ -7,16 +7,16 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <None Update=".env" CopyToOutputDirectory="PreserveNewest" Condition="Exists('.env')" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="10.0.9" />
+    <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.3" />
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Swashbuckle.AspNetCore" Version="9.0.6" />
+    <InternalsVisibleTo Include="CodeReviewerAgent.Tests" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\CodeReviewerAgent.Core\CodeReviewerAgent.Core.csproj" />
-    <ProjectReference Include="..\CodeReviewerAgent.Infra\CodeReviewerAgent.Infra.csproj" />
   </ItemGroup>
 
 </Project>

@@ -1,5 +1,5 @@
 using CodeReviewerAgent.Core;
-using CodeReviewerAgent.Core.Infra;
+using CodeReviewerAgent.Infra;
 using Xunit;
 
 namespace CodeReviewerAgent.Tests

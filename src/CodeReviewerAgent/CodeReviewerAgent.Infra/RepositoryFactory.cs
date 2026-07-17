@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
+using CodeReviewerAgent.Core;
 
-namespace CodeReviewerAgent.Core.Infra
+namespace CodeReviewerAgent.Infra
 {
     /// <summary>The repositories backing a run — same store, shared context when relational.</summary>
     public record Repositories(

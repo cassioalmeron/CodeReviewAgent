@@ -1,8 +1,9 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
+using CodeReviewerAgent.Core;
 
-namespace CodeReviewerAgent.Core.Infra
+namespace CodeReviewerAgent.Infra
 {
     /// <summary>
     /// Shared file-backed storage: entities are JSON files named

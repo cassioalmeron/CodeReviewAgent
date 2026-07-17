@@ -1,6 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 
-namespace CodeReviewerAgent.Core.Infra
+namespace CodeReviewerAgent.Infra
 {
     /// <summary>
     /// Configures the <see cref="ReviewDbContext"/> for one relational provider. Selecting a

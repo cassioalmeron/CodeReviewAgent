@@ -18,9 +18,11 @@ an **LLM-as-judge** (are the comments good?).
 
 ## Tech stack
 
-- .NET 10 backend split into four projects (Core / Console / Api / Tests)
+- .NET 10 backend split into five projects (Core / Infra / Console / Api / Tests)
 - **Core** is a reusable class library — the whole review and evaluation flow lives
   here, so it can be driven by more than one front end (console, web, desktop, MCP)
+- **Infra** is the only project depending on EF Core — persistence implementations
+  behind the repository contracts declared in Core
 - HTTP engines call the LLM APIs with raw `HttpClient` (no SDK), behind a resilient transport (retry + exponential backoff on transient failures)
 - Pluggable **LLM engines** behind `ILlmClient` — Ollama / Claude / OpenAI over HTTP, plus Claude via your local CLI/subscription
 - Pluggable **diff sources** behind `IDiffSource` (local / staged / files / pull request)
@@ -49,13 +51,6 @@ src/CodeReviewerAgent/
 │   ├── IRepository.cs                   # IDiff / IAnalysis / IJudgeEvaluation repository contracts
 │   ├── CostCalculator.cs                # Per-model cost (Claude + OpenAI; Ollama/subscription = free)
 │   ├── ReportGenerator.cs              # Markdown review report
-│   ├── Infra/                           # Persistence (EF Core dependency lives here for now)
-│   │   ├── FileRepository.cs            # File-backed repos (diffs/ + analyses/ + judgements/, id = max+1)
-│   │   ├── Hashing.cs                   # SHA-256 of diff content (content-addressed reuse)
-│   │   ├── ReviewDbContext.cs           # Single EF context; Fluent mapping; findings as JSON column
-│   │   ├── DbProviderStrategy.cs        # Sqlite / Postgres provider strategies (no if-chain)
-│   │   ├── EfRepository.cs              # EF-backed repos (one impl, both providers)
-│   │   └── RepositoryFactory.cs         # Picks File/EF from STORAGE; EnsureCreated for EF
 │   ├── GoldenEvaluator.cs              # Golden set: detection measurement; persists diffs + analyses
 │   ├── Judge.cs                         # LLM-as-judge: quality scoring (inferential layer)
 │   ├── JudgeRunner.cs / JudgeReportGenerator.cs  # Drives + reports the judge
@@ -63,6 +58,14 @@ src/CodeReviewerAgent/
 │   ├── prompts/review-v1..v5.md         # Versioned review system prompts (v3 is the default)
 │   ├── rubrics/judge-v1.md              # Versioned judge rubric
 │   └── golden/                          # cases.json + the known-problem diffs
+│
+├── CodeReviewerAgent.Infra/              # Persistence — the only project depending on EF Core
+│   ├── FileRepository.cs                # File-backed repos (diffs/ + analyses/ + judgements/, id = max+1)
+│   ├── Hashing.cs                        # SHA-256 of diff content (content-addressed reuse)
+│   ├── ReviewDbContext.cs                # Single EF context; Fluent mapping; findings as JSON column
+│   ├── DbProviderStrategy.cs             # Sqlite / Postgres provider strategies (no if-chain)
+│   ├── EfRepository.cs                   # EF-backed repos (one impl, both providers)
+│   └── RepositoryFactory.cs              # Picks File/EF from STORAGE; EnsureCreated for EF
 │
 ├── CodeReviewerAgent.Console/           # Executable — thin entry point over Core
 │   ├── Program.cs                       # Routes CLI args to diff / review / report / judge / judge-report / eval / all
@@ -199,7 +202,7 @@ run log.
 
 ### Storage
 
-Three id-addressable entities behind repositories (`Core/Infra/`) — `Diff (1) → Analysis (N) →
+Three id-addressable entities behind repositories (`CodeReviewerAgent.Infra/`) — `Diff (1) → Analysis (N) →
 JudgeEvaluation (N)` — so the review, analysis, report, and judge steps are all independent:
 
 - `STORAGE=files` — JSON files under `diffs/`, `analyses/`, `judgements/`; the next id is the
@@ -275,7 +278,7 @@ implementations (no network, no git), plus `DiffSourceFactory` routing.
 
 - **New LLM engine** — implement `ILlmClient`, add a case in `LlmClientFactory`, document its env vars. HTTP engines take an `IHttpTransport` and are wrapped with the resilient transport in the factory; CLI/SDK engines self-heal and skip it.
 - **New diff source** — implement `IDiffSource` and add a case in `DiffSourceFactory`.
-- **New storage backend** — implement the repository contracts (`IDiffRepository` / `IAnalysisRepository` / `IJudgeEvaluationRepository`) in `Infra/` and add a case in `RepositoryFactory`.
+- **New storage backend** — implement the repository contracts (`IDiffRepository` / `IAnalysisRepository` / `IJudgeEvaluationRepository`) in `CodeReviewerAgent.Infra/` and add a case in `RepositoryFactory`.
 - **New DB provider** — add an `IDbProviderStrategy` (e.g. `UseSqlServer`) and register it in `RepositoryFactory`; the context and model are unchanged.
 - **New prompt / rubric version** — add `prompts/review-v6.md` (or `rubrics/judge-v2.md`) and point the env var at it.
 - **New golden case** — add a `.diff` and an entry in `golden/cases.json`.

@@ -1,5 +1,6 @@
 <Solution>
   <Project Path="CodeReviewerAgent.Core/CodeReviewerAgent.Core.csproj" />
+  <Project Path="CodeReviewerAgent.Infra/CodeReviewerAgent.Infra.csproj" />
   <Project Path="CodeReviewerAgent.Console/CodeReviewerAgent.Console.csproj" />
   <Project Path="CodeReviewerAgent.Api/CodeReviewerAgent.Api.csproj" />
   <Project Path="CodeReviewerAgent.Tests/CodeReviewerAgent.Tests.csproj" />

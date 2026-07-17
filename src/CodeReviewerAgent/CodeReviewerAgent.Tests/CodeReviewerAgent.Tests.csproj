@@ -16,6 +16,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\CodeReviewerAgent.Core\CodeReviewerAgent.Core.csproj" />
+    <ProjectReference Include="..\CodeReviewerAgent.Infra\CodeReviewerAgent.Infra.csproj" />
   </ItemGroup>
 
 </Project>

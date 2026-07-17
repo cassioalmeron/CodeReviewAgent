@@ -1,4 +1,6 @@
-namespace CodeReviewerAgent.Core.Infra
+using CodeReviewerAgent.Core;
+
+namespace CodeReviewerAgent.Infra
 {
     /// <summary>
     /// EF Core-backed repositories. Both share one <see cref="ReviewDbContext"/>; the actual

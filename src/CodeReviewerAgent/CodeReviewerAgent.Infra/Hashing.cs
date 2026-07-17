@@ -1,7 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 
-namespace CodeReviewerAgent.Core.Infra
+namespace CodeReviewerAgent.Infra
 {
     /// <summary>Content hashing shared by the repositories (diff content-addressing).</summary>
     internal static class Hashing

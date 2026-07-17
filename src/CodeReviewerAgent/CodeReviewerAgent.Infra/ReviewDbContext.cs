@@ -2,8 +2,9 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.ChangeTracking;
+using CodeReviewerAgent.Core;
 
-namespace CodeReviewerAgent.Core.Infra
+namespace CodeReviewerAgent.Infra
 {
     /// <summary>
     /// The single EF Core context for both relational providers (SQLite / Postgres). The

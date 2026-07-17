@@ -1,5 +1,5 @@
 using CodeReviewerAgent.Core;
-using CodeReviewerAgent.Core.Infra;
+using CodeReviewerAgent.Infra;
 
 EnvLoader.Load(Path.Combine(AppContext.BaseDirectory, ".env"));
 
