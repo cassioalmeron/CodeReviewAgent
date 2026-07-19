@@ -21,10 +21,10 @@ an **LLM-as-judge** (are the comments good?).
 - .NET 10 backend split into five projects (Core / Infra / Console / Api / Tests)
 - **Core** is a reusable class library — the whole review and evaluation flow lives
   here, so it can be driven by more than one front end (console, web, desktop, MCP)
-- **Infra** is the only project depending on EF Core — persistence implementations
-  behind the repository contracts declared in Core
+- **Infra** holds the implementations behind Core's contracts — persistence (the only
+  project depending on EF Core) and the LLM engines + HTTP transport + `LlmClientFactory`
 - HTTP engines call the LLM APIs with raw `HttpClient` (no SDK), behind a resilient transport (retry + exponential backoff on transient failures)
-- Pluggable **LLM engines** behind `ILlmClient` — Ollama / Claude / OpenAI over HTTP, plus Claude via your local CLI/subscription
+- Pluggable **LLM engines** (in Infra) behind Core's `ILlmClient` — Ollama / Claude / OpenAI / OpenRouter over HTTP, plus Claude via your local CLI/subscription; the factory is instantiated by Console/Api, never by Core
 - Pluggable **diff sources** behind `IDiffSource` (local / staged / files / pull request)
 - Native **structured output** (JSON schema) → findings as C# records
 - xUnit tests over the flow with fake `ILlmClient` / `IDiffSource` implementations
@@ -37,11 +37,8 @@ an **LLM-as-judge** (are the comments good?).
 src/CodeReviewerAgent/
 ├── CodeReviewerAgent.Core/              # Class library — review + evaluation flow
 │   ├── CodeReviewer.cs                  # Review pipeline: diff → LLM → parse → ground (pure step, no I/O)
-│   ├── ILlmServer.cs                    # ILlmClient + Anthropic / Ollama / OpenAI HTTP clients
-│   ├── HttpTransport.cs                 # IHttpTransport + resilient decorator (retry / backoff)
-│   ├── ClaudeCliClient.cs / ClaudeCodeClient.cs  # Subscription engines (Claude CLI / SDK)
-│   ├── LlmClientFactory.cs              # Picks the LLM client based on LLM_ENGINE
-│   ├── MessageResponse.cs               # Neutral LLM response shape (model, content, usage)
+│   ├── ILlmClient.cs                    # LLM client contract (implementations live in Infra)
+│   ├── MessageResponse.cs               # Neutral LLM response shape (model, content, usage, optional real cost)
 │   ├── IDiffSource.cs / *DiffSource.cs  # Diff source strategy (local/staged/files/pr) + factory
 │   ├── ProcessRunner.cs                 # Runs external commands (git / gh)
 │   ├── DiffParser.cs                    # Parses a unified diff into files/hunks/lines
@@ -49,7 +46,7 @@ src/CodeReviewerAgent/
 │   ├── Finding.cs                       # Finding + ReviewResult records, Severity/Category enums
 │   ├── Entities.cs                      # Diff (+ ContentHash) / Analysis / JudgeEvaluation entities (1→N→N)
 │   ├── IRepository.cs                   # IDiff / IAnalysis / IJudgeEvaluation repository contracts
-│   ├── CostCalculator.cs                # Per-model cost (Claude + OpenAI; Ollama/subscription = free)
+│   ├── CostCalculator.cs                # Per-model cost (Claude + OpenAI; Ollama/subscription/OpenRouter = no estimate)
 │   ├── ReportGenerator.cs              # Markdown review report
 │   ├── GoldenEvaluator.cs              # Golden set: detection measurement; persists diffs + analyses
 │   ├── Judge.cs                         # LLM-as-judge: quality scoring (inferential layer)
@@ -59,13 +56,17 @@ src/CodeReviewerAgent/
 │   ├── rubrics/judge-v1.md              # Versioned judge rubric
 │   └── golden/                          # cases.json + the known-problem diffs
 │
-├── CodeReviewerAgent.Infra/              # Persistence — the only project depending on EF Core
+├── CodeReviewerAgent.Infra/              # Implementations behind Core's contracts (persistence + LLM engines)
 │   ├── FileRepository.cs                # File-backed repos (diffs/ + analyses/ + judgements/, id = max+1)
 │   ├── Hashing.cs                        # SHA-256 of diff content (content-addressed reuse)
 │   ├── ReviewDbContext.cs                # Single EF context; Fluent mapping; findings as JSON column
 │   ├── DbProviderStrategy.cs             # Sqlite / Postgres provider strategies (no if-chain)
 │   ├── EfRepository.cs                   # EF-backed repos (one impl, both providers)
-│   └── RepositoryFactory.cs              # Picks File/EF from STORAGE; EnsureCreated for EF
+│   ├── RepositoryFactory.cs             # Picks File/EF from STORAGE; EnsureCreated for EF
+│   ├── LlmClientFactory.cs              # Picks the ILlmClient from LLM_ENGINE (called by Console/Api)
+│   ├── HttpTransport.cs                 # IHttpTransport + resilient decorator (retry / backoff)
+│   ├── AnthropicClient.cs / OllamaClient.cs / OpenAiClient.cs / OpenRouterClient.cs  # HTTP engines
+│   └── ClaudeCliClient.cs / ClaudeCodeClient.cs / ClaudeCodeShared.cs  # Subscription engines (Claude CLI / SDK)
 │
 ├── CodeReviewerAgent.Console/           # Executable — thin entry point over Core
 │   ├── Program.cs                       # Routes CLI args to diff / review / report / judge / judge-report / eval / all
@@ -90,6 +91,7 @@ src/CodeReviewerAgent/
 - For `LLM_ENGINE=ollama`: a running [Ollama](https://ollama.com) with the model pulled (`ollama pull qwen2.5-coder:7b`)
 - For `LLM_ENGINE=claude` (and the judge): an Anthropic API key
 - For `LLM_ENGINE=openai`: an OpenAI API key
+- For `LLM_ENGINE=openrouter`: an [OpenRouter](https://openrouter.ai) API key
 - For `LLM_ENGINE=claude-code` / `claude-cli`: a logged-in [Claude CLI](https://claude.com/claude-code) (uses your subscription, no API key)
 - For reviewing pull requests: the [GitHub CLI](https://cli.github.com) installed and authenticated (`gh auth login`)
 - For the web viewer: Node.js (for `web/`)
@@ -100,7 +102,7 @@ Each runnable project reads its own `.env` file (gitignored). Copy the project's
 `.env.example` and fill in your values. This is `CodeReviewerAgent.Console`'s:
 
 ```
-# Which engine runs the review: ollama | claude | openai | claude-code | claude-cli
+# Which engine runs the review: ollama | claude | openai | openrouter | claude-code | claude-cli
 LLM_ENGINE=claude
 
 # Which versioned prompt to use (prompts/review-<version>.md)
@@ -122,6 +124,10 @@ OLLAMA_MODEL=qwen2.5-coder:7b
 # OpenAI (used when LLM_ENGINE=openai)
 OPENAI_API_KEY=your-key-here
 OPENAI_MODEL=gpt-4o-mini
+
+# OpenRouter (used when LLM_ENGINE=openrouter)
+OPENROUTER_API_KEY=your-key-here
+OPENROUTER_MODEL=openai/gpt-4o-mini
 
 # Evaluation
 GOLDEN_RUNS=3                  # runs per golden case (averages out non-determinism)
@@ -185,14 +191,18 @@ prompt/model); an analysis can have many judge evaluations.
 1. **Get the diff** from the `IDiffSource` selected by `DiffSourceFactory` from the CLI args.
 2. **Build the request** with the versioned system prompt (`prompts/review-<version>.md`)
    and a JSON schema describing the expected output.
-3. **Call the LLM** through the selected `ILlmClient`; each engine translates the
-   neutral request into its own API shape (Claude's `output_config.format`, Ollama's
-   `format`, OpenAI's `response_format.json_schema`) and maps the response back to a
-   shared `MessageResponse`. HTTP engines send through a resilient transport that
-   retries transient failures (429 / 5xx / network / timeout) with backoff.
+3. **Call the LLM** through the selected `ILlmClient` (implemented in Infra); each engine
+   translates the neutral request into its own API shape (Claude's `output_config.format`,
+   Ollama's `format`, OpenAI's / OpenRouter's `response_format.json_schema`) and maps the
+   response back to a shared `MessageResponse`. HTTP engines send through a resilient transport
+   that retries transient failures (429 / 5xx / network / timeout) with backoff.
 4. **Parse and ground** — deserialize into a `ReviewResult` (summary + findings), then
    `FindingValidator` keeps only findings whose cited `code_snippet` matches an added
    line of the diff, deriving the real line number from it.
+
+Cost is priced from a per-model table (`CostCalculator`) for the metered Claude / OpenAI engines.
+OpenRouter instead reports its real per-call cost (via `usage: { include: true }`, read back onto
+`MessageResponse.Cost`), so the pipeline uses that directly — `response.Cost ?? CostCalculator.Estimate(...)`.
 
 `Review()` is a **pure step**: it returns the `ReviewResult` and does no I/O. Persistence is a
 separate step — the Console layer stores the diff and the analysis through the repository
@@ -276,7 +286,7 @@ implementations (no network, no git), plus `DiffSourceFactory` routing.
 
 ## Extending
 
-- **New LLM engine** — implement `ILlmClient`, add a case in `LlmClientFactory`, document its env vars. HTTP engines take an `IHttpTransport` and are wrapped with the resilient transport in the factory; CLI/SDK engines self-heal and skip it.
+- **New LLM engine** — implement `ILlmClient` in `CodeReviewerAgent.Infra/`, add a case in `LlmClientFactory` (also Infra), document its env vars. HTTP engines take an `IHttpTransport` and are wrapped with the resilient transport in the factory; CLI/SDK engines self-heal and skip it. Core never references the factory — Console/Api instantiate it.
 - **New diff source** — implement `IDiffSource` and add a case in `DiffSourceFactory`.
 - **New storage backend** — implement the repository contracts (`IDiffRepository` / `IAnalysisRepository` / `IJudgeEvaluationRepository`) in `CodeReviewerAgent.Infra/` and add a case in `RepositoryFactory`.
 - **New DB provider** — add an `IDbProviderStrategy` (e.g. `UseSqlServer`) and register it in `RepositoryFactory`; the context and model are unchanged.

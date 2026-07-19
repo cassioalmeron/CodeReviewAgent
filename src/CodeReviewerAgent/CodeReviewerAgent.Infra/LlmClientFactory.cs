@@ -1,4 +1,6 @@
-namespace CodeReviewerAgent.Core
+using CodeReviewerAgent.Core;
+
+namespace CodeReviewerAgent.Infra
 {
     public static class LlmClientFactory
     {
@@ -12,10 +14,11 @@ namespace CodeReviewerAgent.Core
                 "ollama" => CreateOllama(),
                 "claude" => CreateClaude(),
                 "openai" => CreateOpenAi(),
+                "openrouter" => CreateOpenRouter(),
                 "claude-code" => new ClaudeCodeClient(),
                 "claude-cli" => new ClaudeCliClient(),
                 _ => throw new InvalidOperationException(
-                    $"Unknown LLM_ENGINE '{engine}'. Supported values: 'ollama', 'claude', 'openai', 'claude-code', 'claude-cli'."),
+                    $"Unknown LLM_ENGINE '{engine}'. Supported values: 'ollama', 'claude', 'openai', 'openrouter', 'claude-code', 'claude-cli'."),
             };
         }
 
@@ -64,6 +67,23 @@ namespace CodeReviewerAgent.Core
             http.DefaultRequestHeaders.Add("Authorization", $"Bearer {apiKey}");
 
             return new OpenAiClient(Resilient(http), model);
+        }
+
+        private static ILlmClient CreateOpenRouter()
+        {
+            var apiKey = Environment.GetEnvironmentVariable("OPENROUTER_API_KEY")
+                ?? throw new InvalidOperationException("OPENROUTER_API_KEY is not configured. Add it to the .env file.");
+            var model = Environment.GetEnvironmentVariable("OPENROUTER_MODEL")
+                ?? throw new InvalidOperationException("OPENROUTER_MODEL is not configured. Add it to the .env file.");
+
+            var http = new HttpClient
+            {
+                BaseAddress = new Uri("https://openrouter.ai"),
+                Timeout = TimeSpan.FromSeconds(120),
+            };
+            http.DefaultRequestHeaders.Add("Authorization", $"Bearer {apiKey}");
+
+            return new OpenRouterClient(Resilient(http), model);
         }
 
         // Composes the resilient HTTP transport shared by every HTTP-based client.

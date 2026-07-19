@@ -7,10 +7,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="ClaudeAgentSdk" Version="0.2.1" />
-  </ItemGroup>
-
-  <ItemGroup>
+    <InternalsVisibleTo Include="CodeReviewerAgent.Infra" />
     <InternalsVisibleTo Include="CodeReviewerAgent.Tests" />
   </ItemGroup>
 

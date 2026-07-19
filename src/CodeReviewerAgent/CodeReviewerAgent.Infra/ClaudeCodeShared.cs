@@ -1,6 +1,6 @@
 using System.Text.Json;
 
-namespace CodeReviewerAgent.Core
+namespace CodeReviewerAgent.Infra
 {
     /// <summary>
     /// Logic shared by the Claude Code clients (SDK-based and direct-CLI). Both drive the

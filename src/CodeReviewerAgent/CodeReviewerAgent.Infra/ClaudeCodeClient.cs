@@ -1,8 +1,9 @@
 using System.Text;
 using System.Text.Json;
 using ClaudeAgentSdk;
+using CodeReviewerAgent.Core;
 
-namespace CodeReviewerAgent.Core
+namespace CodeReviewerAgent.Infra
 {
     /// <summary>
     /// LLM client backed by the locally installed Claude CLI (via the ClaudeAgentSdk).

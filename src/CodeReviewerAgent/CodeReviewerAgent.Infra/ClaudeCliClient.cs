@@ -1,7 +1,8 @@
 using System.Text;
 using System.Text.Json;
+using CodeReviewerAgent.Core;
 
-namespace CodeReviewerAgent.Core
+namespace CodeReviewerAgent.Infra
 {
     /// <summary>
     /// LLM client that drives the local Claude CLI directly (no SDK), using this machine's

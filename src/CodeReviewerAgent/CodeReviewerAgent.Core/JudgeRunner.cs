@@ -17,7 +17,9 @@ namespace CodeReviewerAgent.Core
             Converters = { new JsonStringEnumConverter() },
         };
 
-        public static void Run()
+        // The judge client is built by the entry point (Console/Api) via the Infra factory and
+        // injected here — Core does not depend on the concrete LLM clients or their factory.
+        public static void Run(ILlmClient judgeClient)
         {
             var resultsPath = Path.Combine(AppContext.BaseDirectory, "reviews", "eval-results.json");
             if (!File.Exists(resultsPath))
@@ -36,7 +38,7 @@ namespace CodeReviewerAgent.Core
 
             var judgeModel = Environment.GetEnvironmentVariable("JUDGE_MODEL") ?? "claude-sonnet-4-6";
             var rubricVersion = Environment.GetEnvironmentVariable("RUBRIC_VERSION") ?? "v1";
-            var judge = new Judge(LlmClientFactory.CreateClaude(judgeModel), rubricVersion);
+            var judge = new Judge(judgeClient, rubricVersion);
 
             System.Console.WriteLine("=== Judge ===");
             // Group reviews by diff (= golden case); each diff was reviewed several times.

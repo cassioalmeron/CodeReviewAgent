@@ -1,5 +1,5 @@
 using System.Net;
-using CodeReviewerAgent.Core;
+using CodeReviewerAgent.Infra;
 using CodeReviewerAgent.Tests.Fakes;
 using Xunit;
 

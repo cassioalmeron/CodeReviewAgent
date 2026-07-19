@@ -3,7 +3,8 @@ namespace CodeReviewerAgent.Core
     /// <summary>
     /// Estimates the API cost (USD) of a request. Local (Ollama) and subscription
     /// (claude-code / claude-cli) engines are free; metered engines (Claude, OpenAI)
-    /// are priced per model based on input/output tokens.
+    /// are priced per model based on input/output tokens. OpenRouter reports its real
+    /// cost on the response, so the pipeline uses that instead of this estimate.
     /// </summary>
     public static class CostCalculator
     {
@@ -40,7 +41,10 @@ namespace CodeReviewerAgent.Core
             {
                 "claude" => ClaudePricing,
                 "openai" => OpenAiPricing,
-                _ => null, // Ollama (local) and subscription engines have no metered cost.
+                // Ollama (local) and subscription engines have no metered cost. OpenRouter
+                // reports its real per-call cost on the response (usage accounting), which the
+                // pipeline prefers over this estimate, so it isn't priced here either.
+                _ => null,
             };
             if (pricing is null)
                 return 0m;

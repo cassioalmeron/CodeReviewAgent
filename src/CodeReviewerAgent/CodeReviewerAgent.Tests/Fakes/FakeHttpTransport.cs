@@ -1,4 +1,4 @@
-using CodeReviewerAgent.Core;
+using CodeReviewerAgent.Infra;
 
 namespace CodeReviewerAgent.Tests.Fakes
 {

@@ -26,7 +26,7 @@ if (args is ["judge", var judgeIdArg, ..] && int.TryParse(judgeIdArg, out var ju
 // `judge` (no id) scores the reviews persisted by `eval`; it builds its own (stronger) client.
 if (args is ["judge", ..])
 {
-    JudgeRunner.Run();
+    JudgeRunner.Run(JudgeClient());
     return;
 }
 
@@ -41,7 +41,7 @@ if (args is ["all", ..])
 {
     var executor = LlmClientFactory.Create();
     RunGoldenSet(executor);
-    JudgeRunner.Run();
+    JudgeRunner.Run(JudgeClient());
     return;
 }
 
@@ -175,6 +175,10 @@ static void RunGoldenSet(ILlmClient executor)
         Console.WriteLine(GoldenEvaluator.FormatLine(r));
     Console.WriteLine($"Golden set: {results.Sum(r => r.Detections)}/{results.Sum(r => r.Runs)} detections");
 }
+
+// The judge uses a stronger model (JUDGE_MODEL) than the executor to avoid self-preference bias.
+static ILlmClient JudgeClient() =>
+    LlmClientFactory.CreateClaude(Environment.GetEnvironmentVariable("JUDGE_MODEL") ?? "claude-sonnet-4-6");
 
 static string Label(string[] sourceArgs) =>
     sourceArgs.Length == 0 ? "local" : string.Join(" ", sourceArgs);

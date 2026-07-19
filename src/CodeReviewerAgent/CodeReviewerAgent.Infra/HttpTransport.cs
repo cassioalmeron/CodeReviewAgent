@@ -1,7 +1,6 @@
-using System.Net;
 using System.Text;
 
-namespace CodeReviewerAgent.Core
+namespace CodeReviewerAgent.Infra
 {
     /// <summary>Sends a JSON POST and returns the response body, throwing on failure.</summary>
     internal interface IHttpTransport
