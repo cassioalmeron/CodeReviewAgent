@@ -1,6 +1,6 @@
 import styled from 'styled-components'
 import { cost, relativeDay } from '@/utils/format'
-import type { JudgeEvaluation } from '@/types'
+import type { Evaluation } from '@/types'
 import { DataTable, type Column } from '@/components/ui/DataTable'
 import { IdTag, Mono, Muted } from '@/components/ui/primitives'
 
@@ -17,22 +17,22 @@ const Big = styled.span`
   font-weight: 700;
 `
 
-/** Shared table of judge evaluations — used standalone and inside an analysis's detail. */
+/** Shared table of judge evaluations — used standalone and inside an assessment's detail. */
 export function EvaluationsTable({
   rows,
-  showAnalysis = true,
+  showAssessment = true,
 }: {
-  rows: JudgeEvaluation[]
-  showAnalysis?: boolean
+  rows: Evaluation[]
+  showAssessment?: boolean
 }) {
-  const columns: Column<JudgeEvaluation>[] = [
+  const columns: Column<Evaluation>[] = [
     { header: 'ID', width: '64px', render: (e) => <IdTag>#{e.id}</IdTag> },
-    ...(showAnalysis
+    ...(showAssessment
       ? [
           {
-            header: 'Analysis',
-            width: '84px',
-            render: (e: JudgeEvaluation) => <Muted>#{e.analysisId}</Muted>,
+            header: 'Assessment',
+            width: '96px',
+            render: (e: Evaluation) => <Muted>#{e.assessmentId}</Muted>,
           },
         ]
       : []),

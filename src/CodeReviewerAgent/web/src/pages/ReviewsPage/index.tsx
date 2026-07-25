@@ -1,4 +1,5 @@
 import { api } from '@/services/api'
+import { useProject } from '@/contexts/ProjectContext'
 import { Async } from '@/components/ui/Async'
 import { DataTable, type Column } from '@/components/ui/DataTable'
 import { EmptyState } from '@/components/ui/States'
@@ -6,47 +7,48 @@ import { PageHeader } from '@/components/ui/PageHeader'
 import { IdTag, Mono, Muted } from '@/components/ui/primitives'
 import { useAsync } from '@/hooks/useAsync'
 import { relativeDay, shortHash } from '@/utils/format'
-import type { DiffListItem } from '@/types'
+import type { ReviewListItem } from '@/types'
 
-const columns: Column<DiffListItem>[] = [
-  { header: 'ID', width: '64px', render: (d) => <IdTag>#{d.id}</IdTag> },
-  { header: 'Source', render: (d) => <Mono>{d.source ?? '—'}</Mono> },
-  { header: 'Content hash', render: (d) => <Muted>{shortHash(d.contentHash)}</Muted> },
+const columns: Column<ReviewListItem>[] = [
+  { header: 'ID', width: '64px', render: (r) => <IdTag>#{r.id}</IdTag> },
+  { header: 'Source', render: (r) => <Mono>{r.source ?? '—'}</Mono> },
+  { header: 'Content hash', render: (r) => <Muted>{shortHash(r.contentHash)}</Muted> },
   {
-    header: 'Analyses',
+    header: 'Assessments',
     align: 'right',
-    width: '90px',
-    render: (d) => <Mono>{d.analysisCount}</Mono>,
+    width: '110px',
+    render: (r) => <Mono>{r.assessmentCount}</Mono>,
   },
   {
     header: 'Captured',
     align: 'right',
     width: '110px',
-    render: (d) => <Muted>{relativeDay(d.createdAt)}</Muted>,
+    render: (r) => <Muted>{relativeDay(r.createdAt)}</Muted>,
   },
 ]
 
-export function DiffsPage() {
-  const state = useAsync(() => api.diffs(), [])
+export function ReviewsPage() {
+  const { projectId, project } = useProject()
+  const state = useAsync(() => api.reviews(projectId ?? undefined), [projectId])
   return (
     <>
       <PageHeader
-        title="Diffs"
-        sub="Every captured diff the agent has stored. Open one to see its analyses."
+        title="Reviews"
+        sub={`Every captured diff in ${project?.name ?? 'this project'}. Open one to see its assessments.`}
       />
       <Async state={state}>
-        {(diffs) =>
-          diffs.length === 0 ? (
+        {(reviews) =>
+          reviews.length === 0 ? (
             <EmptyState
-              title="No diffs stored yet"
-              hint="Run the CLI (e.g. dotnet run -- eval) to capture diffs into the store."
+              title="No reviews stored yet"
+              hint="Run the CLI (e.g. dotnet run -- review) to capture diffs into the store."
             />
           ) : (
             <DataTable
               columns={columns}
-              rows={diffs}
-              rowKey={(d) => d.id}
-              rowHref={(d) => `/diffs/${d.id}`}
+              rows={reviews}
+              rowKey={(r) => r.id}
+              rowHref={(r) => `/reviews/${r.id}`}
             />
           )
         }

@@ -1,24 +1,24 @@
 import { cost, latency, relativeDay } from '@/utils/format'
-import type { AnalysisListItem } from '@/types'
+import type { AssessmentListItem } from '@/types'
 import { DataTable, type Column } from '@/components/ui/DataTable'
 import { IdTag, Mono, Muted } from '@/components/ui/primitives'
 
-/** Shared table of analyses — used both standalone and inside a diff's detail. */
-export function AnalysesTable({
+/** Shared table of assessments — used both standalone and inside a review's detail. */
+export function AssessmentsTable({
   rows,
-  showDiff = true,
+  showReview = true,
 }: {
-  rows: AnalysisListItem[]
-  showDiff?: boolean
+  rows: AssessmentListItem[]
+  showReview?: boolean
 }) {
-  const columns: Column<AnalysisListItem>[] = [
+  const columns: Column<AssessmentListItem>[] = [
     { header: 'ID', width: '64px', render: (a) => <IdTag>#{a.id}</IdTag> },
-    ...(showDiff
+    ...(showReview
       ? [
           {
-            header: 'Diff',
+            header: 'Review',
             width: '72px',
-            render: (a: AnalysisListItem) => <Muted>#{a.diffId}</Muted>,
+            render: (a: AssessmentListItem) => <Muted>#{a.reviewId}</Muted>,
           },
         ]
       : []),
@@ -54,7 +54,7 @@ export function AnalysesTable({
       columns={columns}
       rows={rows}
       rowKey={(a) => a.id}
-      rowHref={(a) => `/analyses/${a.id}`}
+      rowHref={(a) => `/assessments/${a.id}`}
     />
   )
 }

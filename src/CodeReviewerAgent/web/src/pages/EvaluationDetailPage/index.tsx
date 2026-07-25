@@ -17,22 +17,22 @@ const Scores = styled(Panel)`
 export function EvaluationDetailPage() {
   const { id } = useParams()
   const evaluationId = Number(id)
-  // The evaluation links to its analysis, which links to the reviewed diff — chain to show it.
+  // The evaluation links to its assessment, which links to the reviewed diff — chain to show it.
   const state = useAsync(async () => {
     const evaluation = await api.evaluation(evaluationId)
-    const analysis = await api.analysis(evaluation.analysisId)
-    const diff = await api.diff(analysis.diffId)
-    return { evaluation, diff }
+    const assessment = await api.assessment(evaluation.assessmentId)
+    const review = await api.review(assessment.reviewId)
+    return { evaluation, review }
   }, [evaluationId])
 
   return (
     <Async state={state}>
-      {({ evaluation: e, diff }) => (
+      {({ evaluation: e, review }) => (
         <>
           <PageHeader
             crumbs={[
               { label: 'Evaluations', to: '/evaluations' },
-              { label: `Analysis #${e.analysisId}`, to: `/analyses/${e.analysisId}` },
+              { label: `Assessment #${e.assessmentId}`, to: `/assessments/${e.assessmentId}` },
             ]}
             title={<IdTag>Evaluation #{e.id}</IdTag>}
           />
@@ -67,8 +67,8 @@ export function EvaluationDetailPage() {
             )}
 
             <Field>
-              <Eyebrow>Reviewed diff · #{diff.id}</Eyebrow>
-              <DiffView content={diff.content} />
+              <Eyebrow>Reviewed diff · #{review.id}</Eyebrow>
+              <DiffView content={review.content} />
             </Field>
           </Stack>
         </>

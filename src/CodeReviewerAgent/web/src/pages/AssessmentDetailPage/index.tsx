@@ -11,28 +11,28 @@ import { Eyebrow, Field, IdTag, Mono, Prose, Stack } from '@/components/ui/primi
 import { useAsync } from '@/hooks/useAsync'
 import { cost, dateTime, latency, tokens } from '@/utils/format'
 
-export function AnalysisDetailPage() {
+export function AssessmentDetailPage() {
   const { id } = useParams()
-  const analysisId = Number(id)
+  const assessmentId = Number(id)
   // Chain in the reviewed diff so the findings can be read against it.
-  const analysis = useAsync(async () => {
-    const analysis = await api.analysis(analysisId)
-    const diff = await api.diff(analysis.diffId)
-    return { analysis, diff }
-  }, [analysisId])
-  const evaluations = useAsync(() => api.analysisEvaluations(analysisId), [analysisId])
+  const assessment = useAsync(async () => {
+    const assessment = await api.assessment(assessmentId)
+    const review = await api.review(assessment.reviewId)
+    return { assessment, review }
+  }, [assessmentId])
+  const evaluations = useAsync(() => api.assessmentEvaluations(assessmentId), [assessmentId])
 
   return (
     <>
-      <Async state={analysis}>
-        {({ analysis: a, diff }) => (
+      <Async state={assessment}>
+        {({ assessment: a, review }) => (
           <>
             <PageHeader
               crumbs={[
-                { label: 'Analyses', to: '/analyses' },
-                { label: `Diff #${a.diffId}`, to: `/diffs/${a.diffId}` },
+                { label: 'Assessments', to: '/assessments' },
+                { label: `Review #${a.reviewId}`, to: `/reviews/${a.reviewId}` },
               ]}
-              title={<IdTag>Analysis #{a.id}</IdTag>}
+              title={<IdTag>Assessment #{a.id}</IdTag>}
             />
             <Stack $gap={32}>
               <MetricStrip
@@ -55,8 +55,8 @@ export function AnalysisDetailPage() {
               )}
 
               <Field>
-                <Eyebrow>Reviewed diff · #{diff.id}</Eyebrow>
-                <DiffView content={diff.content} />
+                <Eyebrow>Reviewed diff · #{review.id}</Eyebrow>
+                <DiffView content={review.content} />
               </Field>
 
               <Field>
@@ -79,10 +79,10 @@ export function AnalysisDetailPage() {
                     rows.length === 0 ? (
                       <EmptyState
                         title="Not judged yet"
-                        hint={<>Score it with <Mono>dotnet run -- judge {analysisId}</Mono>.</>}
+                        hint={<>Score it with <Mono>dotnet run -- judge {assessmentId}</Mono>.</>}
                       />
                     ) : (
-                      <EvaluationsTable rows={rows} showAnalysis={false} />
+                      <EvaluationsTable rows={rows} showAssessment={false} />
                     )
                   }
                 </Async>

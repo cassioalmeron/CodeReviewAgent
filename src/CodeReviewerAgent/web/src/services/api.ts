@@ -1,9 +1,12 @@
 import type {
-  Analysis,
-  AnalysisListItem,
-  Diff,
-  DiffListItem,
-  JudgeEvaluation,
+  Assessment,
+  AssessmentListItem,
+  Evaluation,
+  Project,
+  ProjectListItem,
+  ProjectStats,
+  Review,
+  ReviewListItem,
 } from '@/types'
 
 // Requests go to /api/* — proxied to the viewer API by Vite in dev (see vite.config.ts).
@@ -13,15 +16,24 @@ async function get<T>(path: string): Promise<T> {
   return res.json() as Promise<T>
 }
 
+function query(projectId?: number): string {
+  return projectId == null ? '' : `?projectId=${projectId}`
+}
+
 export const api = {
-  diffs: () => get<DiffListItem[]>('/diffs'),
-  diff: (id: number) => get<Diff>(`/diffs/${id}`),
-  diffAnalyses: (id: number) => get<AnalysisListItem[]>(`/diffs/${id}/analyses`),
+  projects: () => get<ProjectListItem[]>('/projects'),
+  project: (id: number) => get<Project>(`/projects/${id}`),
+  projectStats: (id: number) => get<ProjectStats>(`/projects/${id}/stats`),
+  projectReviews: (id: number) => get<ReviewListItem[]>(`/projects/${id}/reviews`),
 
-  analyses: () => get<AnalysisListItem[]>('/analyses'),
-  analysis: (id: number) => get<Analysis>(`/analyses/${id}`),
-  analysisEvaluations: (id: number) => get<JudgeEvaluation[]>(`/analyses/${id}/evaluations`),
+  reviews: (projectId?: number) => get<ReviewListItem[]>(`/reviews${query(projectId)}`),
+  review: (id: number) => get<Review>(`/reviews/${id}`),
+  reviewAssessments: (id: number) => get<AssessmentListItem[]>(`/reviews/${id}/assessments`),
 
-  evaluations: () => get<JudgeEvaluation[]>('/evaluations'),
-  evaluation: (id: number) => get<JudgeEvaluation>(`/evaluations/${id}`),
+  assessments: () => get<AssessmentListItem[]>('/assessments'),
+  assessment: (id: number) => get<Assessment>(`/assessments/${id}`),
+  assessmentEvaluations: (id: number) => get<Evaluation[]>(`/assessments/${id}/evaluations`),
+
+  evaluations: () => get<Evaluation[]>('/evaluations'),
+  evaluation: (id: number) => get<Evaluation>(`/evaluations/${id}`),
 }
