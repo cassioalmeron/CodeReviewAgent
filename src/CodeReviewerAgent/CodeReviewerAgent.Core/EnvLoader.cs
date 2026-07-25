@@ -21,7 +21,11 @@ public static class EnvLoader
 
             var key = trimmed[..separator].Trim();
             var value = trimmed[(separator + 1)..].Trim().Trim('"');
-            Environment.SetEnvironmentVariable(key, value);
+
+            // A variable already set in the process environment wins over the .env
+            // (standard dotenv semantics). Lets callers override e.g. REPO_DIR per run.
+            if (Environment.GetEnvironmentVariable(key) is null)
+                Environment.SetEnvironmentVariable(key, value);
         }
     }
 }

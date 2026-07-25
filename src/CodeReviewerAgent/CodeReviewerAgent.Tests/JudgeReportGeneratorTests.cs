@@ -23,10 +23,10 @@ namespace CodeReviewerAgent.Tests
             Assert.Contains("judge claude-sonnet-4-6, rubric v1", report);
         }
 
-        private static JudgeEvaluation Evaluation(int id, int overall) => new()
+        private static Evaluation Evaluation(int id, int overall) => new()
         {
             Id = id,
-            AnalysisId = 7,
+            AssessmentId = 7,
             RubricVersion = "v1",
             JudgeModel = "claude-sonnet-4-6",
             Correctness = overall,
@@ -42,11 +42,11 @@ namespace CodeReviewerAgent.Tests
         };
 
         [Fact]
-        public void GenerateForAnalysis_IncludesDiffAndEachEvaluation()
+        public void GenerateForAssessment_IncludesDiffAndEachEvaluation()
         {
             var diff = "diff --git a/App.cs b/App.cs\n--- a/App.cs\n+++ b/App.cs\n@@ -1 +1,2 @@\n line\n+added\n";
 
-            var report = JudgeReportGenerator.GenerateForAnalysis(7, diff, [Evaluation(1, 4), Evaluation(2, 2)]);
+            var report = JudgeReportGenerator.GenerateForAssessment(7, diff, [Evaluation(1, 4), Evaluation(2, 2)]);
 
             Assert.Contains("## Reviewed diff", report);
             Assert.Contains("App.cs", report);
@@ -60,9 +60,9 @@ namespace CodeReviewerAgent.Tests
         }
 
         [Fact]
-        public void GenerateForAnalysis_SingleEvaluation_OmitsAverages()
+        public void GenerateForAssessment_SingleEvaluation_OmitsAverages()
         {
-            var report = JudgeReportGenerator.GenerateForAnalysis(7, "diff --git a/A.cs b/A.cs", [Evaluation(1, 5)]);
+            var report = JudgeReportGenerator.GenerateForAssessment(7, "diff --git a/A.cs b/A.cs", [Evaluation(1, 5)]);
 
             Assert.Contains("## Evaluation 1", report);
             Assert.DoesNotContain("## Averages", report);

@@ -1,13 +1,13 @@
-using Microsoft.EntityFrameworkCore;
 using CodeReviewerAgent.Core;
 
 namespace CodeReviewerAgent.Infra
 {
     /// <summary>The repositories backing a run — same store, shared context when relational.</summary>
     public record Repositories(
-        IDiffRepository Diffs,
-        IAnalysisRepository Analyses,
-        IJudgeEvaluationRepository JudgeEvaluations);
+        IProjectRepository Projects,
+        IReviewRepository Reviews,
+        IAssessmentRepository Assessments,
+        IEvaluationRepository Evaluations);
 
     /// <summary>
     /// Builds the repositories from configuration. <c>STORAGE</c> selects file-vs-EF and, when
@@ -26,24 +26,26 @@ namespace CodeReviewerAgent.Infra
 
             if (storage == "files")
                 return new Repositories(
-                    new FileDiffRepository(),
-                    new FileAnalysisRepository(),
-                    new FileJudgeEvaluationRepository());
+                    new FileProjectRepository(),
+                    new FileReviewRepository(),
+                    new FileAssessmentRepository(),
+                    new FileEvaluationRepository());
 
             if (!Providers.TryGetValue(storage, out var provider))
                 throw new InvalidOperationException(
                     $"Unknown STORAGE '{storage}'. Supported values: 'files', 'sqlite', 'postgres'.");
 
-            var connectionString = Environment.GetEnvironmentVariable("DB_CONNECTION")
-                ?? throw new InvalidOperationException("DB_CONNECTION is not configured. Add it to the .env file.");
+            var connectionString = provider.ResolveConnectionString(
+                Environment.GetEnvironmentVariable("DB_CONNECTION"));
 
-            var context = new ReviewDbContext(options => provider.Configure(options, connectionString));
+            var context = new CodeReviewDbContext(options => provider.Configure(options, connectionString));
             context.Database.EnsureCreated();
 
             return new Repositories(
-                new EfDiffRepository(context),
-                new EfAnalysisRepository(context),
-                new EfJudgeEvaluationRepository(context));
+                new EfProjectRepository(context),
+                new EfReviewRepository(context),
+                new EfAssessmentRepository(context),
+                new EfEvaluationRepository(context));
         }
     }
 }

@@ -44,9 +44,7 @@ namespace CodeReviewerAgent.Infra
 
         public static T? Get<T>(string directory, string prefix, int id) where T : class
         {
-            if (!Directory.Exists(directory))
-                return null;
-            var path = Directory.EnumerateFiles(directory, $"{prefix}-{id}-*.json").FirstOrDefault();
+            var path = PathOf(directory, prefix, id);
             return path is null ? null : JsonSerializer.Deserialize<T>(File.ReadAllText(path), JsonOptions);
         }
 
@@ -62,65 +60,107 @@ namespace CodeReviewerAgent.Infra
                 .Select(x => JsonSerializer.Deserialize<T>(File.ReadAllText(x.File), JsonOptions)!)
                 .ToList();
         }
-    }
 
-    public class FileDiffRepository : IDiffRepository
-    {
-        private static readonly string Directory =
-            Path.Combine(AppContext.BaseDirectory, "diffs");
-
-        public int Save(Diff diff)
+        /// <summary>Rewrites the existing file of entity <paramref name="id"/> in place (for renames/updates).</summary>
+        public static void Overwrite<T>(string directory, string prefix, int id, T entity)
         {
-            var id = FileStore.NextId(Directory, "diff");
-            FileStore.Save(Directory, "diff", id, diff with { Id = id, ContentHash = Hashing.Sha256(diff.Content) });
-            return id;
+            var path = PathOf(directory, prefix, id)
+                ?? throw new InvalidOperationException($"No {prefix} file with id {id}.");
+            File.WriteAllText(path, JsonSerializer.Serialize(entity, JsonOptions));
         }
 
-        public int GetOrAdd(Diff diff)
+        private static string? PathOf(string directory, string prefix, int id)
         {
-            var hash = Hashing.Sha256(diff.Content);
-            var existing = List().FirstOrDefault(d => d.ContentHash == hash);
-            return existing?.Id ?? Save(diff);
+            if (!Directory.Exists(directory))
+                return null;
+            return Directory.EnumerateFiles(directory, $"{prefix}-{id}-*.json").FirstOrDefault();
         }
-
-        public Diff? Get(int id) => FileStore.Get<Diff>(Directory, "diff", id);
-
-        public IReadOnlyList<Diff> List() => FileStore.List<Diff>(Directory, "diff");
     }
 
-    public class FileAnalysisRepository : IAnalysisRepository
+    public class FileProjectRepository : IProjectRepository
     {
-        // A dedicated directory (not the legacy "reviews/" folder, whose timestamp-named
-        // files would be misread as ids by the "review-<id>-" pattern).
         private static readonly string Directory =
-            Path.Combine(AppContext.BaseDirectory, "analyses");
+            Path.Combine(AppContext.BaseDirectory, "projects");
 
-        public int Save(Analysis analysis)
+        public Project GetOrAdd(string folder, string name)
+        {
+            var existing = List().FirstOrDefault(p => p.Folder == folder);
+            if (existing is not null)
+                return existing;
+
+            var id = FileStore.NextId(Directory, "project");
+            var project = new Project { Id = id, Name = name, Folder = folder, CreatedAt = DateTime.UtcNow };
+            FileStore.Save(Directory, "project", id, project);
+            return project;
+        }
+
+        public Project? Get(int id) => FileStore.Get<Project>(Directory, "project", id);
+
+        public IReadOnlyList<Project> List() => FileStore.List<Project>(Directory, "project");
+
+        public void Rename(int id, string name)
+        {
+            var project = Get(id) ?? throw new InvalidOperationException($"No project with id {id}.");
+            FileStore.Overwrite(Directory, "project", id, project with { Name = name });
+        }
+    }
+
+    public class FileReviewRepository : IReviewRepository
+    {
+        private static readonly string Directory =
+            Path.Combine(AppContext.BaseDirectory, "reviews");
+
+        public int Save(Review review)
         {
             var id = FileStore.NextId(Directory, "review");
-            FileStore.Save(Directory, "review", id, analysis with { Id = id });
+            FileStore.Save(Directory, "review", id, review with { Id = id, ContentHash = Hashing.Sha256(review.Content) });
             return id;
         }
 
-        public Analysis? Get(int id) => FileStore.Get<Analysis>(Directory, "review", id);
+        public int GetOrAdd(Review review)
+        {
+            var hash = Hashing.Sha256(review.Content);
+            var existing = List().FirstOrDefault(r => r.ProjectId == review.ProjectId && r.ContentHash == hash);
+            return existing?.Id ?? Save(review);
+        }
 
-        public IReadOnlyList<Analysis> List() => FileStore.List<Analysis>(Directory, "review");
+        public Review? Get(int id) => FileStore.Get<Review>(Directory, "review", id);
+
+        public IReadOnlyList<Review> List() => FileStore.List<Review>(Directory, "review");
     }
 
-    public class FileJudgeEvaluationRepository : IJudgeEvaluationRepository
+    public class FileAssessmentRepository : IAssessmentRepository
     {
         private static readonly string Directory =
-            Path.Combine(AppContext.BaseDirectory, "judgements");
+            Path.Combine(AppContext.BaseDirectory, "assessments");
 
-        public int Save(JudgeEvaluation evaluation)
+        public int Save(Assessment assessment)
         {
-            var id = FileStore.NextId(Directory, "judge");
-            FileStore.Save(Directory, "judge", id, evaluation with { Id = id });
+            var id = FileStore.NextId(Directory, "assessment");
+            // Findings stay nested in the assessment JSON (no child files in the file store).
+            FileStore.Save(Directory, "assessment", id, assessment with { Id = id });
             return id;
         }
 
-        public JudgeEvaluation? Get(int id) => FileStore.Get<JudgeEvaluation>(Directory, "judge", id);
+        public Assessment? Get(int id) => FileStore.Get<Assessment>(Directory, "assessment", id);
 
-        public IReadOnlyList<JudgeEvaluation> List() => FileStore.List<JudgeEvaluation>(Directory, "judge");
+        public IReadOnlyList<Assessment> List() => FileStore.List<Assessment>(Directory, "assessment");
+    }
+
+    public class FileEvaluationRepository : IEvaluationRepository
+    {
+        private static readonly string Directory =
+            Path.Combine(AppContext.BaseDirectory, "evaluations");
+
+        public int Save(Evaluation evaluation)
+        {
+            var id = FileStore.NextId(Directory, "evaluation");
+            FileStore.Save(Directory, "evaluation", id, evaluation with { Id = id });
+            return id;
+        }
+
+        public Evaluation? Get(int id) => FileStore.Get<Evaluation>(Directory, "evaluation", id);
+
+        public IReadOnlyList<Evaluation> List() => FileStore.List<Evaluation>(Directory, "evaluation");
     }
 }

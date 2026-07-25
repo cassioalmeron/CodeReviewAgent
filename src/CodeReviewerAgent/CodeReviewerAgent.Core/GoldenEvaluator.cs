@@ -35,9 +35,12 @@ namespace CodeReviewerAgent.Core
         };
 
         public static IReadOnlyList<GoldenCaseResult> Run(
-            ILlmClient client, IDiffRepository diffs, IAnalysisRepository analyses)
+            ILlmClient client, IProjectRepository projects, IReviewRepository reviewsRepo, IAssessmentRepository assessments)
         {
             var runs = int.TryParse(Environment.GetEnvironmentVariable("GOLDEN_RUNS"), out var n) && n > 0 ? n : 3;
+
+            // The golden set is its own project, so its reviews are kept apart from real repositories.
+            var project = projects.GetOrAdd("golden", "Golden Set");
 
             var directory = Path.Combine(AppContext.BaseDirectory, "golden");
             var cases = JsonSerializer.Deserialize<List<GoldenCase>>(
@@ -52,11 +55,12 @@ namespace CodeReviewerAgent.Core
                 var diff = File.ReadAllText(Path.Combine(directory, golden.Diff));
 
                 // The golden diff is stable: store it once (reused by content hash across runs),
-                // then attach each run's analysis to it.
-                var diffId = diffs.GetOrAdd(new Diff
+                // then attach each run's assessment to it.
+                var reviewId = reviewsRepo.GetOrAdd(new Review
                 {
+                    ProjectId = project.Id,
                     Content = diff,
-                    Source = $"golden:{golden.Name}",
+                    Source = golden.Name,
                     CreatedAt = DateTime.UtcNow,
                 });
 
@@ -68,7 +72,7 @@ namespace CodeReviewerAgent.Core
                 {
                     var review = new CodeReviewer(client, diff).Review();
                     reviews.Add(review);
-                    analyses.Save(Analysis.FromReview(diffId, review));
+                    assessments.Save(Assessment.FromReview(reviewId, review));
                     var findings = review.Findings ?? [];
 
                     if (findings.Any(f => Matches(f, golden)))

@@ -16,12 +16,18 @@ namespace CodeReviewerAgent.Core
         Performance,
         Style,
         Maintainability,
+        Convention,
     }
 
     /// <summary>
     /// A single code-review finding. The LLM cites the affected line verbatim in
     /// <see cref="CodeSnippet"/>; <see cref="Line"/> is not supplied by the model but
     /// derived by matching the snippet against the parsed diff.
+    /// <para>
+    /// <see cref="Id"/> and <see cref="AssessmentId"/> are persistence-only (a child row in the
+    /// relational stores). They are <see cref="JsonIgnoreCondition.WhenWritingDefault"/> so the
+    /// schema sent to the LLM and the plugin's <c>--json</c> output stay unchanged on new reviews.
+    /// </para>
     /// </summary>
     public record Finding(
         string? File,
@@ -30,7 +36,14 @@ namespace CodeReviewerAgent.Core
         Category? Category,
         string? Problem,
         string? Suggestion,
-        int? Line = null);
+        int? Line = null)
+    {
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+        public int Id { get; init; }
+
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+        public int AssessmentId { get; init; }
+    }
 
     /// <summary>
     /// The structured result of a review: an overall summary and the findings, plus

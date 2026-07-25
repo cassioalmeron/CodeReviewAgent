@@ -47,6 +47,12 @@ namespace CodeReviewerAgent.Core
             // schema so the model returns structured output (summary + findings).
             var promptVersion = Environment.GetEnvironmentVariable("PROMPT_VERSION") ?? "v2";
             var systemPrompt = LoadSystemPrompt(promptVersion);
+
+            // Append the project guidelines ("skills") that apply to the files in this diff,
+            // so the model also reports convention violations as findings.
+            var files = DiffSplitter.ByFile(diff).Select(f => f.Path);
+            systemPrompt += SkillLoader.BuildGuidelines(files);
+
             var requestBody = new
             {
                 max_tokens = 16000,
@@ -127,7 +133,7 @@ namespace CodeReviewerAgent.Core
                             file = new { type = "string" },
                             code_snippet = new { type = "string" },
                             severity = new { type = "string", @enum = new[] { "info", "warning", "critical" } },
-                            category = new { type = "string", @enum = new[] { "bug", "security", "performance", "style", "maintainability" } },
+                            category = new { type = "string", @enum = new[] { "bug", "security", "performance", "style", "maintainability", "convention" } },
                             problem = new { type = "string" },
                             suggestion = new { type = "string" },
                         },

@@ -97,20 +97,20 @@ namespace CodeReviewerAgent.Core
         private static double Avg(IReadOnlyList<Judgment> judgments, Func<Judgment, int> selector) =>
             judgments.Count == 0 ? 0 : judgments.Average(selector);
 
-        // --- Store-backed report: the persisted evaluations of one analysis, with the reviewed diff ---
+        // --- Store-backed report: the persisted evaluations of one assessment, with the reviewed diff ---
 
         /// <summary>
-        /// Renders the judge report for one analysis's stored <see cref="JudgeEvaluation"/>s (one or
+        /// Renders the judge report for one assessment's stored <see cref="Evaluation"/>s (one or
         /// many), including the reviewed diff. Averages/totals are appended when there is more than one.
         /// </summary>
-        public static string GenerateForAnalysis(
-            int analysisId, string? diff, IReadOnlyList<JudgeEvaluation> evaluations)
+        public static string GenerateForAssessment(
+            int assessmentId, string? diff, IReadOnlyList<Evaluation> evaluations)
         {
             var report = new StringBuilder();
             report.AppendLine("# Judge Report");
             report.AppendLine();
             report.AppendLine(
-                $"_Generated {DateTime.UtcNow:yyyy-MM-dd HH:mm} UTC — analysis {analysisId}, {evaluations.Count} evaluation(s)_");
+                $"_Generated {DateTime.UtcNow:yyyy-MM-dd HH:mm} UTC — assessment {assessmentId}, {evaluations.Count} evaluation(s)_");
             report.AppendLine();
 
             AppendReviewedDiff(report, diff);
@@ -126,13 +126,13 @@ namespace CodeReviewerAgent.Core
         /// Generates the analysis judge report and writes it to the reports directory,
         /// returning the file path.
         /// </summary>
-        public static string SaveForAnalysis(
-            int analysisId, string? diff, IReadOnlyList<JudgeEvaluation> evaluations)
+        public static string SaveForAssessment(
+            int assessmentId, string? diff, IReadOnlyList<Evaluation> evaluations)
         {
             var directory = Path.Combine(AppContext.BaseDirectory, "reports");
             Directory.CreateDirectory(directory);
             var path = Path.Combine(directory, $"judge-{DateTime.UtcNow:yyyy-MM-dd-HHmmss}.md");
-            File.WriteAllText(path, GenerateForAnalysis(analysisId, diff, evaluations));
+            File.WriteAllText(path, GenerateForAssessment(assessmentId, diff, evaluations));
             return path;
         }
 
@@ -155,7 +155,7 @@ namespace CodeReviewerAgent.Core
             }
         }
 
-        private static void AppendEvaluation(StringBuilder report, JudgeEvaluation e)
+        private static void AppendEvaluation(StringBuilder report, Evaluation e)
         {
             report.AppendLine($"## Evaluation {e.Id}");
             report.AppendLine();
@@ -177,7 +177,7 @@ namespace CodeReviewerAgent.Core
             }
         }
 
-        private static void AppendAverages(StringBuilder report, IReadOnlyList<JudgeEvaluation> evaluations)
+        private static void AppendAverages(StringBuilder report, IReadOnlyList<Evaluation> evaluations)
         {
             report.AppendLine("---");
             report.AppendLine("## Averages");
