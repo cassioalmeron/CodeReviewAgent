@@ -30,6 +30,10 @@ namespace CodeReviewerAgent.Tests
                 Assert.Equal(first.Id, again.Id);       // same folder → reused (name not overwritten)
                 Assert.Equal("app", again.Name);
                 Assert.NotEqual(first.Id, other.Id);    // different folder → new project
+
+                // Windows paths are case-insensitive: a different-cased drive must reuse, not duplicate.
+                var casing = projects.GetOrAdd(@"/REPOS/App", "app");
+                Assert.Equal(first.Id, casing.Id);
             }
             finally
             {

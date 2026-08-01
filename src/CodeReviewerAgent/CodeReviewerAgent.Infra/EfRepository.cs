@@ -12,7 +12,10 @@ namespace CodeReviewerAgent.Infra
     {
         public Project GetOrAdd(string folder, string name)
         {
-            var existing = context.Projects.FirstOrDefault(p => p.Folder == folder);
+            // Folder is the natural key. Match case-insensitively: on Windows the same repo can be
+            // resolved as "C:\..." or "c:\...", and those must not create two projects.
+            var lowered = folder.ToLower();
+            var existing = context.Projects.FirstOrDefault(p => p.Folder.ToLower() == lowered);
             if (existing is not null)
                 return existing;
 

@@ -162,8 +162,11 @@ const Main = styled.main`
 `
 
 export function Layout() {
-  const { projects, projectId, select, clear } = useProject()
+  const { projects, project, projectId, select, clear } = useProject()
   const navigate = useNavigate()
+
+  // Judge evaluations only matter for the Golden Set (same criterion as the backend: Folder "golden").
+  const isGolden = project?.folder === 'golden'
 
   return (
     <Shell>
@@ -212,7 +215,7 @@ export function Layout() {
             </Item>
             <Item to="/reviews">Reviews</Item>
             <Item to="/assessments">Assessments</Item>
-            <Item to="/evaluations">Evaluations</Item>
+            {isGolden && <Item to="/evaluations">Evaluations</Item>}
           </Nav>
         )}
       </Sidebar>

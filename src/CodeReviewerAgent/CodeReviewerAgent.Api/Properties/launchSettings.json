@@ -4,7 +4,9 @@
       "commandName": "Project",
       "launchBrowser": false,
       "environmentVariables": {
-        "ASPNETCORE_ENVIRONMENT": "Development"
+        "ASPNETCORE_ENVIRONMENT": "Development",
+        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:18889",
+        "OTEL_EXPORTER_OTLP_PROTOCOL": "grpc"
       },
       "applicationUrl": "http://localhost:5180"
     }

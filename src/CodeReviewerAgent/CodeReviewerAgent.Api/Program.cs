@@ -7,6 +7,9 @@ EnvLoader.Load(Path.Combine(AppContext.BaseDirectory, ".env"));
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Traces + metrics over OTLP; a no-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set (see Telemetry.cs).
+builder.AddApiTelemetry();
+
 const string DevCors = "dev";
 builder.Services.AddCors(options => options.AddPolicy(DevCors, policy => policy
     .WithOrigins("http://localhost:5173")

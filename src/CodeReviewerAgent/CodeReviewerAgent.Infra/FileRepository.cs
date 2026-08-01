@@ -84,7 +84,9 @@ namespace CodeReviewerAgent.Infra
 
         public Project GetOrAdd(string folder, string name)
         {
-            var existing = List().FirstOrDefault(p => p.Folder == folder);
+            // Folder is the natural key; match case-insensitively (Windows paths are case-insensitive,
+            // so "C:\..." and "c:\..." are the same repo and must not create two projects).
+            var existing = List().FirstOrDefault(p => string.Equals(p.Folder, folder, StringComparison.OrdinalIgnoreCase));
             if (existing is not null)
                 return existing;
 
