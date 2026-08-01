@@ -2,19 +2,44 @@
 
 An agent for automated code reviewing, powered by an LLM.
 
-> Developed as an activity for the **Rambo EPC method**, specifically **Pilar 3**.
-
 It reads a diff (the local working tree or a real pull request), sends it to an
 LLM with a versioned system prompt and a JSON schema, and gets back a structured
 list of findings — each with file, line, severity, category, problem, and
-suggestion. Diffs and analyses are persisted as first-class, id-addressable
-entities (each analysis carries its run metadata: model, prompt version, tokens,
+suggestion. Reviews and assessments are persisted as first-class, id-addressable
+entities (each assessment carries its run metadata: model, prompt version, tokens,
 cost, latency), so a report can be regenerated from a stored assessment without
 re-running the LLM.
 
 It also ships an **evaluation harness** to measure review quality with method, not
 by eye: a deterministic **golden set** (does the agent catch known problems?) and
 an **LLM-as-judge** (are the comments good?).
+
+## Why this exists
+
+Calling an LLM is easy. Everything around the call is not, and that is where
+systems built on models fall over in production.
+
+Code review was chosen as the use case because it has a property most demos lack:
+you can tell whether the output is any good. A wrong line number is wrong. A
+planted bug that goes unreported was missed. That makes the system measurable
+instead of merely impressive.
+
+So the agent is the excuse and the harness is the point:
+
+- **Prompts are versioned**, so a change in quality can be attributed to a change in the prompt.
+- **Findings are grounded** against the parsed diff. The model cites the offending line, the application derives the line number. Anything computable exactly is never delegated to a model (see [ADR-003](docs/ADRs/ADR-003-line-numbers-in-application.md)).
+- **Every run records** model, prompt version, tokens, cost and latency, so a regression has evidence attached.
+- **Two evaluation layers** measure different things: a golden set for detection, an LLM-as-judge for quality, deliberately using a stronger model than the executor to avoid self-preference bias.
+- **HTTP calls retry and degrade gracefully**, so an unstable API never blocks a pull request.
+- **Engines and storage sit behind interfaces**, so swapping Claude for Ollama, or files for Postgres, is configuration rather than a code change.
+
+None of that is specific to code review. It is what any LLM-powered system needs
+before it can be trusted in production, and it is the part that usually gets
+skipped.
+
+Every non-trivial decision here was written down before implementation and
+revisited afterwards against what actually happened, including the ones that were
+reversed. They are in **[docs/ADRs](docs/ADRs/README.md)**.
 
 ## Tech stack
 
@@ -49,7 +74,7 @@ src/CodeReviewerAgent/
 │   ├── IRepository.cs                   # IProject / IReview / IAssessment / IEvaluation repository contracts
 │   ├── CostCalculator.cs                # Per-model cost (Claude + OpenAI; Ollama/subscription/OpenRouter = no estimate)
 │   ├── ReportGenerator.cs              # Markdown review report
-│   ├── GoldenEvaluator.cs              # Golden set: detection measurement; persists diffs + analyses
+│   ├── GoldenEvaluator.cs              # Golden set: detection measurement; persists reviews + assessments
 │   ├── Judge.cs                         # LLM-as-judge: quality scoring (inferential layer)
 │   ├── JudgeRunner.cs / JudgeReportGenerator.cs  # Drives + reports the judge
 │   ├── EnvLoader.cs                     # Minimal .env loader
@@ -75,12 +100,13 @@ src/CodeReviewerAgent/
 │
 ├── CodeReviewerAgent.Api/               # Read-only minimal API over the store (Swagger UI at /swagger)
 │   ├── Program.cs                       # /api/projects, /api/reviews, /api/assessments, /api/evaluations (+ /{id}, nested lists, ?projectId=)
+│   ├── Telemetry.cs                     # OpenTelemetry wiring — traces/metrics/logs over OTLP
 │   └── .env.example                     # Only STORAGE / DB_CONNECTION — no LLM keys, no writes
 │
 ├── CodeReviewerAgent.Tests/             # xUnit tests with fake ILlmClient / IDiffSource
 │
 └── web/                                 # React + TypeScript + Vite viewer for the Api
-    ├── src/App.tsx                      # Routes: diffs / analyses / evaluations (list + detail)
+    ├── src/App.tsx                      # Routes: projects / reviews / assessments / evaluations (list + detail)
     ├── src/services/api.ts              # fetch wrapper over /api/* (proxied to the Api in dev)
     ├── src/pages/                       # One folder per route
     └── src/components/{layout,features,ui}/
@@ -165,7 +191,7 @@ dotnet run -- projects           # list the stored projects
 dotnet run -- project rename N <name>   # rename a project (the Api is read-only)
 
 # Evaluate the agent
-dotnet run -- eval               # golden set (detection); persists diffs + analyses to the store
+dotnet run -- eval               # golden set (detection); persists reviews + assessments to the store
 dotnet run -- judge              # golden judge over reviews/eval-results.json (aggregate report)
 dotnet run -- all                # eval + judge in a single run
 ```
@@ -184,9 +210,35 @@ npm install                      # first run only
 npm run dev                      # http://localhost:5173 — Vite proxies /api/* to :5180
 ```
 
-Only `review`, `judge M`, and the combined review commands call the LLM; `diff`, `report`, and
-every `judge-report` do not. A diff can have many analyses (re-run `review N` with a different
-prompt/model); an analysis can have many judge evaluations.
+### Observability (optional)
+
+The Api ships OpenTelemetry: traces, metrics and logs over OTLP (`Telemetry.cs`). Point it at any
+OTLP receiver by setting one variable:
+
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:18889
+```
+
+Any OTLP collector works. The **Aspire Dashboard** is a convenient one for local use, and it runs as
+a plain container:
+
+```bash
+docker run -d --restart unless-stopped -p 18888:18888 -p 18889:18889 \
+  mcr.microsoft.com/dotnet/aspire-dashboard:latest
+```
+
+The dashboard is shared infrastructure, not part of this project. One instance serves any number of
+applications, so if you already run one, reuse it and just point the variable at it. The Api defaults
+to `localhost:18889` in its `launchSettings.json`.
+
+Telemetry is off whenever `OTEL_EXPORTER_OTLP_ENDPOINT` is unset, so a collector is never required to
+run the Api. Instrumentation is automatic only: incoming requests, `HttpClient` calls and EF Core
+commands (the SQL shows up on the span when `STORAGE=sqlite|postgres`; `files` produces no database
+spans).
+
+Only `assess M`, `judge M`, and the combined commands call the LLM; `review`, `report`, and every
+`judge-report` do not. A review can have many assessments (re-run `assess N` with a different
+prompt or model); an assessment can have many judge evaluations.
 
 ## How a review works
 
@@ -260,7 +312,7 @@ expectations (`cases.json`). `GoldenEvaluator` runs the agent over each diff
 and checks, in code, whether some finding points at the right file and mentions an
 expected keyword. The result is a **detection rate** per case (e.g. `2/3`). It also
 persists to the store: each case's diff via `GetOrAdd` (reused across runs) and each
-run's `Analysis`, so the golden analyses are addressable by id afterwards.
+run's `Assessment`, so the golden assessments are addressable by id afterwards.
 
 ### LLM-as-judge — *are the comments good?* (inferential)
 
@@ -278,7 +330,7 @@ a stored assessment and **persists** an `Evaluation` in the store, one LLM call 
 
 ### Iterating prompts
 
-Every analysis records its `promptVersion` and `model`, so prompt/model changes can be compared
+Every assessment records its `promptVersion` and `model`, so prompt/model changes can be compared
 with numbers, not by eye — the golden set guards detection, the judge guards quality.
 
 ## Tests
