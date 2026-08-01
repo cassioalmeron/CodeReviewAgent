@@ -1,131 +1,131 @@
-# ADR-002: Decisão de usar workflow (não agent) para o agente de code review como primeiro padrão arquitetural de IA aplicada
+# ADR-002: Use a workflow, not an agent, for the code review agent as the first applied AI architectural pattern
 
-**Data:** 12/06/2026
+**Date:** 2026-06-12
 
 **Status:**
-- [ ] Proposed (em discussão)
-- [x] Accepted (decisão tomada)
+- [ ] Proposed
+- [x] Accepted
 - [ ] Deprecated
 - [ ] Superseded by ADR-___
 
-**Decisor:** Cassio Almeron
+**Decision maker:** Cassio Almeron
 
-**Stakeholders consultados:** Rodrigo (Rambo)
-
----
-
-## Bloco 1 — Contexto
-
-### 3.1 — Qual o problema/necessidade
-
-Definir o padrão arquitetural do primeiro sistema de IA aplicada — um exemplo simples o suficiente para começar a internalizar os conceitos de IA aplicada na prática, e ao mesmo tempo útil e aplicável na [REDACTED] como agente de code review.
-
-### 3.2 — Por que essa decisão importa agora
-
-Essa escolha dá o direcionamento para as próximas semanas da mentoria. Escolher o padrão errado agora significa retrabalho no meio da execução. Além disso, é um caso potencialmente aplicável na [REDACTED] — o que reforça a necessidade de uma decisão consciente e fundamentada.
-
-### 3.3 — Constraints/restrições
-
-- Tempo: ~10h efetivas/semana, 4 semanas até Marco 1 (10/07/2026)
-- Custo: cap mensal de [REDACTED]
-- Performance: é um POC, nada crítico
-- Outros: MVP 100% independente de aprovação da [REDACTED]
+**Stakeholders consulted:** Rodrigo (Rambo)
 
 ---
 
-## Bloco 2 — Alternativas Consideradas
+## Block 1: Context
 
-### Alternativa A — RAG (ir direto para um chatbot com banco de dados vetorial)
+### 3.1 What is the problem or need
 
-**Descrição:** Construir um chatbot como primeiro sistema, usando RAG com banco de dados vetorial em vez de um workflow de code review.
+Define the architectural pattern for the first applied AI system: an example simple enough to start internalizing applied AI concepts in practice, and at the same time useful enough to run as a real code review agent at work.
 
-**Prós:**
-- Contemplaria um projeto de chatbot com uso de bancos de dados vetoriais — tecnologia relevante no ecossistema de IA
+### 3.2 Why this decision matters now
 
-**Contras:**
-- Passaria do tempo disponível na mentoria
-- Não cobriria o padrão workflow, que é o objetivo do aprendizado neste momento
+This choice sets the direction for the coming weeks of the mentorship. Picking the wrong pattern now means rework in the middle of execution. It is also a potentially real use case, which reinforces the need for a deliberate, well-founded decision.
 
-**Custo estimado:** alto em tempo — inviável dentro da janela atual
+### 3.3 Constraints
 
----
-
-### Alternativa B — Workflow de code review
-
-**Descrição:** Construir um agente de code review como workflow determinístico: diff entra, LLM processa, achados estruturados saem.
-
-**Prós:**
-- Contempla um caso de uso real e aplicável na [REDACTED]
-
-**Contras:**
-- Nenhum identificado
-
-**Custo estimado:** 4 semanas (Marco 1 em 10/07/2026)
+- Time: roughly 10 effective hours per week, 4 weeks until Milestone 1 (2026-07-10)
+- Cost: a tight monthly cap on LLM API spend
+- Performance: this is a POC, nothing critical
+- Other: the MVP must be entirely independent of any third-party approval
 
 ---
 
-## Bloco 3 — Decisão
+## Block 2: Alternatives considered
 
-### Alternativa escolhida
+### Alternative A: RAG, going straight to a chatbot with a vector database
 
-**Escolhi:** Alternativa B — Workflow de code review
+**Description:** Build a chatbot as the first system, using RAG with a vector database instead of a code review workflow.
 
-### Justificativa
+**Pros:**
+- Would cover a chatbot project using vector databases, a relevant technology in the AI ecosystem
 
-É viável dentro do tempo estimado de 4 semanas e tem potencial real de se tornar um caso de uso na [REDACTED]. O RAG, embora relevante, extrapolaria a janela disponível na mentoria e desviaria do objetivo de aprender o padrão workflow primeiro.
+**Cons:**
+- Would exceed the time available in the mentorship
+- Would not cover the workflow pattern, which is the learning objective right now
 
-### Trade-offs aceitos
-
-Adiar o início de um chatbot com RAG, que é outro projeto em potencial aplicável na [REDACTED] — deixado para uma próxima etapa após o Marco 1.
-
-### O que NÃO consideramos (e por quê)
-
-Continuar ou expandir projetos pessoais existentes — como a lista de mercado com reconhecimento de voz por IA. Ficou fora de cogitação porque o objetivo da mentoria é construir algo aplicável profissionalmente, com caso de uso real e documentável como portfolio.
+**Estimated cost:** high in time, not viable within the current window
 
 ---
 
-## Bloco 4 — Consequências
+### Alternative B: Code review workflow
 
-### Consequências positivas esperadas
+**Description:** Build a code review agent as a deterministic workflow: a diff goes in, the LLM processes it, structured findings come out.
 
-- Implementar um caso real de IA aplicada, utilizável em produção
-- Compreender e internalizar na prática os conceitos de workflows e agentes
+**Pros:**
+- Covers a real use case that can actually be put to work
 
-### Consequências negativas conhecidas
+**Cons:**
+- None identified
 
-- Gasto real com tokens durante o desenvolvimento e testes
+**Estimated cost:** 4 weeks (Milestone 1 on 2026-07-10)
 
-### Riscos identificados
+---
 
-| Risco | Probabilidade | Impacto | Mitigação |
+## Block 3: Decision
+
+### Chosen alternative
+
+**Chosen:** Alternative B, the code review workflow
+
+### Rationale
+
+It is feasible within the estimated four weeks and has real potential to become a use case in daily work. RAG, while relevant, would overrun the available window and divert from the goal of learning the workflow pattern first.
+
+### Accepted trade-offs
+
+Postponing the start of a RAG chatbot, another project with real potential, left for a later stage after Milestone 1.
+
+### What was NOT considered, and why
+
+Continuing or expanding existing personal projects, such as the grocery list with AI voice recognition. Out of the question because the goal of the mentorship is to build something professionally applicable, with a real use case, documentable as portfolio.
+
+---
+
+## Block 4: Consequences
+
+### Expected positive consequences
+
+- Ship a real applied AI use case, usable in production
+- Understand and internalize workflows and agents in practice
+
+### Known negative consequences
+
+- Real token spend during development and testing
+
+### Identified risks
+
+| Risk | Probability | Impact | Mitigation |
 |---|---|---|---|
-| Custo acima do cap de [REDACTED] | Alta | Médio | Usar Ollama para testes locais, reservando a API da Anthropic para validações reais |
-| Scope creep — tentar ir além do MVP | Média | Alto | Voltar ao plano e ao escopo definido no 3.1 |
-| Documentação escassa em C# para IA | Baixa | Baixo | Recorrer ao Claude Code para exemplos e suporte |
-| Bloqueio técnico em alguma implementação | Média | Alto | Recorrer ao Claude Code para destravar |
-| Imprevistos na [REDACTED] consumindo as 14h semanais | Baixa | Médio | Diminuir o escopo da sprint daquela semana |
+| Cost exceeding the monthly cap | High | Medium | Use Ollama for local testing, reserving the Anthropic API for real validations |
+| Scope creep, trying to go beyond the MVP | Medium | High | Return to the plan and the scope defined in 3.1 |
+| Scarce C# documentation for AI | Low | Low | Fall back on Claude Code for examples and support |
+| Getting technically stuck on an implementation | Medium | High | Fall back on Claude Code to get unblocked |
+| Unexpected work demands eating into the weekly hours | Low | Medium | Reduce the scope of that week's sprint |
 
-### Quando reavaliar essa decisão
+### When to revisit this decision
 
-- [ ] Se o projeto for concluído antes do prazo esperado — avaliar expandir o escopo ou iniciar um novo projeto
-- [ ] Quando o domínio sobre workflows e IA aplicada estiver internalizado — nesse ponto, o projeto pode não fazer mais sentido como exercício de aprendizado e pode ser abandonado em favor de um desafio mais avançado
+- [ ] If the project finishes ahead of schedule, evaluate expanding the scope or starting a new project
+- [ ] Once workflows and applied AI are internalized, the project may stop making sense as a learning exercise and can be dropped in favor of a more advanced challenge
 
 ---
 
-## Bloco 5 — Validação Pós-Decisão
+## Block 5: Post-decision validation
 
-_(Preencher após Marco 1 — 10/07/2026)_
+_Filled in on 2026-07-10, after Milestone 1 was delivered._
 
-### A decisão se mostrou correta?
+### Did the decision prove correct?
 
-- [ ] Sim, sem questionamento
-- [ ] Sim, mas com ajustes
-- [ ] Não — vou criar ADR-003 pra reverter
+- [x] Yes, without reservation
+- [ ] Yes, with adjustments
+- [ ] No, I will write a follow-up ADR to reverse it
 
-### O que aprendi com essa decisão
+### What I learned from this decision
 
-______
+The deterministic workflow was the right choice for a first system: full control over every step, precise instrumentation, and no overengineering. The diff to LLM to structured findings flow proved simple to understand, test and evolve. An agent here would have added complexity with no benefit. The project is being carried on independently beyond the mentorship, a sign that the use case is real and relevant.
 
-### O que faria diferente em retrospectiva
+### What I would do differently in hindsight
 
-______
+Nothing. The workflow was the right choice and the project proved applicable in practice.
