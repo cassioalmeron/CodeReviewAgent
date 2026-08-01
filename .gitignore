@@ -15,9 +15,3 @@ logs/
 *.db
 *.db-shm
 *.db-wal
-
-# Docs
-docs/Todo.md
-docs/Insights
-docs/Experiences
-docs/Plans
