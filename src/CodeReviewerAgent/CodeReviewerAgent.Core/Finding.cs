@@ -47,10 +47,15 @@ namespace CodeReviewerAgent.Core
 
     /// <summary>
     /// The structured result of a review: an overall summary and the findings, plus
-    /// the run metadata (engine, model, prompt version, cost, latency, token usage).
-    /// The metadata fields default to empty so the record can be deserialized straight
-    /// from the LLM's <c>{ summary, findings }</c> output and enriched afterwards.
+    /// the run metadata (engine, model, prompt version, activated skills, cost, latency,
+    /// token usage). The metadata fields default to empty so the record can be deserialized
+    /// straight from the LLM's <c>{ summary, findings }</c> output and enriched afterwards.
     /// </summary>
+    /// <param name="Skills">
+    /// The names of the skills whose instructions were in the prompt, comma-separated
+    /// (null when none were). Together with <see cref="PromptVersion"/> it is what makes the
+    /// effective prompt of a run reconstructible.
+    /// </param>
     public record ReviewResult(
         string? Summary,
         List<Finding>? Findings,
@@ -61,5 +66,6 @@ namespace CodeReviewerAgent.Core
         long LatencyMs = 0,
         int InputTokens = 0,
         int OutputTokens = 0,
-        string? Diff = null);
+        string? Diff = null,
+        string? Skills = null);
 }

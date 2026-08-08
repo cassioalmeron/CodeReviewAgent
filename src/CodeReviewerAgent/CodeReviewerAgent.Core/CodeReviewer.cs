@@ -14,11 +14,13 @@ namespace CodeReviewerAgent.Core
 
         private readonly ILlmClient _client;
         private readonly string _diff;
+        private readonly ISkillSelector _skillSelector;
 
-        public CodeReviewer(ILlmClient client, string diff)
+        public CodeReviewer(ILlmClient client, string diff, ISkillSelector? skillSelector = null)
         {
             _client = client;
             _diff = diff;
+            _skillSelector = skillSelector ?? SkillSelectorFactory.Create(client);
         }
 
         /// <summary>
@@ -48,10 +50,14 @@ namespace CodeReviewerAgent.Core
             var promptVersion = Environment.GetEnvironmentVariable("PROMPT_VERSION") ?? "v2";
             var systemPrompt = LoadSystemPrompt(promptVersion);
 
-            // Append the project guidelines ("skills") that apply to the files in this diff,
-            // so the model also reports convention violations as findings.
-            var files = DiffSplitter.ByFile(diff).Select(f => f.Path);
-            systemPrompt += SkillLoader.BuildGuidelines(files);
+            // The clock covers both LLM calls: the selection below and the review itself.
+            var stopwatch = Stopwatch.StartNew();
+
+            // Append the project guidelines ("skills") the model picked for this diff, so it also
+            // reports convention violations as findings.
+            var files = DiffSplitter.ByFile(diff).Select(f => f.Path).Distinct().ToList();
+            var skills = ActivateSkills(files);
+            systemPrompt += SkillPrompt.Guidelines(skills.Skills, SkillPrompt.Version);
 
             var requestBody = new
             {
@@ -64,7 +70,6 @@ namespace CodeReviewerAgent.Core
                 },
             };
 
-            var stopwatch = Stopwatch.StartNew();
             var response = _client.Request(requestBody);
             stopwatch.Stop();
 
@@ -85,11 +90,15 @@ namespace CodeReviewerAgent.Core
                 System.Console.WriteLine(result.Summary);
             DisplayFindings(findings);
 
-            var inputTokens = response?.Usage?.InputTokens ?? 0;
-            var outputTokens = response?.Usage?.OutputTokens ?? 0;
+            // The selection call is part of the review: its tokens and cost are folded into the
+            // totals, so an assessment never reports less than the run actually spent.
+            var inputTokens = (response?.Usage?.InputTokens ?? 0) + skills.InputTokens;
+            var outputTokens = (response?.Usage?.OutputTokens ?? 0) + skills.OutputTokens;
             var engine = Environment.GetEnvironmentVariable("LLM_ENGINE");
-            var cost = response?.Cost
-                ?? CostCalculator.Estimate(engine, response?.Model, inputTokens, outputTokens);
+            var cost = (response?.Cost
+                ?? CostCalculator.Estimate(engine, response?.Model,
+                    response?.Usage?.InputTokens ?? 0, response?.Usage?.OutputTokens ?? 0))
+                + skills.Cost;
 
             // Return the validated review (with derived line numbers). Persistence is a
             // separate step: the caller stores it through the repository.
@@ -99,12 +108,48 @@ namespace CodeReviewerAgent.Core
                 Engine = engine,
                 Model = response?.Model,
                 PromptVersion = promptVersion,
+                Skills = skills.Names,
                 Cost = cost,
                 LatencyMs = stopwatch.ElapsedMilliseconds,
                 InputTokens = inputTokens,
                 OutputTokens = outputTokens,
                 Diff = diff,
             };
+        }
+
+        /// <summary>What the skill flow contributed to a run: the activated skills and their cost.</summary>
+        private sealed record SkillActivation(
+            IReadOnlyList<ActivatedSkill> Skills, int InputTokens, int OutputTokens, decimal Cost)
+        {
+            public static readonly SkillActivation None = new([], 0, 0, 0m);
+
+            /// <summary>The activated names for the persisted assessment; null when none were.</summary>
+            public string? Names =>
+                Skills.Count == 0 ? null : string.Join(",", Skills.Select(s => s.Name));
+        }
+
+        /// <summary>
+        /// Progressive disclosure, tier 1 → tier 2: the catalog is offered to the selector, and
+        /// only the skills it chose have their instructions loaded. How the choice was made —
+        /// the model, the globs, the user — belongs to the strategy, not here.
+        /// </summary>
+        private SkillActivation ActivateSkills(IReadOnlyList<string> files)
+        {
+            var (catalog, _) = SkillCatalog.Discover();
+            if (catalog.Count == 0 || files.Count == 0)
+                return SkillActivation.None;
+
+            var selection = _skillSelector.Select(catalog, files);
+            var activated = catalog
+                .Where(s => selection.Names.Contains(s.Name, StringComparer.OrdinalIgnoreCase))
+                .Select(SkillCatalog.Activate)
+                .ToList();
+
+            if (activated.Count > 0)
+                System.Console.WriteLine($"Skills: {string.Join(", ", activated.Select(s => s.Name))}");
+
+            return new SkillActivation(
+                activated, selection.InputTokens, selection.OutputTokens, selection.Cost);
         }
 
         private static string LoadSystemPrompt(string version)

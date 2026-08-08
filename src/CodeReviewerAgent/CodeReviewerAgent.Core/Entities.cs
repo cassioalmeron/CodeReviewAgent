@@ -44,6 +44,8 @@ namespace CodeReviewerAgent.Core
         public string? Engine { get; init; }
         public string? Model { get; init; }
         public string? PromptVersion { get; init; }
+        /// <summary>The skills whose instructions were in the prompt, comma-separated; null when none.</summary>
+        public string? Skills { get; init; }
         public decimal Cost { get; init; }
         public long LatencyMs { get; init; }
         public int InputTokens { get; init; }
@@ -59,6 +61,7 @@ namespace CodeReviewerAgent.Core
             Engine = r.Engine,
             Model = r.Model,
             PromptVersion = r.PromptVersion,
+            Skills = r.Skills,
             Cost = r.Cost,
             LatencyMs = r.LatencyMs,
             InputTokens = r.InputTokens,

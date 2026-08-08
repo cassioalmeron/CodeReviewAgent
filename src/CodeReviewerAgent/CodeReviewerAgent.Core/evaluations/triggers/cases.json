@@ -1,0 +1,72 @@
+[
+  {
+    "name": "csharp-braces",
+    "diff": "t-01-csharp-braces.diff",
+    "expectedSkills": ["csharp"],
+    "set": "train",
+    "why": "C# code with brace and string-concatenation issues — the skill's core territory."
+  },
+  {
+    "name": "csharp-async",
+    "diff": "t-02-csharp-async.diff",
+    "expectedSkills": ["csharp"],
+    "set": "validation",
+    "why": "Blocking on .Result — an async convention the skill covers explicitly."
+  },
+  {
+    "name": "react-component",
+    "diff": "t-03-react-component.diff",
+    "expectedSkills": ["react"],
+    "set": "train",
+    "why": "Default export, any, inline styles and a missing key — all React conventions."
+  },
+  {
+    "name": "react-hook",
+    "diff": "t-04-react-hook.diff",
+    "expectedSkills": ["react"],
+    "set": "validation",
+    "why": "A .ts hook with incomplete useEffect deps and no cleanup."
+  },
+  {
+    "name": "fullstack",
+    "diff": "t-05-fullstack.diff",
+    "expectedSkills": ["csharp", "react"],
+    "set": "train",
+    "why": "One diff touching both stacks — both skills should be loaded, not just one."
+  },
+  {
+    "name": "csharp-comment-only",
+    "diff": "t-06-csharp-comment-only.diff",
+    "expectedSkills": [],
+    "set": "train",
+    "why": "Near-miss: a .cs file whose only change is a comment. The glob loads the skill here; 30 lines of C# conventions add nothing to reviewing prose."
+  },
+  {
+    "name": "ts-constants",
+    "diff": "t-07-ts-constants.diff",
+    "expectedSkills": [],
+    "set": "validation",
+    "why": "Near-miss: a .ts file that is pure configuration data — no component, no hook, no typing decision."
+  },
+  {
+    "name": "sql-migration",
+    "diff": "t-08-sql-migration.diff",
+    "expectedSkills": [],
+    "set": "train",
+    "why": "Plain negative: SQL, outside every skill's scope."
+  },
+  {
+    "name": "python-script",
+    "diff": "t-09-python-script.diff",
+    "expectedSkills": [],
+    "set": "validation",
+    "why": "Plain negative: Python, outside every skill's scope."
+  },
+  {
+    "name": "appsettings-json",
+    "diff": "t-10-appsettings-json.diff",
+    "expectedSkills": [],
+    "set": "train",
+    "why": "Near-miss: JSON living inside a C# project. Shares the repository's context but has no C# in it."
+  }
+]

@@ -1,0 +1,11 @@
+diff --git a/web/src/hooks/usePolling.ts b/web/src/hooks/usePolling.ts
+--- a/web/src/hooks/usePolling.ts
++++ b/web/src/hooks/usePolling.ts
+@@ -4,6 +4,12 @@ import { useEffect, useState } from 'react'
++export function usePolling(url: string, intervalMs: number) {
++  const [data, setData] = useState<any>(null)
++  useEffect(() => {
++    const id = setInterval(() => fetch(url).then((r) => r.json()).then(setData), intervalMs)
++  }, [])
++  return data
++}

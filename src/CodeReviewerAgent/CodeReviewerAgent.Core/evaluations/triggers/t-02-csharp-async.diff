@@ -1,0 +1,10 @@
+diff --git a/src/Services/OrderProcessor.cs b/src/Services/OrderProcessor.cs
+--- a/src/Services/OrderProcessor.cs
++++ b/src/Services/OrderProcessor.cs
+@@ -20,5 +20,10 @@ public class OrderProcessor
++    public Order Load(int id)
++    {
++        var order = _client.GetOrderAsync(id).Result;
++        return order;
++    }
+ }

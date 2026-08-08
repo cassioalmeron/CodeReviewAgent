@@ -1,0 +1,17 @@
+diff --git a/src/Api/ReportController.cs b/src/Api/ReportController.cs
+--- a/src/Api/ReportController.cs
++++ b/src/Api/ReportController.cs
+@@ -8,4 +8,8 @@ public class ReportController
++    public IActionResult Totals()
++    {
++        return Ok(_service.Totals());
++    }
+ }
+diff --git a/web/src/pages/ReportPage.tsx b/web/src/pages/ReportPage.tsx
+--- a/web/src/pages/ReportPage.tsx
++++ b/web/src/pages/ReportPage.tsx
+@@ -1,2 +1,6 @@
++export default function ReportPage() {
++  const [totals, setTotals] = useState<any>([])
++  return <ul>{totals.map((t) => <li>{t.label}</li>)}</ul>
++}

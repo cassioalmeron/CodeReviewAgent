@@ -1,0 +1,9 @@
+diff --git a/scripts/import_backup.py b/scripts/import_backup.py
+--- a/scripts/import_backup.py
++++ b/scripts/import_backup.py
+@@ -10,5 +10,10 @@ def load(path):
++def migrate(source, target):
++    rows = load(source)
++    for row in rows:
++        target.execute("INSERT INTO review VALUES (?, ?)", row)
++    target.commit()

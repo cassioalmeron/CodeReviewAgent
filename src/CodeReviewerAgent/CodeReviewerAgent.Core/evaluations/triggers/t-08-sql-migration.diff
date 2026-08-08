@@ -1,0 +1,7 @@
+diff --git a/db/migrations/003_add_skills_column.sql b/db/migrations/003_add_skills_column.sql
+--- a/db/migrations/003_add_skills_column.sql
++++ b/db/migrations/003_add_skills_column.sql
+@@ -1,2 +1,5 @@
++ALTER TABLE assessment ADD COLUMN skills TEXT NULL;
++
++CREATE INDEX idx_assessment_review ON assessment (review_id);

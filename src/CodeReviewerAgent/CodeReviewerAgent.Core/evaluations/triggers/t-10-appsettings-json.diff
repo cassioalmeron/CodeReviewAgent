@@ -1,0 +1,13 @@
+diff --git a/src/Api/appsettings.json b/src/Api/appsettings.json
+--- a/src/Api/appsettings.json
++++ b/src/Api/appsettings.json
+@@ -4,6 +4,10 @@
+   "Logging": {
+     "LogLevel": {
+-      "Default": "Information"
++      "Default": "Warning",
++      "Microsoft.EntityFrameworkCore": "Information"
+     }
+   },
++  "AllowedHosts": "*",
+ }

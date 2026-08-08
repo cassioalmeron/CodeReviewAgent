@@ -40,6 +40,7 @@ export function AssessmentDetailPage() {
                   { key: 'Engine', value: a.engine ?? '—' },
                   { key: 'Model', value: a.model ?? '—' },
                   { key: 'Prompt', value: a.promptVersion ?? '—' },
+                  { key: 'Skills', value: a.skills ?? '—' },
                   { key: 'Cost', value: cost(a.cost) },
                   { key: 'Latency', value: latency(a.latencyMs) },
                   { key: 'Tokens', value: `${tokens(a.inputTokens)} / ${tokens(a.outputTokens)}` },

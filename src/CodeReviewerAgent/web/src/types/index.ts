@@ -121,6 +121,8 @@ export interface Assessment {
   engine: string | null
   model: string | null
   promptVersion: string | null
+  /** Skills whose instructions were in the prompt, comma-separated; null when none were. */
+  skills: string | null
   cost: number
   latencyMs: number
   inputTokens: number

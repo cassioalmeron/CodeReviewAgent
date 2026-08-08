@@ -42,7 +42,7 @@ namespace CodeReviewerAgent.Core
             // The golden set is its own project, so its reviews are kept apart from real repositories.
             var project = projects.GetOrAdd("golden", "Golden Set");
 
-            var directory = Path.Combine(AppContext.BaseDirectory, "golden");
+            var directory = Path.Combine(AppContext.BaseDirectory, "evaluations", "golden");
             var cases = JsonSerializer.Deserialize<List<GoldenCase>>(
                 File.ReadAllText(Path.Combine(directory, "cases.json")), JsonOptions) ?? [];
 

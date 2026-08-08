@@ -1,0 +1,15 @@
+diff --git a/src/Api/UserController.cs b/src/Api/UserController.cs
+--- a/src/Api/UserController.cs
++++ b/src/Api/UserController.cs
+@@ -12,6 +12,12 @@ public class UserController
+     public IActionResult Get(int id)
+     {
++        var user = _repository.Find(id);
++        if (user == null)
++        {
++            return NotFound();
++        }
++        _logger.LogInformation("Loaded user " + user.Id + " from " + _source);
+         return Ok(user);
+     }
+ }

@@ -1,3 +1,4 @@
+using System.Text.Json;
 using CodeReviewerAgent.Core;
 using CodeReviewerAgent.Tests.Fakes;
 using Xunit;
@@ -6,12 +7,26 @@ namespace CodeReviewerAgent.Tests
 {
     public class CodeReviewerTests
     {
+        private const string CsharpDiff = """
+            diff --git a/App.cs b/App.cs
+            --- a/App.cs
+            +++ b/App.cs
+            @@ -1,2 +1,3 @@
+             existing line
+            +var result = service.Process();
+             trailing line
+            """;
+
+        // The system prompt of the review call, i.e. what the activated skills were folded into.
+        private static string SystemPrompt(FakeLlmClient client) =>
+            JsonSerializer.SerializeToElement(client.LastRequestBody).GetProperty("system").GetString()!;
+
         [Fact]
         public void Review_WithEmptyDiff_DoesNotCallClientAndReturnsNoFindings()
         {
             var client = new FakeLlmClient("{}");
 
-            var result = new CodeReviewer(client, "   ").Review();
+            var result = new CodeReviewer(client, "   ", new FakeSkillSelector()).Review();
 
             Assert.Null(client.LastRequestBody);
             Assert.Empty(result.Findings!);
@@ -29,7 +44,7 @@ namespace CodeReviewerAgent.Tests
                 "+New docs line.");
             var client = new FakeLlmClient("{}");
 
-            var result = new CodeReviewer(client, diff).Review();
+            var result = new CodeReviewer(client, diff, new FakeSkillSelector()).Review();
 
             Assert.Null(client.LastRequestBody);
             Assert.Empty(result.Findings!);
@@ -64,7 +79,7 @@ namespace CodeReviewerAgent.Tests
                 """;
             var client = new FakeLlmClient(response);
 
-            var result = new CodeReviewer(client, diff).Review();
+            var result = new CodeReviewer(client, diff, new FakeSkillSelector()).Review();
 
             Assert.NotNull(client.LastRequestBody);
             Assert.Equal("One issue found.", result.Summary);
@@ -104,7 +119,7 @@ namespace CodeReviewerAgent.Tests
                 """;
             var client = new FakeLlmClient(response);
 
-            var result = new CodeReviewer(client, diff).Review();
+            var result = new CodeReviewer(client, diff, new FakeSkillSelector()).Review();
 
             Assert.Empty(result.Findings!);
         }
@@ -114,10 +129,76 @@ namespace CodeReviewerAgent.Tests
         {
             var client = new FakeLlmClient("not valid json");
 
-            var result = new CodeReviewer(client, "diff --git a/App.cs b/App.cs").Review();
+            var result = new CodeReviewer(client, "diff --git a/App.cs b/App.cs", new FakeSkillSelector()).Review();
 
             Assert.Null(result.Summary);
             Assert.Empty(result.Findings!);
+        }
+
+        [Fact]
+        public void Review_LoadsOnlyTheSkillsTheModelChose()
+        {
+            var client = new FakeLlmClient("{}");
+            var selector = new FakeSkillSelector("csharp");
+
+            new CodeReviewer(client, CsharpDiff, selector).Review();
+
+            var system = SystemPrompt(client);
+            Assert.Contains("# Project guidelines", system);
+            Assert.Contains("<skill_content name=\"csharp\">", system);
+            Assert.DoesNotContain("styled-components", system); // the react skill was not loaded
+            Assert.Equal(["App.cs"], selector.LastFiles);
+        }
+
+        [Fact]
+        public void Review_RecordsWhichSkillsWereInThePrompt()
+        {
+            var withSkill = new CodeReviewer(new FakeLlmClient("{}"), CsharpDiff, new FakeSkillSelector("csharp"));
+            var withNone = new CodeReviewer(new FakeLlmClient("{}"), CsharpDiff, new FakeSkillSelector());
+
+            Assert.Equal("csharp", withSkill.Review().Skills);
+            Assert.Null(withNone.Review().Skills);
+        }
+
+        [Fact]
+        public void Review_WhenNoSkillIsChosen_OmitsTheGuidelinesSection()
+        {
+            var client = new FakeLlmClient("{}");
+
+            new CodeReviewer(client, CsharpDiff, new FakeSkillSelector()).Review();
+
+            Assert.DoesNotContain("# Project guidelines", SystemPrompt(client));
+        }
+
+        [Fact]
+        public void Review_LoadsWhateverTheStrategyChose_WithoutKnowingWhichOneItIs()
+        {
+            var client = new FakeLlmClient("{}");
+
+            // A .cs diff, and the strategy answers "react": the pipeline obeys the decision
+            // instead of second-guessing it with its own file matching.
+            new CodeReviewer(client, CsharpDiff, new GlobsOverride("react")).Review();
+
+            Assert.Contains("<skill_content name=\"react\">", SystemPrompt(client));
+            Assert.DoesNotContain("<skill_content name=\"csharp\">", SystemPrompt(client));
+        }
+
+        private sealed class GlobsOverride(params string[] names) : ISkillSelector
+        {
+            public SkillSelection Select(IReadOnlyList<SkillRef> catalog, IReadOnlyList<string> files) =>
+                new(names);
+        }
+
+        [Fact]
+        public void Review_FoldsTheSelectionUsageIntoTheTotals()
+        {
+            var client = new FakeLlmClient("{}");
+
+            var result = new CodeReviewer(client, CsharpDiff, new FakeSkillSelector("csharp")).Review();
+
+            Assert.Equal(17, result.InputTokens);  // 10 from the review + 7 from the selection
+            Assert.Equal(23, result.OutputTokens); // 20 + 3
+            Assert.Equal(0.5m, result.Cost);
         }
     }
 }

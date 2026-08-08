@@ -1,0 +1,10 @@
+diff --git a/web/src/config/endpoints.ts b/web/src/config/endpoints.ts
+--- a/web/src/config/endpoints.ts
++++ b/web/src/config/endpoints.ts
+@@ -3,4 +3,8 @@ export const ENDPOINTS = {
+   projects: '/api/projects',
++  reviews: '/api/reviews',
++  assessments: '/api/assessments',
++  evaluations: '/api/evaluations',
++  skills: '/api/skills',
+ }

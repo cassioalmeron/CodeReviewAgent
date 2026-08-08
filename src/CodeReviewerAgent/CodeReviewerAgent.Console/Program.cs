@@ -40,6 +40,7 @@ if (args.Contains("--json"))
                 engine = storedAssessment.Engine,
                 model = storedAssessment.Model,
                 promptVersion = storedAssessment.PromptVersion,
+                skills = storedAssessment.Skills,
                 files = ReviewedFiles(storedReview.Content),
                 summary = storedAssessment.Summary,
                 findings = storedAssessment.Findings,
@@ -75,6 +76,7 @@ if (args.Contains("--json"))
             engine = jsonReview.Engine,
             model = jsonReview.Model,
             promptVersion = jsonReview.PromptVersion,
+            skills = jsonReview.Skills,
             files = ReviewedFiles(jsonReview.Diff),
             summary = jsonReview.Summary,
             findings = jsonReview.Findings,
@@ -121,6 +123,57 @@ if (args is ["all", ..])
     var executor = LlmClientFactory.Create();
     RunGoldenSet(executor);
     JudgeRunner.Run(JudgeClient());
+    return;
+}
+
+// `skills` — list the discovered catalog (tier 1) and the validation diagnostics. No LLM call.
+if (args is ["skills"])
+{
+    var (catalog, diagnostics) = SkillCatalog.Discover();
+    if (catalog.Count == 0)
+        Console.WriteLine("No skills discovered.");
+    foreach (var skill in catalog)
+    {
+        Console.WriteLine($"{skill.Name}  ({skill.Location})");
+        Console.WriteLine($"  {skill.Description}");
+    }
+    if (diagnostics.Count > 0)
+        Console.WriteLine();
+    foreach (var diagnostic in diagnostics)
+        Console.WriteLine($"[{diagnostic.Level}] {diagnostic.Path}: {diagnostic.Message}");
+    return;
+}
+
+// `skills-eval` — trigger eval: does the selector pick the right skills? Runs only the selection
+// step over the labelled diffs of evaluations/triggers/cases.json, so it costs a fraction of a review.
+// Honours SKILLS, so `SKILLS=globs` scores the mechanical strategy on the same cases for free.
+if (args is ["skills-eval", ..])
+{
+    var selector = SkillSelectorFactory.Create(LlmClientFactory.Create());
+    var names = SkillCatalog.Discover().Skills.Select(s => s.Name).ToList();
+    var results = SkillTriggerEvaluator.Run(selector);
+
+    Console.WriteLine();
+    Console.WriteLine("=== Skill trigger eval ===");
+    foreach (var result in results)
+        Console.WriteLine(SkillTriggerEvaluator.FormatLine(result, names));
+    foreach (var set in results.Select(r => r.Set).Distinct())
+    {
+        var inSet = results.Where(r => r.Set == set).ToList();
+        Console.WriteLine($"{set}: {inSet.Count(r => r.Passed(names))}/{inSet.Count} passed");
+    }
+    Console.WriteLine(SkillTriggerEvaluator.FormatTotals(results));
+    Console.WriteLine($"Report saved to {SkillTriggerEvaluator.Save(results, names)}");
+    return;
+}
+
+// `skills <name>` — print the exact block this skill injects into the review prompt. No LLM call.
+if (args is ["skills", var skillName])
+{
+    var (catalog, _) = SkillCatalog.Discover();
+    var skill = catalog.FirstOrDefault(s => s.Name.Equals(skillName, StringComparison.OrdinalIgnoreCase))
+        ?? throw new InvalidOperationException($"No skill named '{skillName}'. Run `skills` to list them.");
+    Console.Write(SkillCatalog.Activate(skill).Render());
     return;
 }
 
@@ -303,7 +356,7 @@ static string[] ReviewedFiles(string? diff) =>
 
 static ReviewResult ToReviewResult(Assessment a, string diff) => new(
     a.Summary, a.Findings, a.Engine, a.Model, a.PromptVersion,
-    a.Cost, a.LatencyMs, a.InputTokens, a.OutputTokens, diff);
+    a.Cost, a.LatencyMs, a.InputTokens, a.OutputTokens, diff, a.Skills);
 
 static JudgeOutcome ToOutcome(Evaluation e) => new(
     new Judgment(e.Correctness, e.Actionability, e.Calibration, e.SignalToNoise, e.Overall, e.Rationale),

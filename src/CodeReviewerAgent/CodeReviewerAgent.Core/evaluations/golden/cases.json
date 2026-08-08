@@ -33,5 +33,19 @@
     "file": "src/Services/DuplicateFinder.cs",
     "category": "Performance",
     "keywords": ["nested", "quadratic", "performance", "hashset", "o(n"]
+  },
+  {
+    "name": "csharp-conventions",
+    "diff": "case-06-csharp-conventions.diff",
+    "file": "src/Services/NotificationService.cs",
+    "category": "Convention",
+    "keywords": ["brace", "interpolat", "concaten", "early return"]
+  },
+  {
+    "name": "react-conventions",
+    "diff": "case-07-react-conventions.diff",
+    "file": "web/src/components/AlertList.tsx",
+    "category": "Convention",
+    "keywords": ["default export", "named export", "key prop", "unique key", "missing key"]
   }
 ]

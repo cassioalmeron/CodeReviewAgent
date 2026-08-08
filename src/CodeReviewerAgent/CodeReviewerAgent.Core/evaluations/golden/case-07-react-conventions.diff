@@ -1,0 +1,16 @@
+diff --git a/web/src/components/AlertList.tsx b/web/src/components/AlertList.tsx
+--- a/web/src/components/AlertList.tsx
++++ b/web/src/components/AlertList.tsx
+@@ -1,4 +1,14 @@
+ import { useState } from 'react'
+ 
++export default function AlertList({ alerts }: { alerts: any[] }) {
++  const [open, setOpen] = useState(false)
++  return (
++    <ul>
++      {alerts.map((alert) => (
++        <li onClick={() => setOpen(!open)}>{alert.title}</li>
++      ))}
++    </ul>
++  )
++}

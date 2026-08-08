@@ -1,0 +1,10 @@
+diff --git a/src/Services/InvoiceService.cs b/src/Services/InvoiceService.cs
+--- a/src/Services/InvoiceService.cs
++++ b/src/Services/InvoiceService.cs
+@@ -30,6 +30,9 @@ public class InvoiceService
+     public decimal Total(Invoice invoice) =>
+         invoice.Lines.Sum(l => l.Amount);
++
++    // Totals exclude cancelled lines: the domain treats a cancelled line as
++    // never having existed, so it must not reach the ledger.
+ }

@@ -124,6 +124,7 @@ namespace CodeReviewerAgent.Core
             report.AppendLine($"| LLM Engine | {result.Engine ?? "—"} |");
             report.AppendLine($"| Model | {result.Model ?? "—"} |");
             report.AppendLine($"| Prompt version | {result.PromptVersion ?? "—"} |");
+            report.AppendLine($"| Skills | {result.Skills ?? "—"} |");
             report.AppendLine();
         }
 

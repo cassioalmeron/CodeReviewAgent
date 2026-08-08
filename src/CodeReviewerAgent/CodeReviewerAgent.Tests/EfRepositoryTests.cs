@@ -101,6 +101,7 @@ namespace CodeReviewerAgent.Tests
                         Engine = "openai",
                         Model = "x",
                         PromptVersion = "v3",
+                        Skills = "csharp,react",
                         Cost = 0.5m,
                         LatencyMs = 12,
                         InputTokens = 4,
@@ -150,6 +151,7 @@ namespace CodeReviewerAgent.Tests
                     Assert.NotNull(loaded);
                     Assert.Equal(reviewId, loaded!.ReviewId);
                     Assert.Equal("sum", loaded.Summary);
+                    Assert.Equal("csharp,react", loaded.Skills);
                     var finding = Assert.Single(loaded.Findings!);
                     Assert.Equal("a.cs", finding.File);
                     Assert.Equal(Severity.Warning, finding.Severity);
