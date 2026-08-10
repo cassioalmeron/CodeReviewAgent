@@ -60,7 +60,7 @@ namespace CodeReviewerAgent.Core
         public static IReadOnlyList<SkillTriggerResult> Run(ISkillSelector selector)
         {
             var runs = int.TryParse(Environment.GetEnvironmentVariable("SKILL_EVAL_RUNS"), out var n) && n > 0 ? n : 3;
-            var directory = Path.Combine(AppContext.BaseDirectory, "evaluations", "triggers");
+            var directory = Path.Combine(AppContext.BaseDirectory, "evals", "triggers");
             var cases = JsonSerializer.Deserialize<List<SkillTriggerCase>>(
                 File.ReadAllText(Path.Combine(directory, "cases.json")), JsonOptions) ?? [];
 
@@ -132,7 +132,8 @@ namespace CodeReviewerAgent.Core
             return path;
         }
 
-        private static string Generate(IReadOnlyList<SkillTriggerResult> results, IReadOnlyList<string> catalog)
+        /// <summary>Renders the markdown report. Pure — <see cref="Save"/> is this plus a write.</summary>
+        public static string Generate(IReadOnlyList<SkillTriggerResult> results, IReadOnlyList<string> catalog)
         {
             var report = new StringBuilder();
             report.AppendLine("# Skill trigger eval");

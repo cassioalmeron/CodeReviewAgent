@@ -1,0 +1,20 @@
+diff --git a/src/Notifications/RecipientResolver.cs b/src/Notifications/RecipientResolver.cs
+index 2c3d4e5..9f0a1b2 100644
+--- a/src/Notifications/RecipientResolver.cs
++++ b/src/Notifications/RecipientResolver.cs
+@@ -6,7 +6,17 @@ public class RecipientResolver
+ {
+     private readonly NotificationOptions _options;
+
++    public string[] Resolve(string[] configured)
++    {
++        if (configured.Length == 0)
++            return [_options.FallbackAddress];
++
++        return [.. configured, _options.FallbackAddress];
++    }
++
++    public string[] Merge(string[] primary, string[] secondary) => [.. primary, .. secondary];
++
+     public bool IsEnabled => _options.Enabled;
+ }

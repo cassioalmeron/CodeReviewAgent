@@ -135,10 +135,10 @@ namespace CodeReviewerAgent.Tests
         }
 
         [Fact]
-        public void Save_FlagsAReportBuiltOnUnreadableAnswers()
+        public void Report_FlagsAReportBuiltOnUnreadableAnswers()
         {
-            var report = File.ReadAllText(SkillTriggerEvaluator.Save(
-                SkillTriggerEvaluator.Run(new UnreadableSelector()), Catalog));
+            var report = SkillTriggerEvaluator.Generate(
+                SkillTriggerEvaluator.Run(new UnreadableSelector()), Catalog);
 
             // Negative cases "pass" when nothing is selected, so a run that never answered would
             // otherwise look like a good score.
@@ -174,10 +174,10 @@ namespace CodeReviewerAgent.Tests
         }
 
         [Fact]
-        public void Save_ReportsTokensCostAndLatency()
+        public void Report_ReportsTokensCostAndLatency()
         {
-            var report = File.ReadAllText(SkillTriggerEvaluator.Save(
-                SkillTriggerEvaluator.Run(new MeteredSelector()), Catalog));
+            var report = SkillTriggerEvaluator.Generate(
+                SkillTriggerEvaluator.Run(new MeteredSelector()), Catalog);
 
             Assert.Contains("## Cost", report);
             Assert.Contains("Tokens", report);
@@ -186,12 +186,10 @@ namespace CodeReviewerAgent.Tests
         }
 
         [Fact]
-        public void Save_WritesAReportWithTheRatesPerSet()
+        public void Report_WritesAReportWithTheRatesPerSet()
         {
-            var path = SkillTriggerEvaluator.Save(
+            var report = SkillTriggerEvaluator.Generate(
                 SkillTriggerEvaluator.Run(new FixedSelector("csharp")), Catalog);
-
-            var report = File.ReadAllText(path);
             Assert.Contains("# Skill trigger eval", report);
             Assert.Contains("csharp-braces", report);
             Assert.Contains("**train**", report);

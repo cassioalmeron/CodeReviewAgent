@@ -1,0 +1,174 @@
+[
+  {
+    "name": "sql-injection",
+    "diff": "case-01-sql-injection.diff",
+    "groundTruth": "case-01-sql-injection.md",
+    "expect": {
+      "$type": "finding",
+      "file": "src/Data/UserRepository.cs",
+      "category": "Security",
+      "keywords": ["injection", "sql", "parameter"]
+    }
+  },
+  {
+    "name": "hardcoded-secret",
+    "diff": "case-02-hardcoded-secret.diff",
+    "groundTruth": "case-02-hardcoded-secret.md",
+    "expect": {
+      "$type": "finding",
+      "file": "src/Services/PaymentClient.cs",
+      "category": "Security",
+      "keywords": ["secret", "hardcoded", "key", "credential"]
+    }
+  },
+  {
+    "name": "null-dereference",
+    "diff": "case-03-null-dereference.diff",
+    "groundTruth": "case-03-null-dereference.md",
+    "expect": {
+      "$type": "finding",
+      "file": "src/Services/OrderService.cs",
+      "category": "Bug",
+      "keywords": ["null"]
+    }
+  },
+  {
+    "name": "off-by-one",
+    "diff": "case-04-off-by-one.diff",
+    "groundTruth": "case-04-off-by-one.md",
+    "expect": {
+      "$type": "finding",
+      "file": "src/Utils/ArrayHelper.cs",
+      "category": "Bug",
+      "keywords": ["off-by-one", "out of range", "index", "bounds", "length"]
+    }
+  },
+  {
+    "name": "quadratic-loop",
+    "diff": "case-05-quadratic-loop.diff",
+    "groundTruth": "case-05-quadratic-loop.md",
+    "expect": {
+      "$type": "finding",
+      "file": "src/Services/DuplicateFinder.cs",
+      "category": "Performance",
+      "keywords": ["nested", "quadratic", "performance", "hashset", "o(n"]
+    }
+  },
+  {
+    "name": "csharp-conventions",
+    "diff": "case-06-csharp-conventions.diff",
+    "groundTruth": "case-06-csharp-conventions.md",
+    "expect": {
+      "$type": "finding",
+      "file": "src/Services/NotificationService.cs",
+      "category": "Convention",
+      "keywords": ["brace", "interpolat", "concaten", "early return"]
+    }
+  },
+  {
+    "name": "react-conventions",
+    "diff": "case-07-react-conventions.diff",
+    "groundTruth": "case-07-react-conventions.md",
+    "expect": {
+      "$type": "finding",
+      "file": "web/src/components/AlertList.tsx",
+      "category": "Convention",
+      "keywords": ["default export", "named export", "key prop", "unique key", "missing key"]
+    }
+  },
+
+  {
+    "name": "extension-block",
+    "diff": "case-08-extension-block.diff",
+    "groundTruth": "case-08-extension-block.md",
+    "since": "C# 14",
+    "expect": {
+      "$type": "noFinding",
+      "file": "src/Domain/MoneyExtensions.cs",
+      "snippet": "extension(decimal value)"
+    }
+  },
+  {
+    "name": "collection-spread",
+    "diff": "case-09-collection-spread.diff",
+    "groundTruth": "case-09-collection-spread.md",
+    "since": "C# 12",
+    "expect": {
+      "$type": "noFinding",
+      "file": "src/Notifications/RecipientResolver.cs",
+      "snippet": "return [.. configured, _options.FallbackAddress];"
+    }
+  },
+  {
+    "name": "raw-string-literal",
+    "diff": "case-10-raw-string-literal.diff",
+    "groundTruth": "case-10-raw-string-literal.md",
+    "since": "C# 11",
+    "expect": {
+      "$type": "noFinding",
+      "file": "src/Data/InvoiceQueries.cs",
+      "snippet": "public const string PendingInvoices = \"\"\""
+    }
+  },
+
+  {
+    "name": "primary-ctor-capture",
+    "diff": "case-11-primary-ctor-capture.diff",
+    "groundTruth": "case-11-primary-ctor-capture.md",
+    "since": "C# 12",
+    "expect": {
+      "$type": "finding",
+      "file": "src/Resilience/RetryPolicy.cs",
+      "category": "Bug",
+      "keywords": ["captur", "backing field", "shared state", "shared across"]
+    }
+  },
+  {
+    "name": "mutable-struct-key",
+    "diff": "case-12-mutable-struct-key.diff",
+    "groundTruth": "case-12-mutable-struct-key.md",
+    "since": "C# 10",
+    "expect": {
+      "$type": "finding",
+      "file": "src/Caching/VersionCache.cs",
+      "category": "Bug",
+      "keywords": ["mutab", "hash code", "unreachable", "copy of the struct", "always null"]
+    }
+  },
+  {
+    "name": "enumerator-cancellation",
+    "diff": "case-13-enumerator-cancellation.diff",
+    "groundTruth": "case-13-enumerator-cancellation.md",
+    "since": "C# 8",
+    "expect": {
+      "$type": "finding",
+      "file": "src/Chat/ChatStreamService.cs",
+      "category": "Bug",
+      "keywords": ["enumeratorcancellation", "unconsumed", "withcancellation"]
+    }
+  },
+
+  {
+    "name": "enum-switch-gap",
+    "diff": "case-14-enum-switch-gap.diff",
+    "groundTruth": "case-14-enum-switch-gap.md",
+    "expect": {
+      "$type": "finding",
+      "file": "Backend/RewardStar.Api/Controllers/GameController.cs",
+      "category": "Bug",
+      "keywords": ["chocolate", "keynotfound", "missing entry"]
+    }
+  },
+  {
+    "name": "required-bypass",
+    "diff": "case-15-required-bypass.diff",
+    "groundTruth": "case-15-required-bypass.md",
+    "since": "C# 11",
+    "expect": {
+      "$type": "finding",
+      "file": "src/Notifications/Recipient.cs",
+      "category": "Bug",
+      "keywords": ["retrylimit", "setsrequiredmembers", "never set"]
+    }
+  }
+]

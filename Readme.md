@@ -74,13 +74,16 @@ src/CodeReviewerAgent/
 │   ├── IRepository.cs                   # IProject / IReview / IAssessment / IEvaluation repository contracts
 │   ├── CostCalculator.cs                # Per-model cost (Claude + OpenAI; Ollama/subscription/OpenRouter = no estimate)
 │   ├── ReportGenerator.cs              # Markdown review report
-│   ├── GoldenEvaluator.cs              # Golden set: detection measurement; persists reviews + assessments
+│   ├── GoldenCase.cs                   # Golden vocabulary: expectations (finding | noFinding), case, result, condition
+│   ├── GoldenScorer.cs                 # The golden verdict as a pure function — detection + trap resistance
+│   ├── GoldenEvaluator.cs              # Golden set: runs the cases, scores, persists, reports
 │   ├── Judge.cs                         # LLM-as-judge: quality scoring (inferential layer)
 │   ├── JudgeRunner.cs / JudgeReportGenerator.cs  # Drives + reports the judge
 │   ├── EnvLoader.cs                     # Minimal .env loader
 │   ├── prompts/review-v1..v5.md         # Versioned review system prompts (v3 is the default)
 │   ├── rubrics/judge-v1.md              # Versioned judge rubric
-│   └── golden/                          # cases.json + the known-problem diffs
+│   ├── evals/golden/                    # cases.json + the known-problem diffs (detection)
+│   └── evals/triggers/                  # cases.json + the labelled diffs (skill selection)
 │
 ├── CodeReviewerAgent.Infra/              # Implementations behind Core's contracts (persistence + LLM engines)
 │   ├── FileRepository.cs                # File-backed repos (projects/ + reviews/ + assessments/ + evaluations/, id = max+1)
@@ -159,6 +162,7 @@ OPENROUTER_MODEL=openai/gpt-4o-mini
 
 # Evaluation
 GOLDEN_RUNS=3                  # runs per golden case (averages out non-determinism)
+GOLDEN_PARALLELISM=4           # concurrent LLM calls in the golden set
 JUDGE_MODEL=claude-sonnet-4-6  # stronger than the executor, to avoid self-preference bias
 RUBRIC_VERSION=v1              # rubrics/judge-<version>.md
 ```
@@ -191,7 +195,8 @@ dotnet run -- projects           # list the stored projects
 dotnet run -- project rename N <name>   # rename a project (the Api is read-only)
 
 # Evaluate the agent
-dotnet run -- eval               # golden set (detection); persists reviews + assessments to the store
+dotnet run -- eval               # golden set (detection + traps); persists reviews + assessments to the store
+dotnet run -- eval extension-block          # only the named case(s), comma-separated
 dotnet run -- judge              # golden judge over reviews/eval-results.json (aggregate report)
 dotnet run -- all                # eval + judge in a single run
 ```
@@ -304,15 +309,34 @@ from the model but derived by matching the snippet against the parsed diff.
 
 Two layers measure different things on the same diffs:
 
-### Golden set — *does the agent catch the problem?* (computational)
+### Golden set — *does the agent catch the problem, and does it stay quiet when there is none?*
 
-`golden/` holds a handful of diffs, each with a known, planted problem and its
-expectations (`cases.json`). `GoldenEvaluator` runs the agent over each diff
-`GOLDEN_RUNS` times (LLM output is non-deterministic, so one run is a noisy sample)
-and checks, in code, whether some finding points at the right file and mentions an
-expected keyword. The result is a **detection rate** per case (e.g. `2/3`). It also
-persists to the store: each case's diff via `GetOrAdd` (reused across runs) and each
-run's `Assessment`, so the golden assessments are addressable by id afterwards.
+`evals/golden/` holds **15 diffs whose correct outcome is known**, declared in `cases.json`.
+Each runs `GOLDEN_RUNS` times (LLM output is non-deterministic, so one run is a noisy
+sample), and each carries one of two expectations:
+
+- **Detection** (12 cases) — a problem was planted, and some finding must point at the
+  right file and mention an expected keyword.
+- **Trap resistance** (3 cases) — the code is **correct**, and carries a bait: a modern
+  C# construct an older model mistakes for a syntax error. The model loses the case only
+  by flagging that bait; a legitimate remark elsewhere in the diff is ignored, otherwise
+  the trap would just reward saying little.
+
+The two rates are reported **separately and never summed** — detection and resistance
+answer opposite questions, and one number hides which side failed. The report also breaks
+them down by the C# version each case requires, and states which skills were active, so a
+run with the harness is never confused with one without it.
+
+Each case has a ground-truth `.md` next to its `.diff` explaining the defect — or, for a
+trap, why the code is correct. Tests enforce that every case has one.
+
+The LLM calls run concurrently (`GOLDEN_PARALLELISM`); scoring and persistence stay
+sequential. Results persist to the store: each case's diff via `GetOrAdd` (reused across
+runs) and each run's `Assessment`, so the golden assessments are addressable by id
+afterwards.
+
+`dotnet run -- eval <case>` narrows to named cases — the tight loop for tuning a prompt or
+a skill without paying for a full pass.
 
 ### LLM-as-judge — *are the comments good?* (inferential)
 
@@ -352,6 +376,6 @@ implementations (no network, no git), plus `DiffSourceFactory` routing.
 - **New storage backend** — implement the repository contracts (`IProjectRepository` / `IReviewRepository` / `IAssessmentRepository` / `IEvaluationRepository`) in `CodeReviewerAgent.Infra/` and add a case in `RepositoryFactory`.
 - **New DB provider** — add an `IDbProviderStrategy` (e.g. `UseSqlServer`) and register it in `RepositoryFactory`; the context and model are unchanged.
 - **New prompt / rubric version** — add `prompts/review-v6.md` (or `rubrics/judge-v2.md`) and point the env var at it.
-- **New golden case** — add a `.diff` and an entry in `golden/cases.json`.
+- **New golden case** — add a `.diff` and an entry in `evals/golden/cases.json`.
 - **New Api endpoint** — add a route in `CodeReviewerAgent.Api/Program.cs` (read-only, against the store); mirror the shape in `web/src/types/index.ts` and `web/src/services/api.ts`.
 - **New web page** — add a folder under `web/src/pages/` and a route in `web/src/App.tsx`.

@@ -1,0 +1,41 @@
+diff --git a/Backend/RewardStar.Core/Models/RewardType.cs b/Backend/RewardStar.Core/Models/RewardType.cs
+index 7b8c9d0..4e5f6a7 100644
+--- a/Backend/RewardStar.Core/Models/RewardType.cs
++++ b/Backend/RewardStar.Core/Models/RewardType.cs
+@@ -3,6 +3,7 @@ namespace RewardStar.Core.Models;
+ public enum RewardType
+ {
+     MMs = 1,
+     Bibs = 2,
+-    Caramel = 3
++    Caramel = 3,
++    Chocolate = 4
+ }
+diff --git a/Backend/RewardStar.Api/Controllers/GameController.cs b/Backend/RewardStar.Api/Controllers/GameController.cs
+index 8c9d0e1..5f6a7b8 100644
+--- a/Backend/RewardStar.Api/Controllers/GameController.cs
++++ b/Backend/RewardStar.Api/Controllers/GameController.cs
+@@ -25,6 +25,22 @@ public class GameController : ControllerBase
+     private static readonly Dictionary<RewardType, int> REWARD_COSTS = new()
+     {
+         { RewardType.MMs, 2 },
+         { RewardType.Bibs, 4 },
+         { RewardType.Caramel, 6 }
+     };
+
++    [HttpPost("redeem")]
++    public async Task<IActionResult> Redeem(RewardType reward)
++    {
++        var cost = REWARD_COSTS[reward];
++        var user = await _context.Users.FindAsync(GetCurrentUserId());
++        if (user.Points < cost)
++            return BadRequest("Not enough points.");
++
++        user.Points -= cost;
++        await _context.SaveChangesAsync();
++        return Ok(user.Points);
++    }
++
+     [HttpGet("activities")]
+     public async Task<IActionResult> GetActivities() =>
+         Ok(await _context.Activities.ToListAsync());

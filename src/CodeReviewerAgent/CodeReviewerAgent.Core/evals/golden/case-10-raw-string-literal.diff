@@ -1,0 +1,19 @@
+diff --git a/src/Data/InvoiceQueries.cs b/src/Data/InvoiceQueries.cs
+index 3d4e5f6..0a1b2c3 100644
+--- a/src/Data/InvoiceQueries.cs
++++ b/src/Data/InvoiceQueries.cs
+@@ -1,6 +1,16 @@
+ namespace Billing.Data;
+
+ public static class InvoiceQueries
+ {
++    public const string PendingInvoices = """
++        SELECT i.Id, i.Total, i.DueDate
++        FROM Invoices i
++        WHERE i.Status = 'Pending'
++          AND i.TenantId = @tenantId
++        ORDER BY i.DueDate
++        """;
++
+     public const string CountAll = "SELECT COUNT(*) FROM Invoices";
+ }

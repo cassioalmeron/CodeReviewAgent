@@ -1,0 +1,25 @@
+diff --git a/src/Caching/VersionCache.cs b/src/Caching/VersionCache.cs
+index 5f6a7b8..2c3d4e5 100644
+--- a/src/Caching/VersionCache.cs
++++ b/src/Caching/VersionCache.cs
+@@ -1,9 +1,22 @@
+ namespace Billing.Caching;
+
++public record struct CacheKey(string Tenant, int Version);
++
+ public class VersionCache
+ {
+     private readonly Dictionary<CacheKey, string> _entries = [];
+
++    public void Store(CacheKey key, string payload) => _entries[key] = payload;
++
++    /// <summary>Stores the payload, then advances the key to the version it now points at.</summary>
++    public string? Renew(CacheKey key, string payload)
++    {
++        _entries[key] = payload;
++        key.Version++;
++        return _entries.TryGetValue(key, out var renewed) ? renewed : null;
++    }
++
+     public int Count => _entries.Count;
+ }

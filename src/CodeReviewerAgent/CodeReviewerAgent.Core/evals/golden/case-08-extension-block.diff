@@ -1,0 +1,20 @@
+diff --git a/src/Domain/MoneyExtensions.cs b/src/Domain/MoneyExtensions.cs
+index 7a1b2c3..8d4e5f6 100644
+--- a/src/Domain/MoneyExtensions.cs
++++ b/src/Domain/MoneyExtensions.cs
+@@ -1,7 +1,17 @@
+ namespace Billing.Domain;
+
+ public static class MoneyExtensions
+ {
++    extension(decimal value)
++    {
++        public decimal RoundedToCents => Math.Round(value, 2, MidpointRounding.ToEven);
++
++        public bool IsChargeable => value > 0m;
++
++        public decimal WithTax(decimal rate) => (value * (1 + rate)).RoundedToCents;
++    }
++
+     public static string ToDisplay(this decimal value) => $"{value:C}";
+ }

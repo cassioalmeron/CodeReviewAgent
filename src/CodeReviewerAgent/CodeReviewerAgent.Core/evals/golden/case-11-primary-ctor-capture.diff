@@ -1,0 +1,18 @@
+diff --git a/src/Resilience/RetryPolicy.cs b/src/Resilience/RetryPolicy.cs
+index 4e5f6a7..1b2c3d4 100644
+--- a/src/Resilience/RetryPolicy.cs
++++ b/src/Resilience/RetryPolicy.cs
+@@ -1,9 +1,17 @@
+ namespace Billing.Resilience;
+
+-public class RetryPolicy
+-{
+-    public Func<bool> ShouldRetry(int attempts) => () => attempts-- > 0;
+-}
++public class RetryPolicy(int attempts)
++{
++    /// <summary>Hands the caller a predicate to poll before each attempt.</summary>
++    public Func<bool> ShouldRetry() => () => attempts-- > 0;
++
++    public bool IsExhausted => attempts <= 0;
++}

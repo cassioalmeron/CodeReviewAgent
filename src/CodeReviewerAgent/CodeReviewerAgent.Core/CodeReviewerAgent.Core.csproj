@@ -13,7 +13,7 @@
 
   <ItemGroup>
     <None Include="prompts\**\*.md" CopyToOutputDirectory="PreserveNewest" />
-    <None Include="evaluations\**\*" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="evals\**\*" CopyToOutputDirectory="PreserveNewest" />
     <None Include="rubrics\**\*.md" CopyToOutputDirectory="PreserveNewest" />
     <None Include="skills\**\*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>

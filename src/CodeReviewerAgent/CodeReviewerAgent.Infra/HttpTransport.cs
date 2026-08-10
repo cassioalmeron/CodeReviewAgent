@@ -8,9 +8,16 @@ namespace CodeReviewerAgent.Infra
         string Post(string path, string json);
     }
 
-    /// <summary>A transient (retryable) HTTP failure: 429, 5xx, network error, or timeout.</summary>
-    internal sealed class TransientHttpException(string message, Exception? inner = null)
-        : Exception(message, inner);
+    /// <summary>
+    /// A transient (retryable) HTTP failure: 429, 5xx, network error, or timeout.
+    /// <see cref="RetryAfter"/> carries the delay the server asked for, when it named one.
+    /// </summary>
+    internal sealed class TransientHttpException(
+        string message, Exception? inner = null, TimeSpan? retryAfter = null)
+        : Exception(message, inner)
+    {
+        public TimeSpan? RetryAfter { get; } = retryAfter;
+    }
 
     /// <summary>
     /// A single JSON POST over an <see cref="HttpClient"/>. Returns the body on success;
@@ -43,8 +50,20 @@ namespace CodeReviewerAgent.Infra
 
             var status = (int)response.StatusCode;
             if (status == 429 || status >= 500)
-                throw new TransientHttpException($"HTTP {status}: {body}");
+                throw new TransientHttpException($"HTTP {status}: {body}", retryAfter: RetryAfter(response));
             throw new HttpRequestException($"HTTP request failed ({status}): {body}");
+        }
+
+        // A rate-limited response says when the window reopens. Standard `Retry-After` comes as
+        // either a delay or an absolute date; both are honoured.
+        private static TimeSpan? RetryAfter(HttpResponseMessage response)
+        {
+            var header = response.Headers.RetryAfter;
+            if (header?.Delta is { } delta)
+                return delta;
+            if (header?.Date is { } date)
+                return date - DateTimeOffset.UtcNow is { Ticks: > 0 } wait ? wait : TimeSpan.Zero;
+            return null;
         }
     }
 
@@ -54,7 +73,7 @@ namespace CodeReviewerAgent.Infra
     /// maxAttempts and backoff are seams for tests; production uses the defaults.
     /// </summary>
     internal sealed class ResilientHttpTransport(
-        IHttpTransport inner, int maxAttempts = 3, Action<TimeSpan>? backoff = null) : IHttpTransport
+        IHttpTransport inner, int maxAttempts = 5, Action<TimeSpan>? backoff = null) : IHttpTransport
     {
         private readonly Action<TimeSpan> _backoff = backoff ?? Thread.Sleep;
 
@@ -63,16 +82,19 @@ namespace CodeReviewerAgent.Infra
             var attempt = 1;
             while (true)
             {
+                TimeSpan? asked = null;
                 try
                 {
                     return inner.Post(path, json);
                 }
-                catch (TransientHttpException) when (attempt < maxAttempts)
+                catch (TransientHttpException ex) when (attempt < maxAttempts)
                 {
-                    // retryable — fall through to backoff and retry
+                    asked = ex.RetryAfter;
                 }
 
-                _backoff(TimeSpan.FromSeconds(Math.Pow(2, attempt - 1))); // 1s, 2s, ...
+                // The server's own delay wins when it named one: a token-per-minute window
+                // reopens on its schedule, not on a curve we invented.
+                _backoff(asked ?? TimeSpan.FromSeconds(Math.Pow(2, attempt - 1))); // 1s, 2s, 4s, ...
                 attempt++;
             }
         }

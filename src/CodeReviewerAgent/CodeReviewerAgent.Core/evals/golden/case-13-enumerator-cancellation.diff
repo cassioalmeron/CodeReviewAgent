@@ -1,0 +1,21 @@
+diff --git a/src/Chat/ChatStreamService.cs b/src/Chat/ChatStreamService.cs
+index 6a7b8c9..3d4e5f6 100644
+--- a/src/Chat/ChatStreamService.cs
++++ b/src/Chat/ChatStreamService.cs
+@@ -7,7 +7,20 @@ public class ChatStreamService
+     private readonly IChatRepository _repository;
+     private readonly ILlmService _llm;
+
++    public async IAsyncEnumerable<string> Stream(
++        int chatId, string prompt, CancellationToken cancellationToken = default)
++    {
++        var chat = await _repository.FindAsync(chatId, cancellationToken);
++        if (chat is null)
++            yield break;
++
++        await foreach (var chunk in _llm.ProcessAsync(chat, prompt, cancellationToken))
++            yield return chunk;
++    }
++
+     public Task FlushAsync() => _repository.SaveChangesAsync();
+ }

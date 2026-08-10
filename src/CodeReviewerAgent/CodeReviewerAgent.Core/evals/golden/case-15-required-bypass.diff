@@ -1,0 +1,28 @@
+diff --git a/src/Notifications/Recipient.cs b/src/Notifications/Recipient.cs
+index 9d0e1f2..6a7b8c9 100644
+--- a/src/Notifications/Recipient.cs
++++ b/src/Notifications/Recipient.cs
+@@ -1,10 +1,13 @@
++using System.Diagnostics.CodeAnalysis;
++
+ namespace Billing.Notifications;
+
+ public record Recipient
+ {
+     public required string Name { get; init; }
+
++    public required int RetryLimit { get; init; }
++
+     public string? DisplayName { get; init; }
+ }
+@@ -14,8 +17,16 @@ public record Recipient
+ {
+     public string Address { get; init; } = string.Empty;
+
++    [SetsRequiredMembers]
++    public Recipient(string name) => Name = name;
++
++    public Recipient() { }
++
+     public override string ToString() => DisplayName ?? Name;
+ }
