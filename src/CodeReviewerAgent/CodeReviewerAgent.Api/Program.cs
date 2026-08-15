@@ -1,9 +1,10 @@
 using System.Text.Json.Serialization;
 using CodeReviewerAgent.Core;
 using CodeReviewerAgent.Infra;
+using DotNetEnv;
 
-// Reuse the Core .env loader so STORAGE / DB_CONNECTION resolve exactly as they do for the CLI.
-EnvLoader.Load(Path.Combine(AppContext.BaseDirectory, ".env"));
+// Uses DotNetEnv (NoClobber) so STORAGE / DB_CONNECTION resolve exactly as they do for the CLI.
+Env.NoClobber().Load(Path.Combine(AppContext.BaseDirectory, ".env"));
 
 var builder = WebApplication.CreateBuilder(args);
 

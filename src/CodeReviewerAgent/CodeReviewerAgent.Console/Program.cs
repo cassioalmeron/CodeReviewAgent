@@ -3,8 +3,9 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using CodeReviewerAgent.Core;
 using CodeReviewerAgent.Infra;
+using DotNetEnv;
 
-EnvLoader.Load(Path.Combine(AppContext.BaseDirectory, ".env"));
+Env.NoClobber().Load(Path.Combine(AppContext.BaseDirectory, ".env"));
 
 // Dispatch only: every command's body is a method below, in the same order as the branches here.
 // Order matters where patterns overlap — the id-bearing forms of `judge` and `judge-report` have to

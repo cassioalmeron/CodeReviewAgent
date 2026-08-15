@@ -79,7 +79,6 @@ src/CodeReviewerAgent/
 │   ├── GoldenEvaluator.cs              # Golden set: runs the cases, scores, persists, reports
 │   ├── Judge.cs                         # LLM-as-judge: quality scoring (inferential layer)
 │   ├── JudgeRunner.cs / JudgeReportGenerator.cs  # Drives + reports the judge
-│   ├── EnvLoader.cs                     # Minimal .env loader
 │   ├── prompts/review-v1..v5.md         # Versioned review system prompts (v3 is the default)
 │   ├── rubrics/judge-v1.md              # Versioned judge rubric
 │   ├── evals/golden/                    # cases.json + the known-problem diffs (detection)

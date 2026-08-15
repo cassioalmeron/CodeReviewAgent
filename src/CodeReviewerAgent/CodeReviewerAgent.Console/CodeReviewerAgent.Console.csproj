@@ -12,6 +12,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="DotNetEnv" Version="3.2.0" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\CodeReviewerAgent.Core\CodeReviewerAgent.Core.csproj" />
     <ProjectReference Include="..\CodeReviewerAgent.Infra\CodeReviewerAgent.Infra.csproj" />
   </ItemGroup>
