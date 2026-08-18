@@ -204,7 +204,7 @@ namespace CodeReviewerAgent.Core
             if (hasTraps)
                 footer.AppendLine($"- **Trap resistance** {Rate(results, GoldenKind.Trap)} {Scope(results, GoldenKind.Trap)}");
 
-            AppendKnowledgeCutoff(footer, results, hasTraps);
+            AppendVersionLadder(footer, results, hasTraps);
             return footer.ToString();
         }
 
@@ -236,9 +236,11 @@ namespace CodeReviewerAgent.Core
             }
         }
 
-        // Scaled by the C# version each case requires, so the report says where a model's
-        // knowledge cutoff sits rather than only that it failed.
-        private static void AppendKnowledgeCutoff(
+        // Scaled by the C# version each case requires, so the report says which constructs a model
+        // handles badly rather than only that it failed. Deliberately not called a knowledge cutoff:
+        // measurement rejected that reading. gpt-4.1 (cutoff jun/2024) fails C# 12 from 2023 and
+        // deepseek (cutoff apr/2026) fails C# 11 from 2022, both well inside their training window.
+        private static void AppendVersionLadder(
             StringBuilder footer, IReadOnlyList<GoldenCaseResult> results, bool hasTraps)
         {
             // Ordered as a ladder, oldest first — "C# 8" before "C# 14", which a string sort gets
@@ -252,7 +254,7 @@ namespace CodeReviewerAgent.Core
                 return;
 
             footer.AppendLine();
-            footer.AppendLine("## Knowledge cutoff");
+            footer.AppendLine("## By required C# version");
             footer.AppendLine();
             footer.AppendLine($"| Since | Cases | Detection |{(hasTraps ? " Trap resistance |" : "")}");
             footer.AppendLine($"|---|---|---|{(hasTraps ? "---|" : "")}");

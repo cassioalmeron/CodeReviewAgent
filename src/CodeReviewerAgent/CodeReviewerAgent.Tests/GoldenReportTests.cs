@@ -59,8 +59,8 @@ namespace CodeReviewerAgent.Tests
         }
 
         /// <summary>
-        /// The breakdown is a ladder: it exists to show <em>where</em> a model's knowledge stops, so
-        /// it has to read oldest-first. A plain string sort puts "C# 8" after "C# 14".
+        /// The breakdown is a ladder: it exists to show <em>which</em> constructs a model handles
+        /// badly, so it has to read oldest-first. A plain string sort puts "C# 8" after "C# 14".
         /// </summary>
         [Fact]
         public void OrdersTheVersionsChronologicallyNotAlphabetically()

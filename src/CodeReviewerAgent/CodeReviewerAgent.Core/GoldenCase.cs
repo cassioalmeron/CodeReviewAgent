@@ -20,8 +20,8 @@ namespace CodeReviewerAgent.Core
     public sealed record ExpectFinding(string File, Category Category, List<string> Keywords) : GoldenExpectation;
 
     /// <summary>
-    /// The diff is correct. <paramref name="Snippet"/> is the bait: the construct a model with an
-    /// older knowledge cutoff mistakes for an error. It is anchored by text rather than by line
+    /// The diff is correct. <paramref name="Snippet"/> is the bait: a construct some models mistake
+    /// for an error. It is anchored by text rather than by line
     /// number so that editing the diff can never turn the case into a silent pass — the worst
     /// failure a ruler can have, because it makes no noise.
     /// </summary>
@@ -30,8 +30,8 @@ namespace CodeReviewerAgent.Core
     /// <summary>
     /// A golden case: a diff, its documented ground truth, and what the agent is expected to do
     /// with it. <see cref="Since"/> is the C# version the case requires (null when the case is
-    /// version-agnostic), which is what lets the report say <em>where</em> a model's knowledge
-    /// cutoff sits instead of only that it failed.
+    /// version-agnostic), which is what lets the report say <em>which</em> constructs a model
+    /// handles badly instead of only that it failed.
     /// </summary>
     public record GoldenCase(
         string Name,
