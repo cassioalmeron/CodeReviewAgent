@@ -52,6 +52,7 @@ namespace CodeReviewerAgent.Core
         string Name,
         GoldenKind Kind,
         string? Since,
+        string PromptVersion,
         int Successes,
         int Runs,
         string? MissDetail);
@@ -59,7 +60,7 @@ namespace CodeReviewerAgent.Core
     /// <summary>
     /// Everything a finished golden run produced, with no side effect attached: the per-case
     /// verdicts, the raw reviews, the harness condition, and the label for each round.
-    /// Publishing it is a separate step (<c>GoldenEvaluator.SaveReport</c>), so running the set
+    /// Publishing it is a separate step (<c>GoldenEvaluatorReport.SaveReport</c>), so running the set
     /// touches nothing on disk.
     /// </summary>
     public record GoldenRun(

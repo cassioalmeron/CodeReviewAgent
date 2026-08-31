@@ -13,6 +13,9 @@ namespace CodeReviewerAgent.Tests
     /// </summary>
     public class GoldenEvaluatorTests
     {
+        // One prompt version reproduces today's set: same round count, same results, no comparison.
+        private static readonly List<string> SingleVersion = ["v3"];
+
         // Answers with the finding that case-01 plants: right file, a snippet that really is an
         // added line of its diff, and a keyword the case expects.
         private const string CaughtSqlInjection = """
@@ -51,7 +54,7 @@ namespace CodeReviewerAgent.Tests
                 var reviews = new EfReviewRepository(context);
                 var assessments = new EfAssessmentRepository(context);
 
-                var run = GoldenEvaluator.Run(new FakeLlmClient(CaughtSqlInjection), projects, reviews, assessments);
+                var run = GoldenEvaluator.Run(new FakeLlmClient(CaughtSqlInjection), projects, reviews, assessments, SingleVersion);
 
                 var cases = GoldenEvaluator.LoadCases();
                 Assert.Equal(cases.Count, run.Results.Count);
@@ -123,7 +126,8 @@ namespace CodeReviewerAgent.Tests
                     new FakeLlmClient(FellForTheExtensionBlock),
                     new EfProjectRepository(context),
                     new EfReviewRepository(context),
-                    new EfAssessmentRepository(context));
+                    new EfAssessmentRepository(context),
+                    SingleVersion);
 
                 var trap = run.Results.Single(r => r.Name == "extension-block");
                 Assert.Equal(0, trap.Successes);
@@ -168,6 +172,7 @@ namespace CodeReviewerAgent.Tests
                     new EfProjectRepository(context),
                     new EfReviewRepository(context),
                     new EfAssessmentRepository(context),
+                    SingleVersion,
                     filter);
 
                 Assert.Equal(expected, run.Results.Count);
@@ -208,7 +213,8 @@ namespace CodeReviewerAgent.Tests
                     new FakeLlmClient(CaughtSqlInjection),
                     new EfProjectRepository(context),
                     new EfReviewRepository(context),
-                    assessments);
+                    assessments,
+                    SingleVersion);
 
                 var cases = GoldenEvaluator.LoadCases();
                 Assert.Equal(cases.Select(c => c.Name), run.Results.Select(r => r.Name));
@@ -256,7 +262,8 @@ namespace CodeReviewerAgent.Tests
                     new FakeLlmClient(CaughtSqlInjection),
                     new EfProjectRepository(context),
                     new EfReviewRepository(context),
-                    new EfAssessmentRepository(context));
+                    new EfAssessmentRepository(context),
+                    SingleVersion);
 
                 Assert.Equal(before, (Count(reports), Count(reviews)));
             }
@@ -287,6 +294,7 @@ namespace CodeReviewerAgent.Tests
                     new EfProjectRepository(context),
                     new EfReviewRepository(context),
                     new EfAssessmentRepository(context),
+                    SingleVersion,
                     "no-such-case"));
 
                 Assert.Contains("no-such-case", error.Message);
@@ -321,12 +329,59 @@ namespace CodeReviewerAgent.Tests
                 var assessments = new EfAssessmentRepository(context);
                 var client = new FakeLlmClient(CaughtSqlInjection);
 
-                GoldenEvaluator.Run(client, projects, reviews, assessments);
-                GoldenEvaluator.Run(client, projects, reviews, assessments);
+                GoldenEvaluator.Run(client, projects, reviews, assessments, SingleVersion);
+                GoldenEvaluator.Run(client, projects, reviews, assessments, SingleVersion);
 
                 var cases = GoldenEvaluator.LoadCases();
                 Assert.Equal(cases.Count, reviews.List().Count);          // diffs reused
                 Assert.Equal(cases.Count * 2, assessments.List().Count);  // one assessment per run
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("GOLDEN_RUNS", previousRuns);
+                Environment.SetEnvironmentVariable("SKILLS", previousSkills);
+                try { File.Delete(dbPath); } catch { /* pooled connection may hold the file */ }
+            }
+        }
+
+        /// <summary>
+        /// T1 of US-011: with two prompt versions, every case yields one result per side — the
+        /// pair the future pairwise judge needs — and the sides never share a review id, only the
+        /// diff underneath them.
+        /// </summary>
+        [Fact]
+        public void Run_WithTwoPromptVersions_YieldsOneResultPerCasePerSide()
+        {
+            var dbPath = Path.Combine(Path.GetTempPath(), $"cra-golden-{Guid.NewGuid():N}.db");
+            var previousRuns = Environment.GetEnvironmentVariable("GOLDEN_RUNS");
+            var previousSkills = Environment.GetEnvironmentVariable("SKILLS");
+            try
+            {
+                Environment.SetEnvironmentVariable("GOLDEN_RUNS", "1");
+                Environment.SetEnvironmentVariable("SKILLS", "off");
+
+                using var context = new CodeReviewDbContext(
+                    o => new SqliteProviderStrategy().Configure(o, $"Data Source={dbPath}"));
+                context.Database.EnsureCreated();
+
+                var reviews = new EfReviewRepository(context);
+                var assessments = new EfAssessmentRepository(context);
+
+                var run = GoldenEvaluator.Run(
+                    new FakeLlmClient(CaughtSqlInjection),
+                    new EfProjectRepository(context),
+                    reviews,
+                    assessments,
+                    ["v3", "v1"],
+                    "sql-injection");
+
+                Assert.Equal(2, run.Results.Count);
+                Assert.Equal(["v3", "v1"], run.Results.Select(r => r.PromptVersion));
+                Assert.All(run.Results, r => Assert.Equal(1, r.Successes));
+
+                // Same diff, reused across both sides; one assessment per side.
+                Assert.Single(reviews.List());
+                Assert.Equal(2, assessments.List().Count);
             }
             finally
             {

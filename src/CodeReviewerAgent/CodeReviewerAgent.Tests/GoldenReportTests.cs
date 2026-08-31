@@ -12,18 +12,20 @@ namespace CodeReviewerAgent.Tests
         private static ReviewResult Review(string? skills) =>
             new("summary", [], "fake", "fake-model", "v3", 0m, 0, 0, 0, "diff", skills);
 
-        private static GoldenCaseResult Detection(string name, int successes, int runs = 3, string? since = null) =>
-            new(name, GoldenKind.Detection, since, successes, runs, null);
+        private static GoldenCaseResult Detection(
+            string name, int successes, int runs = 3, string? since = null, string promptVersion = "v3") =>
+            new(name, GoldenKind.Detection, since, promptVersion, successes, runs, null);
 
-        private static GoldenCaseResult Trap(string name, int successes, int runs = 3, string? since = null) =>
-            new(name, GoldenKind.Trap, since, successes, runs, null);
+        private static GoldenCaseResult Trap(
+            string name, int successes, int runs = 3, string? since = null, string promptVersion = "v3") =>
+            new(name, GoldenKind.Trap, since, promptVersion, successes, runs, null);
 
         [Fact]
         public void ReportsDetectionAndTrapResistanceSeparately()
         {
             var results = new[] { Detection("bug", 3), Detection("other", 2), Trap("clean", 1) };
 
-            var footer = GoldenEvaluator.BuildFooter(results, GoldenCondition.From([], "off"));
+            var footer = GoldenEvaluatorReport.BuildFooter(results, GoldenCondition.From([], "off"));
 
             Assert.Contains("Detection", footer);
             Assert.Contains("5/6", footer);          // detections only
@@ -35,10 +37,36 @@ namespace CodeReviewerAgent.Tests
         [Fact]
         public void OmitsTrapResistanceWhenThereAreNoTraps()
         {
-            var footer = GoldenEvaluator.BuildFooter([Detection("bug", 3)], GoldenCondition.From([], "off"));
+            var footer = GoldenEvaluatorReport.BuildFooter([Detection("bug", 3)], GoldenCondition.From([], "off"));
 
             Assert.Contains("Detection", footer);
             Assert.DoesNotContain("Trap resistance", footer);
+        }
+
+        /// <summary>
+        /// The pairwise case (T1 of US-011): two prompt versions over the same cases must never be
+        /// blended into one rate, which is exactly the corruption the per-side split exists to
+        /// prevent.
+        /// </summary>
+        [Fact]
+        public void SplitsDetectionRatesByPromptVersionWhenComparingTwoSides()
+        {
+            var results = new[] { Detection("bug", 3, promptVersion: "v3"), Detection("bug", 1, promptVersion: "v5") };
+
+            var footer = GoldenEvaluatorReport.BuildFooter(results, GoldenCondition.From([], "off"));
+
+            Assert.Contains("**Detection** (v3) 3/3", footer);
+            Assert.Contains("**Detection** (v5) 1/3", footer);
+            Assert.DoesNotContain("4/6", footer); // the two sides must never be summed
+        }
+
+        [Fact]
+        public void DoesNotLabelTheVersionWhenOnlyOneSideRan()
+        {
+            var footer = GoldenEvaluatorReport.BuildFooter([Detection("bug", 3)], GoldenCondition.From([], "off"));
+
+            Assert.Contains("**Detection** 3/3", footer);
+            Assert.DoesNotContain("v3", footer);
         }
 
         [Fact]
@@ -51,7 +79,7 @@ namespace CodeReviewerAgent.Tests
                 Trap("extension", 0, since: "C# 14"),
             };
 
-            var footer = GoldenEvaluator.BuildFooter(results, GoldenCondition.From([], "off"));
+            var footer = GoldenEvaluatorReport.BuildFooter(results, GoldenCondition.From([], "off"));
 
             Assert.Contains("C# 12", footer);
             Assert.Contains("C# 14", footer);
@@ -73,7 +101,7 @@ namespace CodeReviewerAgent.Tests
                 Detection("plain", 1),
             };
 
-            var footer = GoldenEvaluator.BuildFooter(results, GoldenCondition.From([], "off"));
+            var footer = GoldenEvaluatorReport.BuildFooter(results, GoldenCondition.From([], "off"));
 
             var order = new[] { "agnostic", "C# 8", "C# 11", "C# 14" }.Select(v => footer.IndexOf($"| {v} |")).ToList();
             Assert.All(order, i => Assert.True(i > 0, "every version group should appear in the table"));
@@ -85,7 +113,7 @@ namespace CodeReviewerAgent.Tests
         [Fact]
         public void LabelsTheBaselineCondition()
         {
-            var footer = GoldenEvaluator.BuildFooter([Detection("bug", 3)], GoldenCondition.From([], "off"));
+            var footer = GoldenEvaluatorReport.BuildFooter([Detection("bug", 3)], GoldenCondition.From([], "off"));
 
             Assert.Contains("baseline", footer);
             Assert.Contains("SKILLS=off", footer);
@@ -96,7 +124,7 @@ namespace CodeReviewerAgent.Tests
         {
             var reviews = new[] { Review("csharp"), Review("csharp"), Review("csharp,react") };
 
-            var footer = GoldenEvaluator.BuildFooter([Detection("bug", 3)], GoldenCondition.From(reviews, "all"));
+            var footer = GoldenEvaluatorReport.BuildFooter([Detection("bug", 3)], GoldenCondition.From(reviews, "all"));
 
             Assert.Contains("harness", footer);
             Assert.Contains("csharp (3/3)", footer);
@@ -113,7 +141,7 @@ namespace CodeReviewerAgent.Tests
         {
             var reviews = new[] { Review("csharp"), Review(null), Review("") };
 
-            var footer = GoldenEvaluator.BuildFooter([Detection("bug", 3)], GoldenCondition.From(reviews, "all"));
+            var footer = GoldenEvaluatorReport.BuildFooter([Detection("bug", 3)], GoldenCondition.From(reviews, "all"));
 
             Assert.Contains("2/3", footer);
             Assert.Contains("no skill", footer);
@@ -124,7 +152,7 @@ namespace CodeReviewerAgent.Tests
         {
             var reviews = new[] { Review(null), Review(null) };
 
-            var footer = GoldenEvaluator.BuildFooter([Detection("bug", 3)], GoldenCondition.From(reviews, "off"));
+            var footer = GoldenEvaluatorReport.BuildFooter([Detection("bug", 3)], GoldenCondition.From(reviews, "off"));
 
             Assert.DoesNotContain("no skill", footer);
         }

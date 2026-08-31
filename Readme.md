@@ -76,11 +76,12 @@ src/CodeReviewerAgent/
 │   ├── ReportGenerator.cs              # Markdown review report
 │   ├── GoldenCase.cs                   # Golden vocabulary: expectations (finding | noFinding), case, result, condition
 │   ├── GoldenScorer.cs                 # The golden verdict as a pure function — detection + trap resistance
-│   ├── GoldenEvaluator.cs              # Golden set: runs the cases, scores, persists, reports
-│   ├── Judge.cs                         # LLM-as-judge: quality scoring (inferential layer)
-│   ├── JudgeRunner.cs / JudgeReportGenerator.cs  # Drives + reports the judge
+│   ├── GoldenEvaluator.cs / GoldenEvaluatorReport.cs  # Golden set: runs + scores the cases / publishes the report
+│   ├── Judge.cs                         # LLM-as-judge: absolute scoring + pairwise comparison (inferential layer)
+│   ├── JudgeRunner.cs / JudgeResultsStore.cs / PairwiseJudgeReport.cs  # Pairwise judge: pairs + judges reviews / appends each outcome as JSON Lines / renders the verdict report
+│   ├── JudgeReportGenerator.cs          # Absolute judge: renders stored-assessment scores
 │   ├── prompts/review-v1..v5.md         # Versioned review system prompts (v3 is the default)
-│   ├── rubrics/judge-v1.md              # Versioned judge rubric
+│   ├── rubrics/judge-v1.md / judge-v2.md  # Versioned judge rubrics (v1 absolute, v2 pairwise)
 │   ├── evals/golden/                    # cases.json + the known-problem diffs (detection)
 │   └── evals/triggers/                  # cases.json + the labelled diffs (skill selection)
 │
@@ -137,6 +138,10 @@ LLM_ENGINE=claude
 # Which versioned prompt to use (prompts/review-<version>.md)
 PROMPT_VERSION=v3
 
+# Optional: a second prompt version for `eval` to compare against PROMPT_VERSION — one pass over
+# the same diffs, both sides scored separately. Unset, `eval` behaves exactly as it does today.
+PROMPT_VERSION_COMPARISON=
+
 # Where reviews + assessments are stored: files | sqlite | postgres
 # sqlite always uses %LOCALAPPDATA%/CodeReviewerAgent/review.db; DB_CONNECTION is the Postgres
 # connection string only (files and sqlite ignore it).
@@ -163,7 +168,8 @@ OPENROUTER_MODEL=openai/gpt-4o-mini
 GOLDEN_RUNS=3                  # runs per golden case (averages out non-determinism)
 GOLDEN_PARALLELISM=4           # concurrent LLM calls in the golden set
 JUDGE_MODEL=claude-sonnet-4-6  # stronger than the executor, to avoid self-preference bias
-RUBRIC_VERSION=v1              # rubrics/judge-<version>.md
+RUBRIC_VERSION=                # rubrics/judge-<version>.md; unset = v2 for `judge` (pairwise), v1 for `judge <assessmentId>` (absolute)
+JUDGE_RUNS=3                   # executions per pair in the pairwise judge, slots re-randomised each time
 ```
 
 > The API key is never committed — keep it only in your local `.env`. `CodeReviewerAgent.Api` has
@@ -339,17 +345,35 @@ a skill without paying for a full pass.
 
 ### LLM-as-judge — *are the comments good?* (inferential)
 
-`Judge` sends the diff + the agent's review to a **stronger** model (`JUDGE_MODEL`)
-with a versioned rubric (`rubrics/judge-<version>.md`) and gets back structured
-scores (1–5) for **correctness, actionability, calibration, signal-to-noise**, plus
-an overall score and rationale. The judge is intentionally a different, stronger
-model than the executor to avoid **self-preference bias**.
+`Judge` sends a diff (plus what it needs to compare) to a **stronger** model (`JUDGE_MODEL`) with a
+versioned rubric (`rubrics/judge-<version>.md`) and gets back a structured judgment. The judge is
+intentionally a different, stronger model than the executor to avoid **self-preference bias**.
 
-There are two ways to run the judge. The **golden** `judge` loads `reviews/eval-results.json`
-and writes one aggregate report (`all` = `eval` + `judge`). The **per-assessment** `judge M` scores
-a stored assessment and **persists** an `Evaluation` in the store, one LLM call per assessment.
-`judge-report` then renders stored evaluations without the LLM — per evaluation, per assessment
-(`assessmentId M`), or `golden` for the consolidated set — each including the reviewed diff.
+There are two independent ways to run it, on purpose: a real diff reviewed once has nothing to
+compare, so it gets an absolute score; the golden set reviews the same diff under two prompt
+versions on purpose, so it gets a comparative verdict.
+
+- **`judge` (no id), pairwise, rubric v2** — loads `reviews/eval-results.json`, which must carry
+  exactly two `PromptVersion`s per diff (produce it with `PROMPT_VERSION_COMPARISON` set on `eval`),
+  and pairs them positionally — run *i* of one side against run *i* of the other. Each pair is
+  judged `JUDGE_RUNS` times, re-randomising which review sits in prompt slot A vs B every execution
+  so a judge that favours a slot shows up as an unstable verdict rather than a stable wrong one.
+  Verdicts (`A`/`B`/`tie` per criterion — correctness, actionability, calibration, signal-to-noise,
+  conciseness, overall) are majority-voted, translated back into prompt-version terms, and rendered
+  as a verdict table — never averaged, since there is no numeric distance between "v3", "tie" and
+  "v5". `all` = `eval` + `judge`. Nothing is persisted to the store.
+
+  Every judged execution is appended to `reviews/judge-results.jsonl` (JSON Lines, one execution per
+  line) the moment it comes back, not batched until the run ends — so a fatal error mid-run (quota,
+  network, anything) loses at most the call in flight. Re-running `judge` reads that file back,
+  skips every `(diff, pair, run)` already recorded, and judges only what's left; running it again
+  after a fully complete run costs nothing, since everything is skipped and the report is just
+  rebuilt from disk. The report always comes from `judge-results.jsonl`, never from memory, and
+  flags itself as a **partial run** whenever the file doesn't yet cover every planned pair.
+- **`judge M`, absolute, rubric v1** — scores one stored assessment on a 1–5 scale per criterion and
+  **persists** an `Evaluation`, one LLM call per assessment. `judge-report` then renders stored
+  evaluations without the LLM — per evaluation, per assessment (`assessmentId M`), or `golden` for
+  the consolidated set — each including the reviewed diff.
 
 ### Iterating prompts
 

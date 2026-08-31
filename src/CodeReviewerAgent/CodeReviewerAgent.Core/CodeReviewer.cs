@@ -14,12 +14,14 @@ namespace CodeReviewerAgent.Core
 
         private readonly ILlmClient _client;
         private readonly string _diff;
+        private readonly string _promptVersion;
         private readonly ISkillSelector _skillSelector;
 
-        public CodeReviewer(ILlmClient client, string diff, ISkillSelector? skillSelector = null)
+        public CodeReviewer(ILlmClient client, string diff, string promptVersion, ISkillSelector? skillSelector = null)
         {
             _client = client;
             _diff = diff;
+            _promptVersion = promptVersion;
             _skillSelector = skillSelector ?? SkillSelectorFactory.Create(client);
         }
 
@@ -27,9 +29,9 @@ namespace CodeReviewerAgent.Core
         /// Runs a review and writes its Markdown report, returning the result. Keeps
         /// report generation out of the core <see cref="Review"/> flow.
         /// </summary>
-        public static ReviewResult ReviewAndReport(ILlmClient client, string diff)
+        public static ReviewResult ReviewAndReport(ILlmClient client, string diff, string promptVersion)
         {
-            var result = new CodeReviewer(client, diff).Review();
+            var result = new CodeReviewer(client, diff, promptVersion).Review();
             var reportPath = ReportGenerator.Save(result);
             System.Console.WriteLine($"Report saved to {reportPath}");
             return result;
@@ -47,8 +49,7 @@ namespace CodeReviewerAgent.Core
 
             // Send the diff to the LLM, using the versioned system prompt and a JSON
             // schema so the model returns structured output (summary + findings).
-            var promptVersion = Environment.GetEnvironmentVariable("PROMPT_VERSION") ?? "v2";
-            var systemPrompt = LoadSystemPrompt(promptVersion);
+            var systemPrompt = LoadSystemPrompt(_promptVersion);
 
             // The clock covers both LLM calls: the selection below and the review itself.
             var stopwatch = Stopwatch.StartNew();
@@ -107,7 +108,7 @@ namespace CodeReviewerAgent.Core
                 Findings = findings,
                 Engine = engine,
                 Model = response?.Model,
-                PromptVersion = promptVersion,
+                PromptVersion = _promptVersion,
                 Skills = skills.Names,
                 Cost = cost,
                 LatencyMs = stopwatch.ElapsedMilliseconds,

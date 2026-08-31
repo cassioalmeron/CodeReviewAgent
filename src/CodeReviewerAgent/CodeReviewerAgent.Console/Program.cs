@@ -24,10 +24,11 @@ if (args is ["judge", var judgeIdArg, ..] && int.TryParse(judgeIdArg, out var ju
     return;
 }
 
-// `judge` (no id) scores the reviews persisted by `eval`; it builds its own (stronger) client.
+// `judge` (no id) judges the reviews persisted by `eval` pairwise (v3 vs v5, plan 015); it builds
+// its own (stronger) client.
 if (args is ["judge", ..])
 {
-    JudgeRunner.Run(JudgeClient());
+    JudgeRunner.Run(JudgeClient(), ResolvedJudgeRuns());
     return;
 }
 
@@ -164,7 +165,7 @@ static void RunJson(string[] args)
     Console.SetOut(Console.Error);
     var repos = RepositoryFactory.Create();
     var project = ProjectResolver.Resolve(repos.Projects);
-    var review = new CodeReviewer(LlmClientFactory.Create(), diff).Review();
+    var review = new CodeReviewer(LlmClientFactory.Create(), diff, ResolvedPromptVersion()).Review();
     var reviewId = repos.Reviews.GetOrAdd(new Review
     {
         ProjectId = project.Id,
@@ -236,22 +237,23 @@ static void RunAll()
 {
     var executor = LlmClientFactory.Create();
     RunGoldenSet(executor);
-    JudgeRunner.Run(JudgeClient());
+    JudgeRunner.Run(JudgeClient(), ResolvedJudgeRuns());
 }
 
 static void RunGoldenSet(ILlmClient executor, string? filter = null)
 {
     var repos = RepositoryFactory.Create();
-    var run = GoldenEvaluator.Run(executor, repos.Projects, repos.Reviews, repos.Assessments, filter);
+    var run = GoldenEvaluator.Run(executor, repos.Projects, repos.Reviews, repos.Assessments, PromptVersions(), filter);
 
     // Running the set is free of I/O; publishing the result is this layer's job.
-    GoldenEvaluator.SaveReport(run);
+    GoldenEvaluatorReport.SaveReport(run);
 
     Console.WriteLine();
     Console.WriteLine("=== Golden set ===");
+    var comparingSides = run.Results.Select(r => r.PromptVersion).Distinct().Count() > 1;
     foreach (var r in run.Results)
-        Console.WriteLine(GoldenEvaluator.FormatLine(r));
-    Console.WriteLine(GoldenEvaluator.FormatTotals(run.Results));
+        Console.WriteLine(GoldenEvaluatorReport.FormatLine(r, comparingSides));
+    Console.WriteLine(GoldenEvaluatorReport.FormatTotals(run.Results));
 }
 
 static void ListSkills()
@@ -335,7 +337,7 @@ static void AssessReview(int reviewId)
     var repos = RepositoryFactory.Create();
     var review = repos.Reviews.Get(reviewId)
         ?? throw new InvalidOperationException($"No review with id {reviewId}.");
-    var result = new CodeReviewer(LlmClientFactory.Create(), review.Content).Review();
+    var result = new CodeReviewer(LlmClientFactory.Create(), review.Content, ResolvedPromptVersion()).Review();
     var assessmentId = repos.Assessments.Save(Assessment.FromReview(reviewId, result));
     Console.WriteLine($"Assessment saved with id {assessmentId}");
 }
@@ -427,7 +429,7 @@ static void ReviewAndPublish(string[] args)
             CreatedAt = DateTime.UtcNow,
         });
 
-        var review = CodeReviewer.ReviewAndReport(client, content);
+        var review = CodeReviewer.ReviewAndReport(client, content, ResolvedPromptVersion());
         repos.Assessments.Save(Assessment.FromReview(reviewId, review));
 
         if (args is ["pr", var prArg, ..] && args.Contains("--publish") && int.TryParse(prArg, out var prNumber))
@@ -447,6 +449,26 @@ static void ReviewAndPublish(string[] args)
 // The judge uses a stronger model (JUDGE_MODEL) than the executor to avoid self-preference bias.
 static ILlmClient JudgeClient() =>
     LlmClientFactory.CreateClaude(Environment.GetEnvironmentVariable("JUDGE_MODEL") ?? "claude-sonnet-4-6");
+
+// How many times the pairwise judge scores each pair, read here and passed in — consistent with
+// how PROMPT_VERSION reaches CodeReviewer, and out of scope for the rest of Core's environment reads.
+static int ResolvedJudgeRuns() =>
+    int.TryParse(Environment.GetEnvironmentVariable("JUDGE_RUNS"), out var n) && n > 0 ? n : 3;
+
+// The environment is read here and nowhere below Console: CodeReviewer takes the version as a
+// required constructor parameter instead of reaching for it itself.
+static string ResolvedPromptVersion() => Environment.GetEnvironmentVariable("PROMPT_VERSION") ?? "v2";
+
+// One version reproduces today's `eval`; PROMPT_VERSION_COMPARISON, when set, adds a second side
+// so the golden set runs as a pairwise comparison over the same diffs.
+static List<string> PromptVersions()
+{
+    var versions = new List<string> { ResolvedPromptVersion() };
+    var comparison = Environment.GetEnvironmentVariable("PROMPT_VERSION_COMPARISON");
+    if (!string.IsNullOrWhiteSpace(comparison))
+        versions.Add(comparison);
+    return versions;
+}
 
 static string Label(string[] sourceArgs) =>
     sourceArgs.Length == 0 ? "local" : string.Join(" ", sourceArgs);
