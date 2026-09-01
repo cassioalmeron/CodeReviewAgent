@@ -29,7 +29,7 @@ So the agent is the excuse and the harness is the point:
 - **Prompts are versioned**, so a change in quality can be attributed to a change in the prompt.
 - **Findings are grounded** against the parsed diff. The model cites the offending line, the application derives the line number. Anything computable exactly is never delegated to a model (see [ADR-003](docs/ADRs/ADR-003-line-numbers-in-application.md)).
 - **Every run records** model, prompt version, tokens, cost and latency, so a regression has evidence attached.
-- **Two evaluation layers** measure different things: a golden set for detection, an LLM-as-judge for quality, deliberately using a stronger model than the executor to avoid self-preference bias.
+- **Three evaluation layers** measure different things: a golden set for detection, a trigger eval for skill selection, and an LLM-as-judge for quality — the judge deliberately using a stronger model than the executor to avoid self-preference bias.
 - **HTTP calls retry and degrade gracefully**, so an unstable API never blocks a pull request.
 - **Engines and storage sit behind interfaces**, so swapping Claude for Ollama, or files for Postgres, is configuration rather than a code change.
 
@@ -51,6 +51,7 @@ reversed. They are in **[docs/ADRs](docs/ADRs/README.md)**.
 - HTTP engines call the LLM APIs with raw `HttpClient` (no SDK), behind a resilient transport (retry + exponential backoff on transient failures)
 - Pluggable **LLM engines** (in Infra) behind Core's `ILlmClient` — Ollama / Claude / OpenAI / OpenRouter over HTTP, plus Claude via your local CLI/subscription; the factory is instantiated by Console/Api, never by Core
 - Pluggable **diff sources** behind `IDiffSource` (local / staged / files / pull request)
+- **Skills** loaded by progressive disclosure — the review prompt carries only the guidelines the diff actually needs, chosen by the model, by globs, or explicitly (`SKILLS`)
 - Native **structured output** (JSON schema) → findings as C# records
 - xUnit tests over the flow with fake `ILlmClient` / `IDiffSource` implementations
 - **Api** — a read-only ASP.NET Core minimal API (Swagger/OpenAPI) that exposes the store to a web viewer
@@ -61,29 +62,41 @@ reversed. They are in **[docs/ADRs](docs/ADRs/README.md)**.
 ```
 src/CodeReviewerAgent/
 ├── CodeReviewerAgent.Core/              # Class library — review + evaluation flow
-│   ├── CodeReviewer.cs                  # Review pipeline: diff → LLM → parse → ground (pure step, no I/O)
+│   ├── CodeReviewer.cs                  # Review pipeline: diff → skills → LLM → parse → ground (pure step, no I/O)
 │   ├── ILlmClient.cs                    # LLM client contract (implementations live in Infra)
 │   ├── MessageResponse.cs               # Neutral LLM response shape (model, content, usage, optional real cost)
-│   ├── IDiffSource.cs / *DiffSource.cs  # Diff source strategy (local/staged/files/pr) + factory
-│   ├── ProcessRunner.cs                 # Runs external commands (git / gh)
-│   ├── DiffParser.cs                    # Parses a unified diff into files/hunks/lines
-│   ├── FindingValidator.cs             # Grounds findings to added lines; derives the line number
 │   ├── Finding.cs                       # Finding + ReviewResult records, Severity/Category enums
+│   ├── FindingValidator.cs              # Grounds findings to added lines; derives the line number
 │   ├── Entities.cs                      # Project / Review (+ ContentHash) / Assessment / Evaluation (1→N→N→N)
 │   ├── ProjectResolver.cs               # Resolves the current Project from REPO_DIR / cwd (folder = key)
 │   ├── IRepository.cs                   # IProject / IReview / IAssessment / IEvaluation repository contracts
+│   ├── ProcessRunner.cs                 # Runs external commands (git / gh)
 │   ├── CostCalculator.cs                # Per-model cost (Claude + OpenAI; Ollama/subscription/OpenRouter = no estimate)
-│   ├── ReportGenerator.cs              # Markdown review report
-│   ├── GoldenCase.cs                   # Golden vocabulary: expectations (finding | noFinding), case, result, condition
-│   ├── GoldenScorer.cs                 # The golden verdict as a pure function — detection + trap resistance
-│   ├── GoldenEvaluator.cs / GoldenEvaluatorReport.cs  # Golden set: runs + scores the cases / publishes the report
-│   ├── Judge.cs                         # LLM-as-judge: absolute scoring + pairwise comparison (inferential layer)
-│   ├── JudgeRunner.cs / JudgeResultsStore.cs / PairwiseJudgeReport.cs  # Pairwise judge: pairs + judges reviews / appends each outcome as JSON Lines / renders the verdict report
-│   ├── JudgeReportGenerator.cs          # Absolute judge: renders stored-assessment scores
-│   ├── prompts/review-v1..v5.md         # Versioned review system prompts (v3 is the default)
-│   ├── rubrics/judge-v1.md / judge-v2.md  # Versioned judge rubrics (v1 absolute, v2 pairwise)
-│   ├── evals/golden/                    # cases.json + the known-problem diffs (detection)
-│   └── evals/triggers/                  # cases.json + the labelled diffs (skill selection)
+│   ├── ReportGenerator.cs               # Markdown review report
+│   ├── PrCommentFormatter.cs / PrPublisher.cs   # `pr <n> --publish`: format the review, post it with `gh pr comment`
+│   ├── Diff/                            # Diff sources + parsing
+│   │   ├── IDiffSource.cs / DiffSourceFactory.cs      # Strategy (local/staged/files/pr) + selection from CLI args
+│   │   ├── DiffParser.cs / ParsedDiff.cs             # Unified diff → files/hunks/lines with absolute numbers
+│   │   └── DiffFilter.cs / DiffSplitter.cs           # Drop .md files; split a diff per file
+│   ├── Golden/                          # Golden set
+│   │   ├── GoldenCase.cs                # Golden vocabulary: expectations (finding | noFinding), case, result, condition
+│   │   ├── GoldenScorer.cs              # The golden verdict as a pure function — detection + trap resistance
+│   │   └── GoldenEvaluator.cs / GoldenEvaluatorReport.cs  # Runs + scores the cases / publishes the report
+│   ├── Judge/                           # LLM-as-judge
+│   │   ├── Judge.cs                     # The judge call: absolute scoring + pairwise comparison (inferential layer)
+│   │   ├── JudgeRunner.cs / JudgeResultsStore.cs / PairwiseJudgeReport.cs  # Pairwise: pairs + judges reviews / appends each outcome as JSON Lines / renders the verdict report
+│   │   └── JudgeReportGenerator.cs      # Absolute: renders stored-assessment scores
+│   ├── Skill/                           # Progressive disclosure of review guidelines
+│   │   ├── SkillCatalog.cs / SkillFrontmatter.cs / SkillPrompt.cs   # Discovery, parsing, prompt fragments
+│   │   ├── ISkillSelector.cs / SkillSelectorFactory.cs / LlmSkillSelector.cs / SkillSelectors.cs  # Who picks the skills (SKILLS)
+│   │   └── SkillTriggerEvaluator.cs     # Trigger eval: are the right skills selected?
+│   └── assets/                          # Copied to the build output and read at runtime
+│       ├── prompts/review-v1..v5.md     # Versioned review system prompts (v3 is the default)
+│       ├── prompts/skill-selection-v1.md / skill-guidelines-v1.md   # Skill prompt fragments
+│       ├── rubrics/judge-v1.md / judge-v2.md  # Versioned judge rubrics (v1 absolute, v2 pairwise)
+│       ├── skills/{csharp,csharp-modern,react}/SKILL.md   # Bundled skills (not versioned — see below)
+│       ├── evals/golden/                # cases.json + 15 diffs + a ground-truth .md each (detection + traps)
+│       └── evals/triggers/              # cases.json + 10 labelled diffs (skill selection)
 │
 ├── CodeReviewerAgent.Infra/              # Implementations behind Core's contracts (persistence + LLM engines)
 │   ├── FileRepository.cs                # File-backed repos (projects/ + reviews/ + assessments/ + evaluations/, id = max+1)
@@ -132,15 +145,26 @@ Each runnable project reads its own `.env` file (gitignored). Copy the project's
 `.env.example` and fill in your values. This is `CodeReviewerAgent.Console`'s:
 
 ```
+# Repository to analyze — git/gh run here. Blank = the current directory.
+REPO_DIR=
+
 # Which engine runs the review: ollama | claude | openai | openrouter | claude-code | claude-cli
 LLM_ENGINE=claude
 
-# Which versioned prompt to use (prompts/review-<version>.md)
+# Which versioned prompt to use (assets/prompts/review-<version>.md)
 PROMPT_VERSION=v3
 
 # Optional: a second prompt version for `eval` to compare against PROMPT_VERSION — one pass over
 # the same diffs, both sides scored separately. Unset, `eval` behaves exactly as it does today.
 PROMPT_VERSION_COMPARISON=
+
+# Which skills reach the review prompt:
+#   all (or unset) — the model picks from the catalog
+#   globs          — mechanical `applies-to` matching, no extra LLM call
+#   off            — no skills at all
+#   <name>,<name>  — exactly these, no extra LLM call
+SKILLS=all
+SKILL_PROMPT_VERSION=v1        # assets/prompts/skill-selection-<version>.md + skill-guidelines-<version>.md
 
 # Where reviews + assessments are stored: files | sqlite | postgres
 # sqlite always uses %LOCALAPPDATA%/CodeReviewerAgent/review.db; DB_CONNECTION is the Postgres
@@ -164,11 +188,16 @@ OPENAI_MODEL=gpt-4o-mini
 OPENROUTER_API_KEY=your-key-here
 OPENROUTER_MODEL=openai/gpt-4o-mini
 
+# Claude subscription engines (LLM_ENGINE=claude-code | claude-cli) — no API key
+CLAUDE_CODE_MODEL=             # optional model override
+CLAUDE_CLI_PATH=               # optional explicit path to claude.exe (claude-cli only)
+
 # Evaluation
 GOLDEN_RUNS=3                  # runs per golden case (averages out non-determinism)
 GOLDEN_PARALLELISM=4           # concurrent LLM calls in the golden set
+SKILL_EVAL_RUNS=3              # runs per trigger-eval case (`skills-eval`)
 JUDGE_MODEL=claude-sonnet-4-6  # stronger than the executor, to avoid self-preference bias
-RUBRIC_VERSION=                # rubrics/judge-<version>.md; unset = v2 for `judge` (pairwise), v1 for `judge <assessmentId>` (absolute)
+RUBRIC_VERSION=                # assets/rubrics/judge-<version>.md; unset = v2 for `judge` (pairwise), v1 for `judge <assessmentId>` (absolute)
 JUDGE_RUNS=3                   # executions per pair in the pairwise judge, slots re-randomised each time
 ```
 
@@ -186,6 +215,9 @@ dotnet run                       # local repo (staged if any, else git diff HEAD
 dotnet run -- staged             # git diff --staged
 dotnet run -- files A.cs B.cs    # git diff HEAD -- A.cs B.cs
 dotnet run -- pr 42              # pull request #42 (gh pr diff 42)
+dotnet run -- pr 42 --publish    # ...and post the findings back with `gh pr comment`
+dotnet run -- --json             # same review, findings as JSON on stdout (progress goes to stderr)
+dotnet run -- 12 --json          # re-print stored assessment 12 in that same shape (no LLM)
 
 # Or as independent, id-addressable steps against the store
 dotnet run -- review             # capture the local diff → "Review saved with id N"  (no LLM)
@@ -199,12 +231,22 @@ dotnet run -- judge-report golden           # consolidated report over the golde
 dotnet run -- projects           # list the stored projects
 dotnet run -- project rename N <name>   # rename a project (the Api is read-only)
 
+# Inspect the skills
+dotnet run -- skills             # list the discovered catalog + validation diagnostics  (no LLM)
+dotnet run -- skills csharp      # print the block that skill injects into the prompt    (no LLM)
+
 # Evaluate the agent
 dotnet run -- eval               # golden set (detection + traps); persists reviews + assessments to the store
 dotnet run -- eval extension-block          # only the named case(s), comma-separated
-dotnet run -- judge              # golden judge over reviews/eval-results.json (aggregate report)
+dotnet run -- judge              # pairwise judge over reviews/eval-results.json (aggregate report)
 dotnet run -- all                # eval + judge in a single run
+dotnet run -- skills-eval        # trigger eval: are the right skills selected? (selection call only)
 ```
+
+Only `assess N`, `judge`, `judge M`, `eval`, `all` and the one-shot review commands call the LLM;
+`review`, `report`, `skills`, `projects` and every `judge-report` do not. A review can have many
+assessments (re-run `assess N` with a different prompt or model); an assessment can have many judge
+evaluations.
 
 ### Web viewer
 
@@ -237,6 +279,10 @@ docker run -d --restart unless-stopped -p 18888:18888 -p 18889:18889 \
   mcr.microsoft.com/dotnet/aspire-dashboard:latest
 ```
 
+On Windows, `scripts/otel-dashboard.ps1` does that for you and is idempotent — it reuses any running
+Aspire Dashboard container instead of starting a second one (`-Force` to create regardless,
+`-Remove` to drop only the one it created).
+
 The dashboard is shared infrastructure, not part of this project. One instance serves any number of
 applications, so if you already run one, reuse it and just point the variable at it. The Api defaults
 to `localhost:18889` in its `launchSettings.json`.
@@ -246,23 +292,22 @@ run the Api. Instrumentation is automatic only: incoming requests, `HttpClient` 
 commands (the SQL shows up on the span when `STORAGE=sqlite|postgres`; `files` produces no database
 spans).
 
-Only `assess M`, `judge M`, and the combined commands call the LLM; `review`, `report`, and every
-`judge-report` do not. A review can have many assessments (re-run `assess N` with a different
-prompt or model); an assessment can have many judge evaluations.
-
 ## How a review works
 
 `CodeReviewer` pipeline:
 
 1. **Get the diff** from the `IDiffSource` selected by `DiffSourceFactory` from the CLI args.
-2. **Build the request** with the versioned system prompt (`prompts/review-<version>.md`)
-   and a JSON schema describing the expected output.
-3. **Call the LLM** through the selected `ILlmClient` (implemented in Infra); each engine
+2. **Pick the skills** — `SkillCatalog.Discover()` reads just the `name` + `description` of each
+   `assets/skills/<name>/SKILL.md`, and the `ISkillSelector` chosen by `SKILLS` decides which ones
+   apply. Only those have their full instructions loaded into the prompt.
+3. **Build the request** with the versioned system prompt (`assets/prompts/review-<version>.md`),
+   the selected skills, and a JSON schema describing the expected output.
+4. **Call the LLM** through the selected `ILlmClient` (implemented in Infra); each engine
    translates the neutral request into its own API shape (Claude's `output_config.format`,
    Ollama's `format`, OpenAI's / OpenRouter's `response_format.json_schema`) and maps the
    response back to a shared `MessageResponse`. HTTP engines send through a resilient transport
    that retries transient failures (429 / 5xx / network / timeout) with backoff.
-4. **Parse and ground** — deserialize into a `ReviewResult` (summary + findings), then
+5. **Parse and ground** — deserialize into a `ReviewResult` (summary + findings), then
    `FindingValidator` keeps only findings whose cited `code_snippet` matches an added
    line of the diff, deriving the real line number from it.
 
@@ -310,13 +355,39 @@ enum Category { Bug, Security, Performance, Style, Maintainability, Convention }
 The model cites the affected line verbatim in `CodeSnippet`; `Line` is not trusted
 from the model but derived by matching the snippet against the parsed diff.
 
+## Skills
+
+Review guidelines that would bloat every prompt live as **skills** — one folder per skill under
+`assets/skills/`, each with a `SKILL.md` carrying frontmatter (`name`, `description`,
+`metadata.applies-to`) and the instructions themselves. Three ship with the repo: `csharp`
+(conventions), `csharp-modern` (the .NET 10 / C# 14 language baseline, so current syntax isn't
+reported as an error) and `react`.
+
+They load by **progressive disclosure**: only the catalog — name and description — is offered up
+front, and only the selected skills have their body injected. `SKILLS` decides who selects:
+
+| `SKILLS` | Who picks | Extra LLM call |
+| --- | --- | --- |
+| `all` (or unset) | the model, from the catalog | yes, a small selection call |
+| `globs` | `metadata.applies-to` against the changed paths | no |
+| `off` | nobody — no skills at all | no |
+| `<name>,<name>` | you | no |
+
+`dotnet run -- skills` lists the catalog with validation diagnostics, and `dotnet run -- skills
+<name>` prints the exact block that skill injects — both without calling an LLM.
+
+> `assets/skills/` is **not versioned in this repository** (it is excluded locally, in
+> `.git/info/exclude`): the guidelines change often and will eventually come from a separate
+> project. A fresh clone runs with an empty catalog and stays silent about it, so golden-set
+> numbers from a clone are baseline numbers, not harness numbers.
+
 ## Evaluation
 
-Two layers measure different things on the same diffs:
+Three layers measure different things:
 
 ### Golden set — *does the agent catch the problem, and does it stay quiet when there is none?*
 
-`evals/golden/` holds **15 diffs whose correct outcome is known**, declared in `cases.json`.
+`assets/evals/golden/` holds **15 diffs whose correct outcome is known**, declared in `cases.json`.
 Each runs `GOLDEN_RUNS` times (LLM output is non-deterministic, so one run is a noisy
 sample), and each carries one of two expectations:
 
@@ -343,10 +414,21 @@ afterwards.
 `dotnet run -- eval <case>` narrows to named cases — the tight loop for tuning a prompt or
 a skill without paying for a full pass.
 
+### Trigger eval — *are the right skills selected?*
+
+`assets/evals/triggers/` holds **10 labelled diffs** (`expectedSkills`, split `train` /
+`validation`), including near-misses that should trigger nothing. `dotnet run -- skills-eval` runs
+**only the selection step** — no review — so a full pass costs a fraction of one review. A skill
+passes a case when its trigger rate over `SKILL_EVAL_RUNS` clears 0.5 while the others stay below.
+
+It honours `SKILLS`, so `SKILLS=globs` scores the mechanical strategy on the same cases with no LLM
+call at all — its baseline is **8/10**, missing both near-miss cases by over-triggering. Nothing is
+persisted to the store; the output is a console table plus a markdown report.
+
 ### LLM-as-judge — *are the comments good?* (inferential)
 
 `Judge` sends a diff (plus what it needs to compare) to a **stronger** model (`JUDGE_MODEL`) with a
-versioned rubric (`rubrics/judge-<version>.md`) and gets back a structured judgment. The judge is
+versioned rubric (`assets/rubrics/judge-<version>.md`) and gets back a structured judgment. The judge is
 intentionally a different, stronger model than the executor to avoid **self-preference bias**.
 
 There are two independent ways to run it, on purpose: a real diff reviewed once has nothing to
@@ -387,10 +469,14 @@ cd src/CodeReviewerAgent
 dotnet test
 ```
 
-The tests exercise the flow end to end with fake `ILlmClient` and `IDiffSource`
-implementations (no network, no git), plus `DiffSourceFactory` routing.
+216 xUnit tests, no network and no git: the review flow runs against fake `ILlmClient` /
+`IDiffSource` implementations, the HTTP transport against a stub handler, and the EF repositories
+against a temporary SQLite file. They also cover the diff parser and filter, finding grounding,
+cost, the golden scorer and reports, the skill catalog and selectors, and the judge (both paths).
+`GoldenFixtureTests` additionally guards the fixtures themselves — every case needs its ground-truth
+`.md`, and every trap's bait snippet must sit on an added line.
 
-`web/` has no test suite yet; `npm run lint` (oxlint) is available.
+`web/` has no test suite yet; `npm run lint` (oxlint) and `npm run build` are available.
 
 ## Extending
 
@@ -398,7 +484,9 @@ implementations (no network, no git), plus `DiffSourceFactory` routing.
 - **New diff source** — implement `IDiffSource` and add a case in `DiffSourceFactory`.
 - **New storage backend** — implement the repository contracts (`IProjectRepository` / `IReviewRepository` / `IAssessmentRepository` / `IEvaluationRepository`) in `CodeReviewerAgent.Infra/` and add a case in `RepositoryFactory`.
 - **New DB provider** — add an `IDbProviderStrategy` (e.g. `UseSqlServer`) and register it in `RepositoryFactory`; the context and model are unchanged.
-- **New prompt / rubric version** — add `prompts/review-v6.md` (or `rubrics/judge-v2.md`) and point the env var at it.
-- **New golden case** — add a `.diff` and an entry in `evals/golden/cases.json`.
+- **New prompt / rubric version** — add `assets/prompts/review-v6.md` (or `assets/rubrics/judge-v3.md`) and point the env var at it. Anything new under `assets/` also needs a matching `<None Include>` glob in `CodeReviewerAgent.Core.csproj`, or it never reaches the build output the code reads from.
+- **New golden case** — add a `.diff`, a `.md` with the ground truth, and an entry in `assets/evals/golden/cases.json` (`expect` is `"$type": "finding"` or `"noFinding"`). For a trap, check the code actually compiles first.
+- **New trigger case** — add a `.diff` and an entry in `assets/evals/triggers/cases.json` (`expectedSkills` + `set`).
+- **New skill** — add `assets/skills/<name>/SKILL.md` with `name` / `description` frontmatter (and `metadata.applies-to` if it should work under `SKILLS=globs`).
 - **New Api endpoint** — add a route in `CodeReviewerAgent.Api/Program.cs` (read-only, against the store); mirror the shape in `web/src/types/index.ts` and `web/src/services/api.ts`.
 - **New web page** — add a folder under `web/src/pages/` and a route in `web/src/App.tsx`.
