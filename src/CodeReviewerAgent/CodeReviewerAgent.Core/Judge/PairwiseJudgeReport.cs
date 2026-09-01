@@ -23,7 +23,7 @@ namespace CodeReviewerAgent.Core
     /// </summary>
     public static class PairwiseJudgeReport
     {
-        // The six criteria of rubrics/judge-v2.md, in report order.
+        // The six criteria of assets/rubrics/judge-v2.md, in report order.
         private static readonly (string Name, Func<PairJudgment, Verdict> Select)[] Criteria =
         [
             ("Correctness", j => j.Correctness),

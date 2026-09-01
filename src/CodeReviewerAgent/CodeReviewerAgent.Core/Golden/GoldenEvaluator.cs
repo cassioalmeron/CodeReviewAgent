@@ -26,7 +26,7 @@ namespace CodeReviewerAgent.Core
             Converters = { new JsonStringEnumConverter() },
         };
 
-        public static string CasesDirectory => Path.Combine(AppContext.BaseDirectory, "evals", "golden");
+        public static string CasesDirectory => Path.Combine(AppContext.BaseDirectory, "assets", "evals", "golden");
 
         public static IReadOnlyList<GoldenCase> LoadCases() =>
             JsonSerializer.Deserialize<List<GoldenCase>>(

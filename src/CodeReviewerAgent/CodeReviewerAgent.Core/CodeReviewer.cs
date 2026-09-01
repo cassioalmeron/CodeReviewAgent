@@ -155,7 +155,7 @@ namespace CodeReviewerAgent.Core
 
         private static string LoadSystemPrompt(string version)
         {
-            var path = Path.Combine(AppContext.BaseDirectory, "prompts", $"review-{version}.md");
+            var path = Path.Combine(AppContext.BaseDirectory, "assets", "prompts", $"review-{version}.md");
             if (!File.Exists(path))
                 throw new FileNotFoundException($"Review prompt not found: {path}");
             return File.ReadAllText(path);

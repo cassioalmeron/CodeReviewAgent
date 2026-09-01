@@ -62,7 +62,7 @@ namespace CodeReviewerAgent.Core
     }
 
     /// <summary>
-    /// Discovers the bundled skills (<c>skills/&lt;name&gt;/SKILL.md</c>) and loads them on demand,
+    /// Discovers the bundled skills (<c>assets/skills/&lt;name&gt;/SKILL.md</c>) and loads them on demand,
     /// following the Agent Skills specification: the catalog carries only <c>name</c> and
     /// <c>description</c>, the body is read at activation time, and validation is lenient — cosmetic
     /// problems are reported as diagnostics instead of dropping the skill.
@@ -74,10 +74,10 @@ namespace CodeReviewerAgent.Core
 
         private const int MaxNameLength = 64;
 
-        public static string DefaultRoot => Path.Combine(AppContext.BaseDirectory, "skills");
+        public static string DefaultRoot => Path.Combine(AppContext.BaseDirectory, "assets", "skills");
 
         /// <summary>
-        /// Scans <paramref name="root"/> (the bundled <c>skills/</c> directory by default) and
+        /// Scans <paramref name="root"/> (the bundled <c>assets/skills/</c> directory by default) and
         /// returns the catalog plus the diagnostics collected while validating it.
         /// </summary>
         public static (IReadOnlyList<SkillRef> Skills, IReadOnlyList<SkillDiagnostic> Diagnostics) Discover(

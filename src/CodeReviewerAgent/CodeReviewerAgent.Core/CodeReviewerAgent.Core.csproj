@@ -12,10 +12,14 @@
   </ItemGroup>
 
   <ItemGroup>
-    <None Include="prompts\**\*.md" CopyToOutputDirectory="PreserveNewest" />
-    <None Include="evals\**\*" CopyToOutputDirectory="PreserveNewest" />
-    <None Include="rubrics\**\*.md" CopyToOutputDirectory="PreserveNewest" />
-    <None Include="skills\**\*" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="assets\prompts\**\*.md" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="assets\evals\**\*" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="assets\rubrics\**\*.md" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="assets\skills\**\*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Folder Include="Llm\" />
   </ItemGroup>
 
 </Project>

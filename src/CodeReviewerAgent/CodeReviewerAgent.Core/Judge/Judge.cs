@@ -245,7 +245,7 @@ namespace CodeReviewerAgent.Core
 
         private static string LoadRubric(string version)
         {
-            var path = Path.Combine(AppContext.BaseDirectory, "rubrics", $"judge-{version}.md");
+            var path = Path.Combine(AppContext.BaseDirectory, "assets", "rubrics", $"judge-{version}.md");
             if (!File.Exists(path))
                 throw new FileNotFoundException($"Judge rubric not found: {path}");
             return File.ReadAllText(path);

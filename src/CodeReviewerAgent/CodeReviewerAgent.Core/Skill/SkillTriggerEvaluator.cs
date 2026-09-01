@@ -60,7 +60,7 @@ namespace CodeReviewerAgent.Core
         public static IReadOnlyList<SkillTriggerResult> Run(ISkillSelector selector)
         {
             var runs = int.TryParse(Environment.GetEnvironmentVariable("SKILL_EVAL_RUNS"), out var n) && n > 0 ? n : 3;
-            var directory = Path.Combine(AppContext.BaseDirectory, "evals", "triggers");
+            var directory = Path.Combine(AppContext.BaseDirectory, "assets", "evals", "triggers");
             var cases = JsonSerializer.Deserialize<List<SkillTriggerCase>>(
                 File.ReadAllText(Path.Combine(directory, "cases.json")), JsonOptions) ?? [];
 

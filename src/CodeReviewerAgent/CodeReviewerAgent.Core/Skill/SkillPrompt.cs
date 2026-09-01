@@ -6,7 +6,7 @@ namespace CodeReviewerAgent.Core
     /// Formats the two prompt fragments the skill flow needs: the catalog offered to the
     /// selection call (tier 1) and the instructions section appended to the review system
     /// prompt (tier 2). Both fragments' wording lives in versioned files under
-    /// <c>prompts/</c>, like the review prompt and the judge rubric — only the assembly of the
+    /// <c>assets/prompts/</c>, like the review prompt and the judge rubric — only the assembly of the
     /// skill data around them happens here.
     /// </summary>
     public static class SkillPrompt
@@ -16,7 +16,7 @@ namespace CodeReviewerAgent.Core
             Environment.GetEnvironmentVariable("SKILL_PROMPT_VERSION") ?? "v1";
 
         /// <summary>
-        /// The system prompt of the selection call: <c>prompts/skill-selection-&lt;version&gt;.md</c>
+        /// The system prompt of the selection call: <c>assets/prompts/skill-selection-&lt;version&gt;.md</c>
         /// followed by the catalog. The catalog carries no <c>location</c>: the engines that run
         /// the review can't read files, and the activated block carries the skill directory when
         /// it matters.
@@ -40,7 +40,7 @@ namespace CodeReviewerAgent.Core
 
         /// <summary>
         /// The guidelines section appended to the review system prompt
-        /// (<c>prompts/skill-guidelines-&lt;version&gt;.md</c>) wrapping the activated skills.
+        /// (<c>assets/prompts/skill-guidelines-&lt;version&gt;.md</c>) wrapping the activated skills.
         /// Returns an empty string when nothing was activated.
         /// </summary>
         public static string Guidelines(IReadOnlyList<ActivatedSkill> skills, string version)
@@ -61,7 +61,7 @@ namespace CodeReviewerAgent.Core
 
         private static string Load(string prompt, string version)
         {
-            var path = Path.Combine(AppContext.BaseDirectory, "prompts", $"{prompt}-{version}.md");
+            var path = Path.Combine(AppContext.BaseDirectory, "assets", "prompts", $"{prompt}-{version}.md");
             if (!File.Exists(path))
                 throw new FileNotFoundException($"Skill prompt not found: {path}");
             return File.ReadAllText(path).TrimEnd();
