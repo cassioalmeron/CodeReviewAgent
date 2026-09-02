@@ -63,17 +63,18 @@ reversed. They are in **[docs/ADRs](docs/ADRs/README.md)**.
 src/CodeReviewerAgent/
 ├── CodeReviewerAgent.Core/              # Class library — review + evaluation flow
 │   ├── CodeReviewer.cs                  # Review pipeline: diff → skills → LLM → parse → ground (pure step, no I/O)
-│   ├── ILlmClient.cs                    # LLM client contract (implementations live in Infra)
-│   ├── MessageResponse.cs               # Neutral LLM response shape (model, content, usage, optional real cost)
 │   ├── Finding.cs                       # Finding + ReviewResult records, Severity/Category enums
 │   ├── FindingValidator.cs              # Grounds findings to added lines; derives the line number
 │   ├── Entities.cs                      # Project / Review (+ ContentHash) / Assessment / Evaluation (1→N→N→N)
 │   ├── ProjectResolver.cs               # Resolves the current Project from REPO_DIR / cwd (folder = key)
 │   ├── IRepository.cs                   # IProject / IReview / IAssessment / IEvaluation repository contracts
 │   ├── ProcessRunner.cs                 # Runs external commands (git / gh)
-│   ├── CostCalculator.cs                # Per-model cost (Claude + OpenAI; Ollama/subscription/OpenRouter = no estimate)
 │   ├── ReportGenerator.cs               # Markdown review report
 │   ├── PrCommentFormatter.cs / PrPublisher.cs   # `pr <n> --publish`: format the review, post it with `gh pr comment`
+│   ├── Llm/                             # The LLM boundary Core defines (engines implement it in Infra)
+│   │   ├── ILlmClient.cs                # LLM client contract
+│   │   ├── MessageResponse.cs           # Neutral response shape (model, content, usage, optional real cost)
+│   │   └── CostCalculator.cs            # Per-model cost (Claude + OpenAI; Ollama/subscription/OpenRouter = no estimate)
 │   ├── Diff/                            # Diff sources + parsing
 │   │   ├── IDiffSource.cs / DiffSourceFactory.cs      # Strategy (local/staged/files/pr) + selection from CLI args
 │   │   ├── DiffParser.cs / ParsedDiff.cs             # Unified diff → files/hunks/lines with absolute numbers

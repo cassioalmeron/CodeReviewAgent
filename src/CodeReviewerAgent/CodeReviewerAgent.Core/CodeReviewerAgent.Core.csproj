@@ -18,8 +18,5 @@
     <None Include="assets\skills\**\*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
-  <ItemGroup>
-    <Folder Include="Llm\" />
-  </ItemGroup>
 
 </Project>

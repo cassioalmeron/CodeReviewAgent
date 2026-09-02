@@ -1,5 +1,6 @@
 using System.Text.Json.Serialization;
 using CodeReviewerAgent.Core;
+using CodeReviewerAgent.Core.Judge;
 using CodeReviewerAgent.Infra;
 using DotNetEnv;
 

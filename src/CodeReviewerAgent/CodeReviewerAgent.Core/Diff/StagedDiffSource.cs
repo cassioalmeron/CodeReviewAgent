@@ -1,10 +1,9 @@
-namespace CodeReviewerAgent.Core
+namespace CodeReviewerAgent.Core.Diff;
+
+/// <summary>
+/// The diff of the changes staged in the index (`git diff --staged`).
+/// </summary>
+public class StagedDiffSource : IDiffSource
 {
-    /// <summary>
-    /// The diff of the changes staged in the index (`git diff --staged`).
-    /// </summary>
-    public class StagedDiffSource : IDiffSource
-    {
-        public string GetDiff() => ProcessRunner.Run("git", "diff --staged");
-    }
+    public string GetDiff() => ProcessRunner.Run("git", "diff --staged");
 }

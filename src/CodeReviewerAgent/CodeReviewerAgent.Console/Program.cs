@@ -2,6 +2,11 @@ using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using CodeReviewerAgent.Core;
+using CodeReviewerAgent.Core.Diff;
+using CodeReviewerAgent.Core.Golden;
+using CodeReviewerAgent.Core.Judge;
+using CodeReviewerAgent.Core.Llm;
+using CodeReviewerAgent.Core.Skill;
 using CodeReviewerAgent.Infra;
 using DotNetEnv;
 

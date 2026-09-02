@@ -1,0 +1,6 @@
+root = true
+
+[*.cs]
+# File-scoped namespaces (C# 11+): the whole file is one namespace, so the braces
+# and the extra indent level they force buy nothing.
+csharp_style_namespace_declarations = file_scoped:warning
