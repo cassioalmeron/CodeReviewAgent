@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using CodeReviewerAgent.Core.Judge;
@@ -41,7 +41,7 @@ public static class GoldenEvaluatorReport
     // already finds recorded. Left as a backlog item, not fixed now.
     private static void PersistReviews(IReadOnlyList<ReviewResult> reviews)
     {
-        var directory = Path.Combine(AppContext.BaseDirectory, "reviews");
+        var directory = OutputPaths.Reviews;
         Directory.CreateDirectory(directory);
         var path = Path.Combine(directory, "eval-results.json");
         var options = new JsonSerializerOptions

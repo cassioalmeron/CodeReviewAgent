@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using System.Text.Json.Serialization;
 using CodeReviewerAgent.Core.Llm;
 
@@ -42,9 +42,15 @@ public static class GoldenEvaluator
     /// Comma-separated case names to run, for tuning a prompt or a skill against one stubborn
     /// case without paying for a full pass. Null or blank runs the whole set.
     /// </param>
+    /// <param name="store">
+    /// Where each paid round is made durable as it comes back, so a crash never throws away
+    /// reviews already bought. Optional, and null by default: without it <c>Run</c> touches no
+    /// file at all, which keeps running the set free of I/O and publishing the caller's job.
+    /// </param>
     public static GoldenRun Run(
         ILlmClient client, IProjectRepository projects, IReviewRepository reviewsRepo,
-        IAssessmentRepository assessments, IReadOnlyList<string> promptVersions, string? filter = null)
+        IAssessmentRepository assessments, IReadOnlyList<string> promptVersions, string? filter = null,
+        IGoldenRoundStore? store = null)
     {
         var runs = int.TryParse(Environment.GetEnvironmentVariable("GOLDEN_RUNS"), out var n) && n > 0 ? n : 3;
         var sides = promptVersions.Count;
@@ -68,7 +74,24 @@ public static class GoldenEvaluator
         {
             var caseIndex = slot / perCase;
             var sideIndex = slot % perCase / runs;
-            rounds[slot] = new CodeReviewer(client, diffs[caseIndex], promptVersions[sideIndex]).Review();
+            // caseIndex and sideIndex are both multiples of runs in the slot formula, so what is
+            // left over is the repetition within the (case, side) pair.
+            var runIndex = slot % runs;
+            var promptVersion = promptVersions[sideIndex];
+
+            // A round a previous run already paid for is reused rather than bought again. The
+            // store only offers rounds produced under this run's configuration.
+            var recorded = store?.Find(cases[caseIndex].Name, promptVersion, runIndex);
+            if (recorded is not null)
+            {
+                rounds[slot] = recorded;
+                return;
+            }
+
+            var review = new CodeReviewer(client, diffs[caseIndex], promptVersion).Review();
+            // Durable before the next paid call goes out, not batched until the run finishes.
+            store?.Record(cases[caseIndex].Name, promptVersion, runIndex, review);
+            rounds[slot] = review;
         });
 
         // Phase 2 — scoring and persistence, strictly sequential. Neither repository is

@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using CodeReviewerAgent.Core.Diff;
@@ -127,7 +127,7 @@ public static class SkillTriggerEvaluator
     /// <summary>Writes the markdown report and returns its path.</summary>
     public static string Save(IReadOnlyList<SkillTriggerResult> results, IReadOnlyList<string> catalog)
     {
-        var directory = Path.Combine(AppContext.BaseDirectory, "reports");
+        var directory = OutputPaths.Reports;
         Directory.CreateDirectory(directory);
         var path = Path.Combine(directory, $"skill-triggers-{DateTime.UtcNow:yyyy-MM-dd-HHmmss}.md");
         File.WriteAllText(path, Generate(results, catalog));

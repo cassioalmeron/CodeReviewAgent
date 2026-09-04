@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using CodeReviewerAgent.Core.Diff;
 
 namespace CodeReviewerAgent.Core.Judge;
@@ -78,7 +78,7 @@ public static class PairwiseJudgeReport
         IReadOnlyList<JudgedPair> pairs, string judgeModel, string rubricVersion, int judgeRuns,
         PartialRun? partial = null)
     {
-        var directory = Path.Combine(AppContext.BaseDirectory, "reports");
+        var directory = OutputPaths.Reports;
         Directory.CreateDirectory(directory);
         var path = Path.Combine(directory, $"pairwise-judge-{DateTime.UtcNow:yyyy-MM-dd-HHmmss}.md");
         File.WriteAllText(path, Generate(pairs, judgeModel, rubricVersion, judgeRuns, partial));

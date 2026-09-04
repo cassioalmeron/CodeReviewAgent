@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace CodeReviewerAgent.Core.Judge;
@@ -47,7 +47,7 @@ public static class JudgeResultsStore
     };
 
     public static string DefaultPath =>
-        Path.Combine(AppContext.BaseDirectory, "reviews", "judge-results.jsonl");
+        Path.Combine(OutputPaths.Reviews, "judge-results.jsonl");
 
     /// <summary>
     /// Appends one record and returns as soon as the write completes — durable before the next

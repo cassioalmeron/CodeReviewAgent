@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using System.Text.Json.Serialization;
 using CodeReviewerAgent.Core.Llm;
 
@@ -45,7 +45,7 @@ public static class JudgeRunner
     /// </param>
     public static void Run(ILlmClient judgeClient, int judgeRuns)
     {
-        var resultsPath = Path.Combine(AppContext.BaseDirectory, "reviews", "eval-results.json");
+        var resultsPath = Path.Combine(OutputPaths.Reviews, "eval-results.json");
         if (!File.Exists(resultsPath))
         {
             System.Console.WriteLine("No eval-results.json found. Run `eval` first.");

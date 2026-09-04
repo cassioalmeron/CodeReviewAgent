@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using CodeReviewerAgent.Core.Diff;
 
 namespace CodeReviewerAgent.Core;
@@ -63,7 +63,7 @@ public static class ReportGenerator
     public static string Save(
         IReadOnlyList<ReviewResult> reviews, string? footer, Func<ReviewResult, string?>? noteFor = null)
     {
-        var directory = Path.Combine(AppContext.BaseDirectory, "reports");
+        var directory = OutputPaths.Reports;
         Directory.CreateDirectory(directory);
         var path = Path.Combine(directory, $"report-{DateTime.UtcNow:yyyy-MM-dd-HHmmss}.md");
         File.WriteAllText(path, Generate(reviews, footer, noteFor));

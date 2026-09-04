@@ -1,4 +1,4 @@
-using CodeReviewerAgent.Core;
+﻿using CodeReviewerAgent.Core;
 using CodeReviewerAgent.Core.Golden;
 using CodeReviewerAgent.Infra;
 using CodeReviewerAgent.Tests.Fakes;
@@ -251,8 +251,8 @@ public class GoldenEvaluatorTests
             Environment.SetEnvironmentVariable("GOLDEN_RUNS", "1");
             Environment.SetEnvironmentVariable("SKILLS", "off");
 
-            var reports = Path.Combine(AppContext.BaseDirectory, "reports");
-            var reviews = Path.Combine(AppContext.BaseDirectory, "reviews");
+            var reports = OutputPaths.Reports;
+            var reviews = OutputPaths.Reviews;
             var before = (Count(reports), Count(reviews));
 
             using var context = new CodeReviewDbContext(

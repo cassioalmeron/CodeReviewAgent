@@ -1,4 +1,4 @@
-using System.Text.Encodings.Web;
+﻿using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using CodeReviewerAgent.Core;
@@ -41,7 +41,8 @@ if (args is ["judge", ..])
 // the tight loop for tuning a prompt or a skill without paying for a full pass.
 if (args is ["eval", ..])
 {
-    RunGoldenSet(LlmClientFactory.Create(), args.Length > 1 ? args[1] : null);
+    var (evalClient, evalModel) = LlmClientFactory.CreateWithModel();
+    RunGoldenSet(evalClient, evalModel, args.Length > 1 ? args[1] : null);
     return;
 }
 
@@ -240,17 +241,30 @@ static void JudgeAssessment(int assessmentId)
 
 static void RunAll()
 {
-    var executor = LlmClientFactory.Create();
-    RunGoldenSet(executor);
+    var (executor, executorModel) = LlmClientFactory.CreateWithModel();
+    RunGoldenSet(executor, executorModel);
     JudgeRunner.Run(JudgeClient(), ResolvedJudgeRuns());
 }
 
-static void RunGoldenSet(ILlmClient executor, string? filter = null)
+static void RunGoldenSet(ILlmClient executor, string? executorModel, string? filter = null)
 {
     var repos = RepositoryFactory.Create();
-    var run = GoldenEvaluator.Run(executor, repos.Projects, repos.Reviews, repos.Assessments, PromptVersions(), filter);
 
-    // Running the set is free of I/O; publishing the result is this layer's job.
+    // Each paid round is made durable as it comes back, and a run that died halfway resumes
+    // instead of buying the same reviews twice. Wired here, not inside the evaluator: running
+    // the set stays free of I/O unless this layer asks for it. The model comes from the factory
+    // that built the client, so what keys the resume is what will actually be called.
+    var store = new FileGoldenRoundStore(
+        FileGoldenRoundStore.DefaultPath, executorModel, Environment.GetEnvironmentVariable("SKILLS"));
+    if (store.ResumableCount > 0)
+        Console.WriteLine($"Resuming: {store.ResumableCount} round(s) already recorded for this configuration.");
+    else if (executorModel is null)
+        Console.WriteLine("Model unknown for this engine: rounds will be recorded but not resumed.");
+
+    var run = GoldenEvaluator.Run(
+        executor, repos.Projects, repos.Reviews, repos.Assessments, PromptVersions(), filter, store);
+
+    // Running the set is free of I/O by default; publishing the result is this layer's job.
     GoldenEvaluatorReport.SaveReport(run);
 
     Console.WriteLine();

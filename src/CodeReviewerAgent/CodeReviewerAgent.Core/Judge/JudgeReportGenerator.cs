@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using CodeReviewerAgent.Core.Diff;
 
 namespace CodeReviewerAgent.Core.Judge;
@@ -54,7 +54,7 @@ public static class JudgeReportGenerator
     public static string Save(
         IReadOnlyList<JudgeReportGroup> groups, string judgeModel, string rubricVersion)
     {
-        var directory = Path.Combine(AppContext.BaseDirectory, "reports");
+        var directory = OutputPaths.Reports;
         Directory.CreateDirectory(directory);
         var path = Path.Combine(directory, $"judge-{DateTime.UtcNow:yyyy-MM-dd-HHmmss}.md");
         File.WriteAllText(path, Generate(groups, judgeModel, rubricVersion));
@@ -130,7 +130,7 @@ public static class JudgeReportGenerator
     public static string SaveForAssessment(
         int assessmentId, string? diff, IReadOnlyList<Evaluation> evaluations)
     {
-        var directory = Path.Combine(AppContext.BaseDirectory, "reports");
+        var directory = OutputPaths.Reports;
         Directory.CreateDirectory(directory);
         var path = Path.Combine(directory, $"judge-{DateTime.UtcNow:yyyy-MM-dd-HHmmss}.md");
         File.WriteAllText(path, GenerateForAssessment(assessmentId, diff, evaluations));

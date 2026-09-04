@@ -69,6 +69,7 @@ src/CodeReviewerAgent/
 │   ├── ProjectResolver.cs               # Resolves the current Project from REPO_DIR / cwd (folder = key)
 │   ├── IRepository.cs                   # IProject / IReview / IAssessment / IEvaluation repository contracts
 │   ├── ProcessRunner.cs                 # Runs external commands (git / gh)
+│   ├── OutputPaths.cs                   # Where a run writes reports/ + reviews/ (EVAL_OUTPUT_DIR)
 │   ├── ReportGenerator.cs               # Markdown review report
 │   ├── PrCommentFormatter.cs / PrPublisher.cs   # `pr <n> --publish`: format the review, post it with `gh pr comment`
 │   ├── Llm/                             # The LLM boundary Core defines (engines implement it in Infra)
@@ -82,7 +83,8 @@ src/CodeReviewerAgent/
 │   ├── Golden/                          # Golden set
 │   │   ├── GoldenCase.cs                # Golden vocabulary: expectations (finding | noFinding), case, result, condition
 │   │   ├── GoldenScorer.cs              # The golden verdict as a pure function — detection + trap resistance
-│   │   └── GoldenEvaluator.cs / GoldenEvaluatorReport.cs  # Runs + scores the cases / publishes the report
+│   │   ├── GoldenEvaluator.cs / GoldenEvaluatorReport.cs  # Runs + scores the cases / publishes the report
+│   │   └── GoldenRoundStore.cs          # Each paid round durable as it returns (JSON Lines) → resume
 │   ├── Judge/                           # LLM-as-judge
 │   │   ├── Judge.cs                     # The judge call: absolute scoring + pairwise comparison (inferential layer)
 │   │   ├── JudgeRunner.cs / JudgeResultsStore.cs / PairwiseJudgeReport.cs  # Pairwise: pairs + judges reviews / appends each outcome as JSON Lines / renders the verdict report
@@ -167,6 +169,11 @@ PROMPT_VERSION_COMPARISON=
 SKILLS=all
 SKILL_PROMPT_VERSION=v1        # assets/prompts/skill-selection-<version>.md + skill-guidelines-<version>.md
 
+# Where the evaluation harness writes its reports/ and reviews/ artefacts.
+# Blank = the build output, which is also where the STORAGE=files store lives — set this to keep
+# paid evaluation history outside bin/, and to tell the two apart on disk.
+EVAL_OUTPUT_DIR=
+
 # Where reviews + assessments are stored: files | sqlite | postgres
 # sqlite always uses %LOCALAPPDATA%/CodeReviewerAgent/review.db; DB_CONNECTION is the Postgres
 # connection string only (files and sqlite ignore it).
@@ -200,6 +207,7 @@ SKILL_EVAL_RUNS=3              # runs per trigger-eval case (`skills-eval`)
 JUDGE_MODEL=claude-sonnet-4-6  # stronger than the executor, to avoid self-preference bias
 RUBRIC_VERSION=                # assets/rubrics/judge-<version>.md; unset = v2 for `judge` (pairwise), v1 for `judge <assessmentId>` (absolute)
 JUDGE_RUNS=3                   # executions per pair in the pairwise judge, slots re-randomised each time
+EVAL_OUTPUT_DIR=               # where reports and raw reviews are written; unset = the build output
 ```
 
 > The API key is never committed — keep it only in your local `.env`. `CodeReviewerAgent.Api` has
@@ -415,6 +423,14 @@ afterwards.
 `dotnet run -- eval <case>` narrows to named cases — the tight loop for tuning a prompt or
 a skill without paying for a full pass.
 
+**A crashed run doesn't lose what it bought.** Every paid round is appended to
+`reviews/golden-rounds.jsonl` the moment it returns, so a run that dies on review 55 of 60 keeps the
+54 already paid for; the next `eval` reads that file back and buys only what's missing. A stored
+round is reused only when the **model and `SKILLS` both match** — a round bought from another model
+answers a different question, and quietly counting it would report the old model's numbers under the
+new model's name. When the model can't be established (the CLI engines with `CLAUDE_CODE_MODEL`
+blank), rounds are still recorded but never reused, and the run says so.
+
 ### Trigger eval — *are the right skills selected?*
 
 `assets/evals/triggers/` holds **10 labelled diffs** (`expectedSkills`, split `train` /
@@ -470,7 +486,7 @@ cd src/CodeReviewerAgent
 dotnet test
 ```
 
-216 xUnit tests, no network and no git: the review flow runs against fake `ILlmClient` /
+227 xUnit tests, no network and no git: the review flow runs against fake `ILlmClient` /
 `IDiffSource` implementations, the HTTP transport against a stub handler, and the EF repositories
 against a temporary SQLite file. They also cover the diff parser and filter, finding grounding,
 cost, the golden scorer and reports, the skill catalog and selectors, and the judge (both paths).
@@ -481,7 +497,7 @@ cost, the golden scorer and reports, the skill catalog and selectors, and the ju
 
 ## Extending
 
-- **New LLM engine** — implement `ILlmClient` in `CodeReviewerAgent.Infra/`, add a case in `LlmClientFactory` (also Infra), document its env vars. HTTP engines take an `IHttpTransport` and are wrapped with the resilient transport in the factory; CLI/SDK engines self-heal and skip it. Core never references the factory — Console/Api instantiate it.
+- **New LLM engine** — implement `ILlmClient` in `CodeReviewerAgent.Infra/`, add a case in `LlmClientFactory` (also Infra) returning `(ILlmClient, string? Model)`, document its env vars. The model comes back from the same switch that builds the client so the two can't drift; the golden set keys its resume on it, and `null` means "unknown" and matches no stored round. HTTP engines take an `IHttpTransport` and are wrapped with the resilient transport in the factory; CLI/SDK engines self-heal and skip it. Core never references the factory — Console/Api instantiate it.
 - **New diff source** — implement `IDiffSource` and add a case in `DiffSourceFactory`.
 - **New storage backend** — implement the repository contracts (`IProjectRepository` / `IReviewRepository` / `IAssessmentRepository` / `IEvaluationRepository`) in `CodeReviewerAgent.Infra/` and add a case in `RepositoryFactory`.
 - **New DB provider** — add an `IDbProviderStrategy` (e.g. `UseSqlServer`) and register it in `RepositoryFactory`; the context and model are unchanged.
@@ -491,3 +507,9 @@ cost, the golden scorer and reports, the skill catalog and selectors, and the ju
 - **New skill** — add `assets/skills/<name>/SKILL.md` with `name` / `description` frontmatter (and `metadata.applies-to` if it should work under `SKILLS=globs`).
 - **New Api endpoint** — add a route in `CodeReviewerAgent.Api/Program.cs` (read-only, against the store); mirror the shape in `web/src/types/index.ts` and `web/src/services/api.ts`.
 - **New web page** — add a folder under `web/src/pages/` and a route in `web/src/App.tsx`.
+
+Two C# conventions the code follows everywhere: the namespace mirrors the folder
+(`CodeReviewerAgent.Core.Judge` for `Core/Judge/`; Core's root files stay on `CodeReviewerAgent.Core`,
+and the other projects are flat), and namespaces are **file-scoped** (`namespace X;`) — enforced by
+`csharp_style_namespace_declarations` in [src/CodeReviewerAgent/.editorconfig](src/CodeReviewerAgent/.editorconfig),
+so `dotnet format style <project> --diagnostics IDE0161 --severity warn` fixes a stray file.
