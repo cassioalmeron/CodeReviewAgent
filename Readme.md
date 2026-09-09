@@ -67,7 +67,7 @@ src/CodeReviewerAgent/
 │   ├── FindingValidator.cs              # Grounds findings to added lines; derives the line number
 │   ├── Entities.cs                      # Project / Review (+ ContentHash) / Assessment / Evaluation (1→N→N→N)
 │   ├── ProjectResolver.cs               # Resolves the current Project from REPO_DIR / cwd (folder = key)
-│   ├── IRepository.cs                   # IProject / IReview / IAssessment / IEvaluation repository contracts
+│   ├── IRepository.cs                   # Repository contracts + RepositoryContext (the four passed as one unit)
 │   ├── ProcessRunner.cs                 # Runs external commands (git / gh)
 │   ├── OutputPaths.cs                   # Where a run writes reports/ + reviews/ (EVAL_OUTPUT_DIR)
 │   ├── ReportGenerator.cs               # Markdown review report
@@ -80,10 +80,11 @@ src/CodeReviewerAgent/
 │   │   ├── IDiffSource.cs / DiffSourceFactory.cs      # Strategy (local/staged/files/pr) + selection from CLI args
 │   │   ├── DiffParser.cs / ParsedDiff.cs             # Unified diff → files/hunks/lines with absolute numbers
 │   │   └── DiffFilter.cs / DiffSplitter.cs           # Drop .md files; split a diff per file
-│   ├── Golden/                          # Golden set
-│   │   ├── GoldenCase.cs                # Golden vocabulary: expectations (finding | noFinding), case, result, condition
-│   │   ├── GoldenScorer.cs              # The golden verdict as a pure function — detection + trap resistance
+│   ├── Golden/                          # Golden set, scored on three axes
+│   │   ├── GoldenCase.cs                # Vocabulary: expectations, acceptable findings, verdicts, run result
+│   │   ├── GoldenScorer.cs              # The verdict as a pure function — detection/trap + precision + calibration
 │   │   ├── GoldenEvaluator.cs / GoldenEvaluatorReport.cs  # Runs + scores the cases / publishes the report
+│   │   ├── RoundBuffer.cs               # Slot arithmetic: parallel index → (case, prompt version, repetition)
 │   │   └── GoldenRoundStore.cs          # Each paid round durable as it returns (JSON Lines) → resume
 │   ├── Judge/                           # LLM-as-judge
 │   │   ├── Judge.cs                     # The judge call: absolute scoring + pairwise comparison (inferential layer)
@@ -94,7 +95,7 @@ src/CodeReviewerAgent/
 │   │   ├── ISkillSelector.cs / SkillSelectorFactory.cs / LlmSkillSelector.cs / SkillSelectors.cs  # Who picks the skills (SKILLS)
 │   │   └── SkillTriggerEvaluator.cs     # Trigger eval: are the right skills selected?
 │   └── assets/                          # Copied to the build output and read at runtime
-│       ├── prompts/review-v1..v5.md     # Versioned review system prompts (v3 is the default)
+│       ├── prompts/review-v1..v5.md     # Versioned review system prompts (PROMPT_VERSION)
 │       ├── prompts/skill-selection-v1.md / skill-guidelines-v1.md   # Skill prompt fragments
 │       ├── rubrics/judge-v1.md / judge-v2.md  # Versioned judge rubrics (v1 absolute, v2 pairwise)
 │       ├── skills/{csharp,csharp-modern,react}/SKILL.md   # Bundled skills (not versioned — see below)
@@ -207,6 +208,7 @@ SKILL_EVAL_RUNS=3              # runs per trigger-eval case (`skills-eval`)
 JUDGE_MODEL=claude-sonnet-4-6  # stronger than the executor, to avoid self-preference bias
 RUBRIC_VERSION=                # assets/rubrics/judge-<version>.md; unset = v2 for `judge` (pairwise), v1 for `judge <assessmentId>` (absolute)
 JUDGE_RUNS=3                   # executions per pair in the pairwise judge, slots re-randomised each time
+JUDGE_THINKING=                # `off` disables the judge's reasoning; unset inherits the model's default
 EVAL_OUTPUT_DIR=               # where reports and raw reviews are written; unset = the build output
 ```
 
@@ -398,19 +400,38 @@ Three layers measure different things:
 
 `assets/evals/golden/` holds **15 diffs whose correct outcome is known**, declared in `cases.json`.
 Each runs `GOLDEN_RUNS` times (LLM output is non-deterministic, so one run is a noisy
-sample), and each carries one of two expectations:
+sample) through every prompt version in play — one, or two when `PROMPT_VERSION_COMPARISON`
+is set, in which case both sides are scored separately over the same diffs. Each case
+carries one of two expectations:
 
 - **Detection** (12 cases) — a problem was planted, and some finding must point at the
-  right file and mention an expected keyword.
+  right file and mention an expected keyword. The case also declares how **severe** the
+  problem really is, which is what calibration is measured against.
 - **Trap resistance** (3 cases) — the code is **correct**, and carries a bait: a modern
-  C# construct an older model mistakes for a syntax error. The model loses the case only
-  by flagging that bait; a legitimate remark elsewhere in the diff is ignored, otherwise
-  the trap would just reward saying little.
+  C# construct an older model mistakes for a syntax error. The model loses the case by
+  flagging that bait.
 
-The two rates are reported **separately and never summed** — detection and resistance
-answer opposite questions, and one number hides which side failed. The report also breaks
-them down by the C# version each case requires, and states which skills were active, so a
-run with the harness is never confused with one without it.
+**Three axes, so a single number can never hide which side failed.** Every finding gets a
+verdict — planted, acceptable, duplicate, unforeseen, or bait — and the rates are counts
+over those, traceable back to the findings that produced them:
+
+- **Detection / trap resistance** — did it catch the planted problem, did it stay quiet on
+  correct code. Never summed: they answer opposite questions.
+- **Precision** — over *findings*, not runs, so a round with four wrong findings weighs
+  more than a round with one. On a detection case, findings nobody anticipated are excluded
+  from both sides; on a trap they count, because the diff is correct by construction.
+- **Calibration** — emitted severity minus expected, kept as the list of signed distances.
+  Never only a mean: +1 and −1 average to zero, which would read as perfect.
+
+A case can list what else its diff makes legitimate to report (`alsoAcceptable`), so
+precision doesn't punish a model for being right about something the case author missed —
+each entry carries a `why`, so nothing later confuses a considered entry with one added to
+silence an inconvenient false positive. Findings that were neither planted, listed, nor
+repeats are printed in an **Unforeseen findings** section for a human to read and promote:
+that's how the list grows.
+
+The report also breaks the rates down by the C# version each case requires, and states
+which skills were active, so a run with the harness is never confused with one without it.
 
 Each case has a ground-truth `.md` next to its `.diff` explaining the defect — or, for a
 trap, why the code is correct. Tests enforce that every case has one.
@@ -418,7 +439,9 @@ trap, why the code is correct. Tests enforce that every case has one.
 The LLM calls run concurrently (`GOLDEN_PARALLELISM`); scoring and persistence stay
 sequential. Results persist to the store: each case's diff via `GetOrAdd` (reused across
 runs) and each run's `Assessment`, so the golden assessments are addressable by id
-afterwards.
+afterwards. **A run that dies part-way produces no report** — a rate over a partial set is
+not a smaller truth, it's a wrong number — so it writes what it bought, says how much was
+kept, and exits non-zero.
 
 `dotnet run -- eval <case>` narrows to named cases — the tight loop for tuning a prompt or
 a skill without paying for a full pass.

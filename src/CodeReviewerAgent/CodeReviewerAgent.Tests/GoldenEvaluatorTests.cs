@@ -12,6 +12,7 @@ namespace CodeReviewerAgent.Tests;
 /// <see cref="GoldenScorerTests"/> cannot is the wiring — that each case turns into a result of
 /// the right kind, and that the diffs and assessments are persisted as the run goes.
 /// </summary>
+[Collection(EnvironmentCollection.Name)]
 public class GoldenEvaluatorTests
 {
     // One prompt version reproduces today's set: same round count, same results, no comparison.
@@ -55,7 +56,8 @@ public class GoldenEvaluatorTests
             var reviews = new EfReviewRepository(context);
             var assessments = new EfAssessmentRepository(context);
 
-            var run = GoldenEvaluator.Run(new FakeLlmClient(CaughtSqlInjection), projects, reviews, assessments, SingleVersion);
+            var run = GoldenEvaluator.Run(
+                new FakeLlmClient(CaughtSqlInjection), TestRepositories.For(context), SingleVersion).Scored();
 
             var cases = GoldenEvaluator.LoadCases();
             Assert.Equal(cases.Count, run.Results.Count);
@@ -124,11 +126,7 @@ public class GoldenEvaluatorTests
             context.Database.EnsureCreated();
 
             var run = GoldenEvaluator.Run(
-                new FakeLlmClient(FellForTheExtensionBlock),
-                new EfProjectRepository(context),
-                new EfReviewRepository(context),
-                new EfAssessmentRepository(context),
-                SingleVersion);
+                new FakeLlmClient(FellForTheExtensionBlock), TestRepositories.For(context), SingleVersion).Scored();
 
             var trap = run.Results.Single(r => r.Name == "extension-block");
             Assert.Equal(0, trap.Successes);
@@ -169,12 +167,7 @@ public class GoldenEvaluatorTests
             context.Database.EnsureCreated();
 
             var run = GoldenEvaluator.Run(
-                new FakeLlmClient(CaughtSqlInjection),
-                new EfProjectRepository(context),
-                new EfReviewRepository(context),
-                new EfAssessmentRepository(context),
-                SingleVersion,
-                filter);
+                new FakeLlmClient(CaughtSqlInjection), TestRepositories.For(context), SingleVersion, filter).Scored();
 
             Assert.Equal(expected, run.Results.Count);
             Assert.All(run.Results, r => Assert.Contains(r.Name, filter, StringComparison.OrdinalIgnoreCase));
@@ -211,11 +204,7 @@ public class GoldenEvaluatorTests
             var assessments = new EfAssessmentRepository(context);
 
             var run = GoldenEvaluator.Run(
-                new FakeLlmClient(CaughtSqlInjection),
-                new EfProjectRepository(context),
-                new EfReviewRepository(context),
-                assessments,
-                SingleVersion);
+                new FakeLlmClient(CaughtSqlInjection), TestRepositories.For(context), SingleVersion).Scored();
 
             var cases = GoldenEvaluator.LoadCases();
             Assert.Equal(cases.Select(c => c.Name), run.Results.Select(r => r.Name));
@@ -260,11 +249,7 @@ public class GoldenEvaluatorTests
             context.Database.EnsureCreated();
 
             GoldenEvaluator.Run(
-                new FakeLlmClient(CaughtSqlInjection),
-                new EfProjectRepository(context),
-                new EfReviewRepository(context),
-                new EfAssessmentRepository(context),
-                SingleVersion);
+                new FakeLlmClient(CaughtSqlInjection), TestRepositories.For(context), SingleVersion);
 
             Assert.Equal(before, (Count(reports), Count(reviews)));
         }
@@ -291,11 +276,7 @@ public class GoldenEvaluatorTests
             context.Database.EnsureCreated();
 
             var error = Assert.Throws<InvalidOperationException>(() => GoldenEvaluator.Run(
-                new FakeLlmClient(CaughtSqlInjection),
-                new EfProjectRepository(context),
-                new EfReviewRepository(context),
-                new EfAssessmentRepository(context),
-                SingleVersion,
+                new FakeLlmClient(CaughtSqlInjection), TestRepositories.For(context), SingleVersion,
                 "no-such-case"));
 
             Assert.Contains("no-such-case", error.Message);
@@ -330,8 +311,9 @@ public class GoldenEvaluatorTests
             var assessments = new EfAssessmentRepository(context);
             var client = new FakeLlmClient(CaughtSqlInjection);
 
-            GoldenEvaluator.Run(client, projects, reviews, assessments, SingleVersion);
-            GoldenEvaluator.Run(client, projects, reviews, assessments, SingleVersion);
+            var repositories = TestRepositories.For(context);
+            GoldenEvaluator.Run(client, repositories, SingleVersion);
+            GoldenEvaluator.Run(client, repositories, SingleVersion);
 
             var cases = GoldenEvaluator.LoadCases();
             Assert.Equal(cases.Count, reviews.List().Count);          // diffs reused
@@ -369,12 +351,9 @@ public class GoldenEvaluatorTests
             var assessments = new EfAssessmentRepository(context);
 
             var run = GoldenEvaluator.Run(
-                new FakeLlmClient(CaughtSqlInjection),
-                new EfProjectRepository(context),
-                reviews,
-                assessments,
+                new FakeLlmClient(CaughtSqlInjection), TestRepositories.For(context),
                 ["v3", "v1"],
-                "sql-injection");
+                "sql-injection").Scored();
 
             Assert.Equal(2, run.Results.Count);
             Assert.Equal(["v3", "v1"], run.Results.Select(r => r.PromptVersion));

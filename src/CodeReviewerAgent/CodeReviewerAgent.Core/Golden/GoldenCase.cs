@@ -1,4 +1,4 @@
-using System.Text.Json.Serialization;
+﻿using System.Text.Json.Serialization;
 
 namespace CodeReviewerAgent.Core.Golden;
 
@@ -17,7 +17,35 @@ public abstract record GoldenExpectation;
 /// mention one of the <paramref name="Keywords"/>. The category is not part of the match —
 /// whether it was labelled well is a quality question, left to the judge.
 /// </summary>
-public sealed record ExpectFinding(string File, Category Category, List<string> Keywords) : GoldenExpectation;
+/// <param name="Severity">
+/// How grave the planted problem actually is, which is what makes calibration measurable: a run
+/// that catches a SQL injection and files it as <c>Info</c> detected exactly as well as one that
+/// filed it <c>Critical</c>, and only this field can tell them apart.
+/// <para>
+/// Nullable so that a case written without it fails loudly at load instead of defaulting to
+/// <c>Info</c> — an enum missing from JSON deserializes to zero, and a silent expected value is
+/// a silent wrong measurement. <c>GoldenEvaluator.LoadCases</c> rejects it.
+/// </para>
+/// </param>
+public sealed record ExpectFinding(
+    string File, Category Category, List<string> Keywords, Severity? Severity = null) : GoldenExpectation;
+
+/// <summary>
+/// Something the diff makes legitimate to point out beyond the planted problem, so that finding
+/// it is not counted as noise.
+/// <para>
+/// It exists because the measurement of 16/08 found one: on <c>null-dereference</c> the model
+/// remarked, in all five rounds, that the diff also changes the returned value by applying
+/// <c>ToUpperInvariant</c>. That remark is correct and is not in the case's ground truth. Without
+/// this list, precision punishes the model for being right, and punishes hardest the model that
+/// notices what the case author did not.
+/// </para>
+/// </summary>
+/// <param name="Why">
+/// Where the entry came from. Not decoration: six months on, nothing else distinguishes a
+/// considered entry from one added to silence an inconvenient false positive.
+/// </param>
+public sealed record AcceptableFinding(string File, List<string> Keywords, string? Why = null);
 
 /// <summary>
 /// The diff is correct. <paramref name="Snippet"/> is the bait: a construct some models mistake
@@ -33,14 +61,107 @@ public sealed record ExpectNoFinding(string File, string Snippet) : GoldenExpect
 /// version-agnostic), which is what lets the report say <em>which</em> constructs a model
 /// handles badly instead of only that it failed.
 /// </summary>
+/// <param name="AlsoAcceptable">
+/// What else this diff makes legitimate to report. Absent means nothing else is: every other
+/// finding is either a duplicate of one already counted, or unforeseen. Applies to trap cases
+/// too — a correct diff can still carry something worth remarking on.
+/// </param>
 public record GoldenCase(
     string Name,
     string Diff,
     string GroundTruth,
     GoldenExpectation Expect,
-    string? Since = null);
+    string? Since = null,
+    List<AcceptableFinding>? AlsoAcceptable = null);
 
 public enum GoldenKind { Detection, Trap }
+
+/// <summary>
+/// What one finding turned out to be. The three metrics are counts over these, so every rate the
+/// report prints can be traced back to the findings that produced it.
+/// </summary>
+public enum FindingVerdict
+{
+    /// <summary>The problem the case plants. At most one per round; the rest are duplicates.</summary>
+    Planted,
+
+    /// <summary>Something the case's <c>AlsoAcceptable</c> list declares legitimate to report.</summary>
+    Acceptable,
+
+    /// <summary>A second finding for a problem already counted: fragmentation.</summary>
+    Duplicate,
+
+    /// <summary>
+    /// Neither planted, nor listed, nor a repeat. On a detection case this is deliberately not a
+    /// penalty — it may well be correct, and the list is what is incomplete — so it is reported
+    /// for a human to read and promote. On a trap it counts against precision, because there the
+    /// diff is correct by construction.
+    /// </summary>
+    Unforeseen,
+
+    /// <summary>The trap's bait, flagged as if it were a bug. Trap cases only.</summary>
+    Bait,
+}
+
+public record FindingOutcome(Finding Finding, FindingVerdict Verdict);
+
+/// <summary>One round that came back, with the case and diff it belongs to.</summary>
+public record CompletedRound(string Case, string Diff, ReviewResult Review);
+
+/// <summary>
+/// What a run produced, whether or not it finished. A run that dies part-way is not an
+/// exceptional situation here — it is a quota exhausted on round 55 of 60, which this project has
+/// lived through — so it is a value the caller receives rather than an exception that unwinds
+/// past the rounds already bought.
+/// </summary>
+/// <param name="Score">
+/// The scored run, or null when the run did not finish. Null on purpose: a detection rate over a
+/// partial set is not a smaller truth, it is a wrong number, so it is never offered.
+/// </param>
+/// <param name="Completed">
+/// Every round that came back, finished or not. This is what persistence is written from, and
+/// what makes a failed run still worth something.
+/// </param>
+/// <param name="Failure">What went wrong, kept rather than swallowed, so the caller can report it.</param>
+public record GoldenRunResult(
+    GoldenScore? Score,
+    IReadOnlyList<CompletedRound> Completed,
+    Exception? Failure)
+{
+    public bool Succeeded => Failure is null;
+}
+
+/// <summary>
+/// One round on all three axes. <see cref="Succeeded"/> is the old boolean, kept because it is
+/// still what detection and trap resistance are; the rest is what the old ruler could not see.
+/// </summary>
+/// <param name="CalibrationDistance">
+/// Emitted severity minus expected, on the <see cref="FindingVerdict.Planted"/> finding. Zero is
+/// exact, positive is inflated, negative is understated. Null when there is nothing to compare:
+/// the round missed the planted problem, or the case is a trap and has no expected severity.
+/// </param>
+public record RoundScore(
+    GoldenKind Kind,
+    bool Succeeded,
+    IReadOnlyList<FindingOutcome> Outcomes,
+    int? CalibrationDistance)
+{
+    public int Count(FindingVerdict verdict) => Outcomes.Count(o => o.Verdict == verdict);
+
+    /// <summary>Findings that needed saying.</summary>
+    public int PrecisionCorrect => Count(FindingVerdict.Planted) + Count(FindingVerdict.Acceptable);
+
+    /// <summary>
+    /// Findings the precision rate is taken over, and the one place the two kinds of case differ.
+    /// On a detection case the unforeseen are excluded from both sides, so an observation the
+    /// case author never anticipated neither helps nor hurts. On a trap everything counts, because
+    /// the diff is correct: there is no such thing as a finding that needed saying, beyond what
+    /// the list allows.
+    /// </summary>
+    public int PrecisionCounted => Kind == GoldenKind.Detection
+        ? PrecisionCorrect + Count(FindingVerdict.Duplicate)
+        : Outcomes.Count;
+}
 
 /// <summary>
 /// The outcome of running one golden case N times. <see cref="Successes"/> means detections for
@@ -48,6 +169,21 @@ public enum GoldenKind { Detection, Trap }
 /// <see cref="GoldenKind.Trap"/> — two different things, which is exactly why they are never
 /// summed into a single rate.
 /// </summary>
+/// <param name="PrecisionCorrect">
+/// Findings that needed saying, summed over the runs. Precision aggregates over findings, not
+/// over per-run rates: a run that emitted four wrong findings has to weigh more than one that
+/// emitted a single wrong finding, and averaging rates would flatten exactly that.
+/// </param>
+/// <param name="CalibrationDistances">
+/// One signed distance per run that had something to calibrate. Kept as the list, not as a mean,
+/// because the mean alone lies: a run at +1 and another at −1 average to zero, which reads as
+/// perfect calibration when neither run was right.
+/// </param>
+/// <param name="Unforeseen">
+/// Findings that were neither planted, listed, nor repeats. On a detection case these carry no
+/// penalty; they are here so a human can read them and decide what belongs in
+/// <c>AlsoAcceptable</c>. This is how the list is meant to grow.
+/// </param>
 public record GoldenCaseResult(
     string Name,
     GoldenKind Kind,
@@ -55,7 +191,11 @@ public record GoldenCaseResult(
     string PromptVersion,
     int Successes,
     int Runs,
-    string? MissDetail);
+    string? MissDetail,
+    int PrecisionCorrect = 0,
+    int PrecisionCounted = 0,
+    IReadOnlyList<int>? CalibrationDistances = null,
+    IReadOnlyList<Finding>? Unforeseen = null);
 
 /// <summary>
 /// Everything a finished golden run produced, with no side effect attached: the per-case
@@ -63,7 +203,7 @@ public record GoldenCaseResult(
 /// Publishing it is a separate step (<c>GoldenEvaluatorReport.SaveReport</c>), so running the set
 /// touches nothing on disk.
 /// </summary>
-public record GoldenRun(
+public record GoldenScore(
     IReadOnlyList<GoldenCaseResult> Results,
     IReadOnlyList<ReviewResult> Reviews,
     GoldenCondition Condition,

@@ -1,4 +1,4 @@
-using CodeReviewerAgent.Core;
+﻿using CodeReviewerAgent.Core;
 using Xunit;
 
 namespace CodeReviewerAgent.Tests;
@@ -15,6 +15,7 @@ namespace CodeReviewerAgent.Tests;
 /// test touched the class first would decide the answer for all the others.
 /// </para>
 /// </summary>
+[Collection(EnvironmentCollection.Name)]
 public class OutputPathsTests
 {
     [Fact]

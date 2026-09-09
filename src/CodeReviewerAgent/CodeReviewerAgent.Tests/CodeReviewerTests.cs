@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using CodeReviewerAgent.Core;
 using CodeReviewerAgent.Core.Skill;
 using CodeReviewerAgent.Tests.Fakes;
@@ -6,6 +6,7 @@ using Xunit;
 
 namespace CodeReviewerAgent.Tests;
 
+[Collection(EnvironmentCollection.Name)]
 public class CodeReviewerTests
 {
     private const string CsharpDiff = """

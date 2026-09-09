@@ -45,3 +45,14 @@ public interface IEvaluationRepository
     Evaluation? Get(int id);
     IReadOnlyList<Evaluation> List();
 }
+
+/// <summary>
+/// The repositories backing a run, passed around as one unit — same store, and a shared
+/// <c>DbContext</c> when relational. Lives in Core because it is only the contracts;
+/// <c>RepositoryFactory</c> (Infra) is what fills it with implementations.
+/// </summary>
+public record RepositoryContext(
+    IProjectRepository Projects,
+    IReviewRepository Reviews,
+    IAssessmentRepository Assessments,
+    IEvaluationRepository Evaluations);

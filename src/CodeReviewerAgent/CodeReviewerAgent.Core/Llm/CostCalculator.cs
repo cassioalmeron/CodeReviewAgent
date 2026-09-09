@@ -12,7 +12,10 @@ public static class CostCalculator
     private static readonly Dictionary<string, (decimal Input, decimal Output)> ClaudePricing =
         new(StringComparer.OrdinalIgnoreCase)
         {
+            ["claude-fable-5-1"] = (10m, 50m),
             ["claude-fable-5"] = (10m, 50m),
+            ["claude-opus-5"] = (5m, 25m),
+            ["claude-sonnet-5"] = (2m, 10m),
             ["claude-opus-4-8"] = (5m, 25m),
             ["claude-opus-4-7"] = (5m, 25m),
             ["claude-opus-4-6"] = (5m, 25m),

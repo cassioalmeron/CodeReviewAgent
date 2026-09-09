@@ -25,6 +25,35 @@ public class GoldenFixtureTests
         });
     }
 
+    /// <summary>
+    /// Calibration is measured against this value, so a case without one measures nothing. The
+    /// loader already refuses to return such a case; this pins the fixture itself, because the
+    /// failure it guards against is adding a case and forgetting the field.
+    /// </summary>
+    [Fact]
+    public void EveryDetectionCaseDeclaresAnExpectedSeverity() =>
+        Assert.All(
+            Cases.Where(c => c.Expect is ExpectFinding),
+            c => Assert.NotNull(((ExpectFinding)c.Expect).Severity));
+
+    /// <summary>
+    /// An acceptable finding with no keywords matches nothing and quietly does nothing, which
+    /// reads in the report exactly like an entry that was never added. The <c>why</c> is required
+    /// for the opposite reason: an entry nobody can justify later is an entry that silenced a
+    /// real false positive.
+    /// </summary>
+    [Fact]
+    public void EveryAcceptableFindingIsUsableAndJustified() =>
+        Assert.All(
+            Cases.Where(c => c.AlsoAcceptable is not null).SelectMany(c => c.AlsoAcceptable!),
+            a =>
+            {
+                Assert.False(string.IsNullOrWhiteSpace(a.File));
+                Assert.NotEmpty(a.Keywords);
+                Assert.All(a.Keywords, k => Assert.False(string.IsNullOrWhiteSpace(k)));
+                Assert.False(string.IsNullOrWhiteSpace(a.Why));
+            });
+
     [Fact]
     public void EveryCaseHasItsDiff()
     {

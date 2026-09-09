@@ -6,7 +6,7 @@ using CodeReviewerAgent.Core.Judge;
 namespace CodeReviewerAgent.Core.Golden;
 
 /// <summary>
-/// Publishes a finished <see cref="GoldenRun"/>: the report, the console summary lines, and the
+/// Publishes a finished <see cref="GoldenScore"/>: the report, the console summary lines, and the
 /// raw reviews for the judge. Kept apart from <see cref="GoldenEvaluator"/> so running the set
 /// stays free of I/O — everything here is formatting and persistence of an already-finished run.
 /// </summary>
@@ -16,7 +16,7 @@ public static class GoldenEvaluatorReport
     /// Publishes a finished run: one report covering every round, each labelled with its golden
     /// verdict and the rate summary appended as a footer, plus the raw reviews for the judge.
     /// </summary>
-    public static string SaveReport(GoldenRun run)
+    public static string SaveReport(GoldenScore run)
     {
         var reportPath = ReportGenerator.Save(
             [.. run.Reviews], BuildFooter(run.Results, run.Condition),
@@ -30,15 +30,11 @@ public static class GoldenEvaluatorReport
     // Persist the raw reviews so the judge can score them in a separate run, without
     // re-invoking the (paid) executor. The judge loads this file.
     //
-    // KNOWN GAP (backlog, not fixed here): this only runs once, after every round in the whole
-    // set has already completed. GoldenEvaluator.Run accumulates all rounds in the in-memory
-    // `reviews` list and this method is the only place anything reaches disk — a crash (quota,
-    // network, anything) on, say, review 55 of 60 loses the 54 already paid for, exactly the
-    // failure JudgeRunner/JudgeResultsStore was just fixed for on the judge side (see the two-
-    // stage, append-as-you-go pattern there: paid call → durable JSON Lines line → report). The
-    // fix here would be the same shape: append each ReviewResult to eval-results.json (or a
-    // .jsonl sibling) as it comes back in GoldenEvaluator.Run, and skip whatever a resumed run
-    // already finds recorded. Left as a backlog item, not fixed now.
+    // This still runs once, after the whole set has finished, and that is now fine: it is no
+    // longer the only thing standing between a crash and the money. GoldenRoundStore appends each
+    // round as it comes back, so a run that dies loses nothing it paid for and resumes from what
+    // is on disk. This file is the judge's input, rebuilt from a finished run — not the durable
+    // record of one.
     private static void PersistReviews(IReadOnlyList<ReviewResult> reviews)
     {
         var directory = OutputPaths.Reviews;
@@ -114,9 +110,105 @@ public static class GoldenEvaluatorReport
         }
 
         foreach (var side in sides)
+        {
+            var inSide = results.Where(r => r.PromptVersion == side).ToList();
+            var label = showPromptVersion ? $" ({side})" : "";
+            AppendPrecision(footer, inSide, label);
+            AppendCalibration(footer, inSide, label);
+        }
+
+        foreach (var side in sides)
             AppendVersionLadder(footer, [.. results.Where(r => r.PromptVersion == side)], hasTraps,
                 showPromptVersion ? side : null);
+
+        AppendUnforeseen(footer, results, showPromptVersion);
         return footer.ToString();
+    }
+
+    // Precision counts findings, not runs: a run that emitted four findings which should not exist
+    // has to weigh four times one that emitted a single one, and a mean of per-run rates would
+    // flatten exactly that. The two kinds of case are reported apart for the same reason detection
+    // and trap resistance are — their denominators mean different things.
+    private static void AppendPrecision(StringBuilder footer, IReadOnlyList<GoldenCaseResult> results, string label)
+    {
+        foreach (var kind in new[] { GoldenKind.Detection, GoldenKind.Trap })
+        {
+            var inKind = results.Where(r => r.Kind == kind).ToList();
+            var counted = inKind.Sum(r => r.PrecisionCounted);
+            if (counted == 0)
+                continue;
+
+            var correct = inKind.Sum(r => r.PrecisionCorrect);
+            var name = kind == GoldenKind.Detection ? "Precision" : "Precision (traps)";
+            footer.AppendLine(
+                $"- **{name}**{label} {correct}/{counted} ({(double)correct / counted:P1})" +
+                $" · {counted - correct} finding(s) that should not have been said");
+        }
+    }
+
+    // Signed distance on the severity scale: Info 0, Warning 1, Critical 2. The mean alone is not
+    // enough — one run at +1 and another at −1 average to zero, which reads as perfect calibration
+    // when neither run was right — so the counts are printed beside it.
+    private static void AppendCalibration(StringBuilder footer, IReadOnlyList<GoldenCaseResult> results, string label)
+    {
+        var distances = results
+            .Where(r => r.CalibrationDistances is not null)
+            .SelectMany(r => r.CalibrationDistances!)
+            .ToList();
+        if (distances.Count == 0)
+            return;
+
+        var exact = distances.Count(d => d == 0);
+        var inflated = distances.Count(d => d > 0);
+        var understated = distances.Count(d => d < 0);
+        footer.AppendLine(
+            $"- **Calibration**{label} mean {distances.Average():+0.00;-0.00;0.00}" +
+            $" · exact {exact}/{distances.Count} · inflated {inflated} · understated {understated}");
+    }
+
+    // Findings that were neither planted, nor listed, nor repeats. On a detection case they cost
+    // nothing — what is incomplete may well be the list, not the model — so they are printed for a
+    // human to read. A remark that keeps coming back across runs is the candidate to promote into
+    // the case's AlsoAcceptable; one that appears once is noise until it repeats.
+    private static void AppendUnforeseen(
+        StringBuilder footer, IReadOnlyList<GoldenCaseResult> results, bool showPromptVersion)
+    {
+        var rows = results
+            .Where(r => r.Unforeseen is { Count: > 0 })
+            .SelectMany(r => r.Unforeseen!.Select(f => (Result: r, Finding: f)))
+            .GroupBy(x => (
+                x.Result.Name,
+                x.Result.PromptVersion,
+                x.Finding.Severity,
+                Problem: Truncate(x.Finding.Problem, 90)))
+            .OrderByDescending(g => g.Count())
+            .ToList();
+        if (rows.Count == 0)
+            return;
+
+        footer.AppendLine();
+        footer.AppendLine("## Unforeseen findings");
+        footer.AppendLine();
+        footer.AppendLine(
+            "Neither planted, listed, nor repeats. They carry no penalty on a detection case." +
+            " What repeats across runs is a candidate for that case's `alsoAcceptable`.");
+        footer.AppendLine();
+        footer.AppendLine($"| Case |{(showPromptVersion ? " Prompt |" : "")} Runs | Severity | Finding |");
+        footer.AppendLine($"|---|{(showPromptVersion ? "---|" : "")}---:|---|---|");
+        foreach (var g in rows)
+            footer.AppendLine(
+                $"| {g.Key.Name} |{(showPromptVersion ? $" {g.Key.PromptVersion} |" : "")}" +
+                $" {g.Count()} | {g.Key.Severity} | {g.Key.Problem} |");
+    }
+
+    // A finding's problem text is prose written by a model: it can be long and it can contain the
+    // pipe that would break the table it is being rendered into.
+    private static string Truncate(string? text, int max)
+    {
+        var single = string
+            .Join(' ', (text ?? "").Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
+            .Replace("|", "\\|");
+        return single.Length <= max ? single : single[..max] + "…";
     }
 
     // The distinct prompt versions present in a run, in first-seen order — one entry for

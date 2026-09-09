@@ -2,13 +2,6 @@ using CodeReviewerAgent.Core;
 
 namespace CodeReviewerAgent.Infra;
 
-/// <summary>The repositories backing a run — same store, shared context when relational.</summary>
-public record Repositories(
-    IProjectRepository Projects,
-    IReviewRepository Reviews,
-    IAssessmentRepository Assessments,
-    IEvaluationRepository Evaluations);
-
 /// <summary>
 /// Builds the repositories from configuration. <c>STORAGE</c> selects file-vs-EF and, when
 /// EF, the relational provider; the connection string comes from <c>DB_CONNECTION</c>.
@@ -20,12 +13,12 @@ public static class RepositoryFactory
         new IDbProviderStrategy[] { new SqliteProviderStrategy(), new PostgresProviderStrategy() }
             .ToDictionary(s => s.Name);
 
-    public static Repositories Create()
+    public static RepositoryContext Create()
     {
         var storage = (Environment.GetEnvironmentVariable("STORAGE") ?? "files").ToLowerInvariant();
 
         if (storage == "files")
-            return new Repositories(
+            return new RepositoryContext(
                 new FileProjectRepository(),
                 new FileReviewRepository(),
                 new FileAssessmentRepository(),
@@ -41,7 +34,7 @@ public static class RepositoryFactory
         var context = new CodeReviewDbContext(options => provider.Configure(options, connectionString));
         context.Database.EnsureCreated();
 
-        return new Repositories(
+        return new RepositoryContext(
             new EfProjectRepository(context),
             new EfReviewRepository(context),
             new EfAssessmentRepository(context),

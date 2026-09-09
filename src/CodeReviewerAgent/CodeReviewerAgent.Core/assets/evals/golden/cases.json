@@ -7,7 +7,12 @@
       "$type": "finding",
       "file": "src/Data/UserRepository.cs",
       "category": "Security",
-      "keywords": ["injection", "sql", "parameter"]
+      "keywords": [
+        "injection",
+        "sql",
+        "parameter"
+      ],
+      "severity": "Critical"
     }
   },
   {
@@ -18,7 +23,13 @@
       "$type": "finding",
       "file": "src/Services/PaymentClient.cs",
       "category": "Security",
-      "keywords": ["secret", "hardcoded", "key", "credential"]
+      "keywords": [
+        "secret",
+        "hardcoded",
+        "key",
+        "credential"
+      ],
+      "severity": "Critical"
     }
   },
   {
@@ -29,8 +40,22 @@
       "$type": "finding",
       "file": "src/Services/OrderService.cs",
       "category": "Bug",
-      "keywords": ["null"]
-    }
+      "keywords": [
+        "null"
+      ],
+      "severity": "Critical"
+    },
+    "alsoAcceptable": [
+      {
+        "file": "src/Services/OrderService.cs",
+        "keywords": [
+          "uppercase",
+          "toupperinvariant",
+          "original case"
+        ],
+        "why": "The diff also replaces the return with customer.Email.ToUpperInvariant(), which changes the value returned. Remarking on that is correct, and it is not in the case's ground truth. Promoted after appearing in 5 of 5 rounds of the 2026-08-16 report."
+      }
+    ]
   },
   {
     "name": "off-by-one",
@@ -40,7 +65,14 @@
       "$type": "finding",
       "file": "src/Utils/ArrayHelper.cs",
       "category": "Bug",
-      "keywords": ["off-by-one", "out of range", "index", "bounds", "length"]
+      "keywords": [
+        "off-by-one",
+        "out of range",
+        "index",
+        "bounds",
+        "length"
+      ],
+      "severity": "Critical"
     }
   },
   {
@@ -51,7 +83,14 @@
       "$type": "finding",
       "file": "src/Services/DuplicateFinder.cs",
       "category": "Performance",
-      "keywords": ["nested", "quadratic", "performance", "hashset", "o(n"]
+      "keywords": [
+        "nested",
+        "quadratic",
+        "performance",
+        "hashset",
+        "o(n"
+      ],
+      "severity": "Warning"
     }
   },
   {
@@ -62,7 +101,13 @@
       "$type": "finding",
       "file": "src/Services/NotificationService.cs",
       "category": "Convention",
-      "keywords": ["brace", "interpolat", "concaten", "early return"]
+      "keywords": [
+        "brace",
+        "interpolat",
+        "concaten",
+        "early return"
+      ],
+      "severity": "Info"
     }
   },
   {
@@ -73,10 +118,16 @@
       "$type": "finding",
       "file": "web/src/components/AlertList.tsx",
       "category": "Convention",
-      "keywords": ["default export", "named export", "key prop", "unique key", "missing key"]
+      "keywords": [
+        "default export",
+        "named export",
+        "key prop",
+        "unique key",
+        "missing key"
+      ],
+      "severity": "Warning"
     }
   },
-
   {
     "name": "extension-block",
     "diff": "case-08-extension-block.diff",
@@ -110,7 +161,6 @@
       "snippet": "public const string PendingInvoices = \"\"\""
     }
   },
-
   {
     "name": "primary-ctor-capture",
     "diff": "case-11-primary-ctor-capture.diff",
@@ -120,7 +170,13 @@
       "$type": "finding",
       "file": "src/Resilience/RetryPolicy.cs",
       "category": "Bug",
-      "keywords": ["captur", "backing field", "shared state", "shared across"]
+      "keywords": [
+        "captur",
+        "backing field",
+        "shared state",
+        "shared across"
+      ],
+      "severity": "Critical"
     }
   },
   {
@@ -132,7 +188,14 @@
       "$type": "finding",
       "file": "src/Caching/VersionCache.cs",
       "category": "Bug",
-      "keywords": ["mutab", "hash code", "unreachable", "copy of the struct", "always null"]
+      "keywords": [
+        "mutab",
+        "hash code",
+        "unreachable",
+        "copy of the struct",
+        "always null"
+      ],
+      "severity": "Critical"
     }
   },
   {
@@ -144,10 +207,14 @@
       "$type": "finding",
       "file": "src/Chat/ChatStreamService.cs",
       "category": "Bug",
-      "keywords": ["enumeratorcancellation", "unconsumed", "withcancellation"]
+      "keywords": [
+        "enumeratorcancellation",
+        "unconsumed",
+        "withcancellation"
+      ],
+      "severity": "Warning"
     }
   },
-
   {
     "name": "enum-switch-gap",
     "diff": "case-14-enum-switch-gap.diff",
@@ -156,7 +223,12 @@
       "$type": "finding",
       "file": "Backend/RewardStar.Api/Controllers/GameController.cs",
       "category": "Bug",
-      "keywords": ["chocolate", "keynotfound", "missing entry"]
+      "keywords": [
+        "chocolate",
+        "keynotfound",
+        "missing entry"
+      ],
+      "severity": "Critical"
     }
   },
   {
@@ -168,7 +240,12 @@
       "$type": "finding",
       "file": "src/Notifications/Recipient.cs",
       "category": "Bug",
-      "keywords": ["retrylimit", "setsrequiredmembers", "never set"]
+      "keywords": [
+        "retrylimit",
+        "setsrequiredmembers",
+        "never set"
+      ],
+      "severity": "Warning"
     }
   }
 ]

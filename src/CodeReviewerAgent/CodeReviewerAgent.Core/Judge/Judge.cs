@@ -105,6 +105,21 @@ public class Judge
         Converters = { new JsonStringEnumConverter() },
     };
 
+    /// <summary>
+    /// Whether to ask the model explicitly not to reason before answering.
+    /// <para>
+    /// Omitting the parameter does not mean the same thing on every model, and that bit us:
+    /// generation 4.6 runs without extended thinking when it is absent, generation 5 runs adaptive
+    /// thinking. Swapping the judge model from sonnet-4-6 to sonnet-5 therefore turned reasoning on
+    /// silently, which tripled the output tokens, raised the bill 54%, and cost repeatability —
+    /// reasoning is sampled, so a longer chain has more places to diverge between runs. A judge
+    /// that changes its mind measures nothing, so this is stated rather than inherited.
+    /// </para>
+    /// </summary>
+    private static bool ThinkingDisabled =>
+        string.Equals(Environment.GetEnvironmentVariable("JUDGE_THINKING"), "off",
+            StringComparison.OrdinalIgnoreCase);
+
     private readonly ILlmClient _client;
     private readonly string _rubricVersion;
 
@@ -112,6 +127,30 @@ public class Judge
     {
         _client = client;
         _rubricVersion = rubricVersion;
+    }
+
+    /// <summary>
+    /// The request both judging modes send, differing only in their schema and user content.
+    /// <para>
+    /// A dictionary rather than an anonymous type because <c>thinking</c> has to be absent, not
+    /// null: the field is only meaningful when it carries an instruction, and serializing a null
+    /// would send one where none was intended.
+    /// </para>
+    /// </summary>
+    private static Dictionary<string, object> BuildRequest(string rubric, object schema, string userContent)
+    {
+        var request = new Dictionary<string, object>
+        {
+            ["max_tokens"] = 4000,
+            ["system"] = rubric,
+            ["json_schema"] = schema,
+            ["messages"] = new[] { new { role = "user", content = userContent } },
+        };
+
+        if (ThinkingDisabled)
+            request["thinking"] = new { type = "disabled" };
+
+        return request;
     }
 
     public JudgeOutcome Evaluate(string diff, ReviewResult review)
@@ -123,16 +162,7 @@ public class Judge
             $"## Agent summary\n{review.Summary}\n\n" +
             $"## Agent findings\n```json\n{findings}\n```";
 
-        var requestBody = new
-        {
-            max_tokens = 4000,
-            system = rubric,
-            json_schema = BuildSchema(),
-            messages = new[]
-            {
-                new { role = "user", content = userContent },
-            },
-        };
+        var requestBody = BuildRequest(rubric, BuildSchema(), userContent);
 
         var stopwatch = Stopwatch.StartNew();
         var response = _client.Request(requestBody);
@@ -164,16 +194,7 @@ public class Judge
             $"## Review A\n{RenderReview(a)}\n\n" +
             $"## Review B\n{RenderReview(b)}";
 
-        var requestBody = new
-        {
-            max_tokens = 4000,
-            system = rubric,
-            json_schema = BuildPairSchema(),
-            messages = new[]
-            {
-                new { role = "user", content = userContent },
-            },
-        };
+        var requestBody = BuildRequest(rubric, BuildPairSchema(), userContent);
 
         var stopwatch = Stopwatch.StartNew();
         var response = _client.Request(requestBody);

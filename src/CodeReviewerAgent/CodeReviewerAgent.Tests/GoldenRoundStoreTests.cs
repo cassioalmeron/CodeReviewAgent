@@ -12,6 +12,7 @@ namespace CodeReviewerAgent.Tests;
 /// produced it, because a round silently borrowed from another model is a wrong result that
 /// looks exactly like a right one.
 /// </summary>
+[Collection(EnvironmentCollection.Name)]
 public class GoldenRoundStoreTests
 {
     private static ReviewResult Review(string summary) =>
@@ -157,9 +158,7 @@ public class GoldenRoundStoreTests
     private static void RunOnce(CodeReviewDbContext context, ILlmClient client, IGoldenRoundStore store) =>
         GoldenEvaluator.Run(
             client,
-            new EfProjectRepository(context),
-            new EfReviewRepository(context),
-            new EfAssessmentRepository(context),
+            TestRepositories.For(context),
             ["v3"],
             filter: null,
             store: store);

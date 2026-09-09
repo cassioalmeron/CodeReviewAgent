@@ -14,15 +14,102 @@ public static class GoldenScorer
         _ => throw new ArgumentOutOfRangeException(nameof(expect), $"Unknown expectation: {expect.GetType().Name}"),
     };
 
+    /// <summary>
+    /// One round, scored on all three axes instead of one. <see cref="Succeeded"/> answers only
+    /// the first — was the planted problem found — and two rounds that answer it identically can
+    /// still differ in what else they said and how loudly, which is what the other two measure.
+    /// <para>
+    /// Every finding gets a verdict, because a rate is only defensible if you can point at which
+    /// finding produced it.
+    /// </para>
+    /// </summary>
+    public static RoundScore Score(IReadOnlyList<Finding> findings, GoldenCase golden)
+    {
+        var acceptable = golden.AlsoAcceptable ?? [];
+        var acceptableSeen = new bool[acceptable.Count];
+        var outcomes = new List<FindingOutcome>(findings.Count);
+        var plantedSeen = false;
+        var baitSeen = false;
+        Finding? planted = null;
+
+        foreach (var finding in findings)
+        {
+            var verdict = Classify(finding, golden.Expect, acceptable, acceptableSeen, ref plantedSeen, ref baitSeen);
+            if (verdict == FindingVerdict.Planted)
+                planted = finding;
+            outcomes.Add(new FindingOutcome(finding, verdict));
+        }
+
+        var kind = golden.Expect is ExpectNoFinding ? GoldenKind.Trap : GoldenKind.Detection;
+
+        // Only a round that found the planted problem has a severity to calibrate. A round that
+        // missed it is already punished by detection, and asking how gravely it labelled
+        // something it never said would be inventing a data point.
+        int? distance = golden.Expect is ExpectFinding { Severity: { } expected } && planted?.Severity is { } actual
+            ? (int)actual - (int)expected
+            : null;
+
+        return new RoundScore(kind, Succeeded(findings, golden.Expect), outcomes, distance);
+    }
+
+    private static FindingVerdict Classify(
+        Finding finding, GoldenExpectation expect,
+        IReadOnlyList<AcceptableFinding> acceptable, bool[] acceptableSeen,
+        ref bool plantedSeen, ref bool baitSeen)
+    {
+        // The planted problem, or the bait, is checked first: a finding that is the thing the case
+        // is about must never be classified as an incidental remark that happens to match a list.
+        switch (expect)
+        {
+            case ExpectFinding detection when Matches(finding, detection):
+            {
+                // The second finding that matches the same expectation is the same problem said
+                // twice. That is the fragmentation the rubric exists to punish, not a new finding.
+                var repeat = plantedSeen;
+                plantedSeen = true;
+                return repeat ? FindingVerdict.Duplicate : FindingVerdict.Planted;
+            }
+            case ExpectNoFinding trap when FallsFor(finding, trap):
+            {
+                var repeat = baitSeen;
+                baitSeen = true;
+                return repeat ? FindingVerdict.Duplicate : FindingVerdict.Bait;
+            }
+        }
+
+        for (var i = 0; i < acceptable.Count; i++)
+        {
+            if (!MatchesAcceptable(finding, acceptable[i]))
+                continue;
+            var repeat = acceptableSeen[i];
+            acceptableSeen[i] = true;
+            return repeat ? FindingVerdict.Duplicate : FindingVerdict.Acceptable;
+        }
+
+        return FindingVerdict.Unforeseen;
+    }
+
+    /// <summary>Same file-plus-keyword test as the planted problem; the list is ground truth too.</summary>
+    public static bool MatchesAcceptable(Finding finding, AcceptableFinding acceptable) =>
+        FileMatches(finding.File, acceptable.File) && KeywordMatches(finding, acceptable.Keywords);
+
     /// <summary>A planted problem counts as caught on file + keyword.</summary>
     public static bool Matches(Finding finding, ExpectFinding expect) =>
         FileMatches(finding.File, expect.File) && KeywordMatches(finding, expect.Keywords);
 
     /// <summary>
-    /// A model falls for a trap only when it flags the bait itself. A legitimate remark about
-    /// something else in the same diff is ignored — counting any finding as failure would turn
-    /// the trap into a test of silence, rewarding the model that says little over the one that
-    /// discriminates.
+    /// A model falls for a trap only when it flags the bait itself. A remark about something else
+    /// in the same diff does not count here: resistance asks whether the model mistook correct
+    /// code for a bug, and only the bait answers that.
+    /// <para>
+    /// This used to carry a second argument — that counting any finding as failure would turn the
+    /// trap into a test of silence, rewarding the model that says little. That held while
+    /// resistance was the only thing measured on a trap. It is no longer the whole story:
+    /// <see cref="Score"/> does count the other findings, against precision, because the diff is
+    /// correct by construction. Silence is not rewarded by that, because the same model has to
+    /// answer for detection on the twelve cases that do plant something. The two axes hold each
+    /// other in place; one axis alone could not.
+    /// </para>
     /// </summary>
     public static bool FallsFor(Finding finding, ExpectNoFinding trap) =>
         FileMatches(finding.File, trap.File) && CitesBait(finding.CodeSnippet, trap.Snippet);

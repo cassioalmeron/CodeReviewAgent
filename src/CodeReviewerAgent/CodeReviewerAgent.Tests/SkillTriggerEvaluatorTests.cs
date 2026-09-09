@@ -1,4 +1,4 @@
-using CodeReviewerAgent.Core;
+﻿using CodeReviewerAgent.Core;
 using CodeReviewerAgent.Core.Skill;
 using Xunit;
 
@@ -8,6 +8,7 @@ namespace CodeReviewerAgent.Tests;
 /// The trigger eval over the bundled cases, driven by stub selectors — no LLM involved, so the
 /// pass rule and the plumbing are exercised without spending a call.
 /// </summary>
+[Collection(EnvironmentCollection.Name)]
 public class SkillTriggerEvaluatorTests
 {
     private static readonly string[] Catalog = ["csharp", "react"];

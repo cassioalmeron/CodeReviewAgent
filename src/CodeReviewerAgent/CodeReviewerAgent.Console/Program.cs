@@ -261,8 +261,19 @@ static void RunGoldenSet(ILlmClient executor, string? executorModel, string? fil
     else if (executorModel is null)
         Console.WriteLine("Model unknown for this engine: rounds will be recorded but not resumed.");
 
-    var run = GoldenEvaluator.Run(
-        executor, repos.Projects, repos.Reviews, repos.Assessments, PromptVersions(), filter, store);
+    var result = GoldenEvaluator.Run(executor, repos, PromptVersions(), filter, store);
+
+    // A run that died still wrote every round it bought, both to the store and to the repositories.
+    // What it has no right to produce is a report: a rate over a partial set is not a smaller
+    // truth, it is a wrong number. Re-running resumes from the store and pays for nothing twice.
+    if (result.Score is not { } run)
+    {
+        Console.Error.WriteLine($"Golden set stopped: {result.Failure?.Message}");
+        Console.Error.WriteLine(
+            $"{result.Completed.Count} round(s) were kept. Run `eval` again to resume from them.");
+        Environment.ExitCode = 1;
+        return;
+    }
 
     // Running the set is free of I/O by default; publishing the result is this layer's job.
     GoldenEvaluatorReport.SaveReport(run);
