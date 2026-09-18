@@ -44,8 +44,11 @@ jobs:
           cache: npm
           cache-dependency-path: src/CodeReviewerAgent/web/package-lock.json
 
+      # `npm install`, not `npm ci`: the lock is written on Windows, and npm resolves the optional,
+      # platform-specific packages (@emnapi/*) differently on this Linux runner, so `npm ci` rejects a
+      # lock that is fine where it was made. This job builds and lints; it does not audit the lock.
       - name: Install
-        run: npm ci
+        run: npm install --no-audit --no-fund
 
       # `npm run build` is tsc followed by vite, so a type error fails the job.
       - name: Build
