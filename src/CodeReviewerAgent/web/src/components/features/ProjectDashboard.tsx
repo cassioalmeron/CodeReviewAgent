@@ -64,7 +64,9 @@ export function ProjectDashboard({ project }: { project: ProjectListItem }) {
                 { key: 'Assessments', value: String(stats.assessmentCount) },
                 { key: 'Findings', value: String(stats.findingCount) },
                 { key: 'Total cost', value: cost(stats.totalCost) },
-                { key: 'Avg latency', value: latency(Math.round(stats.avgLatencyMs)) },
+                { key: 'Latency p50', value: latency(stats.latencyP50Ms) , hint: 'half the reviews answered within this' },
+                { key: 'Latency p95', value: latency(stats.latencyP95Ms) , hint: '95 of every 100 answered within this' },
+                { key: 'Latency p99', value: latency(stats.latencyP99Ms) , hint: '99 of every 100; the slow tail' },
               ]}
             />
             <Grid>

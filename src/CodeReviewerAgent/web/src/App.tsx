@@ -8,12 +8,17 @@ import { AssessmentsPage } from '@/pages/AssessmentsPage'
 import { AssessmentDetailPage } from '@/pages/AssessmentDetailPage'
 import { EvaluationsPage } from '@/pages/EvaluationsPage'
 import { EvaluationDetailPage } from '@/pages/EvaluationDetailPage'
+import { RunsPage } from '@/pages/RunsPage'
+import { RunDetailPage } from '@/pages/RunDetailPage'
 
 export function App() {
   return (
     <Routes>
       <Route element={<Layout />}>
         <Route index element={<HomePage />} />
+        {/* A golden run measures a model against the set, not work on a repository: no project needed. */}
+        <Route path="/runs" element={<RunsPage />} />
+        <Route path="/runs/:id" element={<RunDetailPage />} />
         <Route element={<RequireProject />}>
           <Route path="/reviews" element={<ReviewsPage />} />
           <Route path="/reviews/:id" element={<ReviewDetailPage />} />

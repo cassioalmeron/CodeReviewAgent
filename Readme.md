@@ -55,19 +55,25 @@ reversed. They are in **[docs/ADRs](docs/ADRs/README.md)**.
 - Native **structured output** (JSON schema) → findings as C# records
 - xUnit tests over the flow with fake `ILlmClient` / `IDiffSource` implementations
 - **Api** — a read-only ASP.NET Core minimal API (Swagger/OpenAPI) that exposes the store to a web viewer
-- **web/** — a React 19 + TypeScript + Vite viewer (React Router, styled-components) to browse projects/reviews/assessments/evaluations
+- **web/** — a React 19 + TypeScript + Vite viewer (React Router, styled-components) to browse projects/reviews/assessments/evaluations and the golden runs
+- **Storage** in files, SQLite or Postgres, with the relational schema managed by EF Core migrations
+- **CI** on GitHub Actions: build, tests and lint on every push to `main` and every pull request
 
 ## Project layout
 
 ```
+.env.example                             # Configuration template (copy to .env)
+.github/workflows/build.yml              # CI
 src/CodeReviewerAgent/
+├── CodeReviewerAgent.slnx
 ├── CodeReviewerAgent.Core/              # Class library — review + evaluation flow
 │   ├── CodeReviewer.cs                  # Review pipeline: diff → skills → LLM → parse → ground (pure step, no I/O)
 │   ├── Finding.cs                       # Finding + ReviewResult records, Severity/Category enums
 │   ├── FindingValidator.cs              # Grounds findings to added lines; derives the line number
 │   ├── Entities.cs                      # Project / Review (+ ContentHash) / Assessment / Evaluation (1→N→N→N)
+│   ├── GoldenEntities.cs                # GoldenRun / case scores / gates — a golden run as stored
 │   ├── ProjectResolver.cs               # Resolves the current Project from REPO_DIR / cwd (folder = key)
-│   ├── IRepository.cs                   # Repository contracts + RepositoryContext (the four passed as one unit)
+│   ├── IRepository.cs                   # Repository contracts + RepositoryContext (the five passed as one unit)
 │   ├── ProcessRunner.cs                 # Runs external commands (git / gh)
 │   ├── OutputPaths.cs                   # Where a run writes reports/ + reviews/ (EVAL_OUTPUT_DIR)
 │   ├── ReportGenerator.cs               # Markdown review report
@@ -83,7 +89,9 @@ src/CodeReviewerAgent/
 │   ├── Golden/                          # Golden set, scored on three axes
 │   │   ├── GoldenCase.cs                # Vocabulary: expectations, acceptable findings, verdicts, run result
 │   │   ├── GoldenScorer.cs              # The verdict as a pure function — detection/trap + precision + calibration
-│   │   ├── GoldenEvaluator.cs / GoldenEvaluatorReport.cs  # Runs + scores the cases / publishes the report
+│   │   ├── GoldenEvaluator.cs / GoldenEvaluatorReport.cs  # Runs + scores + persists the cases / publishes the report
+│   │   ├── GoldenGates.cs               # Approval: case (4 clean rounds in 5) and model (five gates)
+│   │   ├── GoldenRunSummary.cs          # A scored run → the stored golden run (totals, percentiles, gates)
 │   │   ├── RoundBuffer.cs               # Slot arithmetic: parallel index → (case, prompt version, repetition)
 │   │   └── GoldenRoundStore.cs          # Each paid round durable as it returns (JSON Lines) → resume
 │   ├── Judge/                           # LLM-as-judge
@@ -105,28 +113,31 @@ src/CodeReviewerAgent/
 ├── CodeReviewerAgent.Infra/              # Implementations behind Core's contracts (persistence + LLM engines)
 │   ├── FileRepository.cs                # File-backed repos (projects/ + reviews/ + assessments/ + evaluations/, id = max+1)
 │   ├── Hashing.cs                        # SHA-256 of diff content (content-addressed reuse)
-│   ├── CodeReviewDbContext.cs            # Single EF context; Fluent mapping; findings as a child table
+│   ├── CodeReviewDbContext.cs            # Single EF context; dates stored as UTC
+│   ├── Configurations/                  # One EF mapping class per entity
+│   ├── Migrations/                      # EF migrations, runnable on Postgres and SQLite
 │   ├── DbProviderStrategy.cs             # Sqlite / Postgres provider strategies (no if-chain)
 │   ├── EfRepository.cs                   # EF-backed repos (one impl, both providers)
-│   ├── RepositoryFactory.cs             # Picks File/EF from STORAGE; EnsureCreated for EF
+│   ├── RepositoryFactory.cs             # Picks File/EF from STORAGE; Migrate for EF
+│   ├── EnvFile.cs                       # Finds and loads the .env (walks up from the executable)
 │   ├── LlmClientFactory.cs              # Picks the ILlmClient from LLM_ENGINE (called by Console/Api)
 │   ├── HttpTransport.cs                 # IHttpTransport + resilient decorator (retry / backoff)
 │   ├── AnthropicClient.cs / OllamaClient.cs / OpenAiClient.cs / OpenRouterClient.cs  # HTTP engines
 │   └── ClaudeCliClient.cs / ClaudeCodeClient.cs / ClaudeCodeShared.cs  # Subscription engines (Claude CLI / SDK)
 │
 ├── CodeReviewerAgent.Console/           # Executable — thin entry point over Core
-│   ├── Program.cs                       # Routes CLI args to diff / review / report / judge / judge-report / eval / all
-│   └── .env.example                     # Sample configuration
+│   ├── Program.cs                       # Routes CLI args to review / assess / report / judge / judge-report / eval / skills / projects / all
+│
 │
 ├── CodeReviewerAgent.Api/               # Read-only minimal API over the store (Swagger UI at /swagger)
-│   ├── Program.cs                       # /api/projects, /api/reviews, /api/assessments, /api/evaluations (+ /{id}, nested lists, ?projectId=)
+│   ├── Program.cs                       # /api/projects, /api/reviews, /api/assessments, /api/evaluations, /api/golden-runs (+ /{id}, nested lists, ?projectId=)
 │   ├── Telemetry.cs                     # OpenTelemetry wiring — traces/metrics/logs over OTLP
-│   └── .env.example                     # Only STORAGE / DB_CONNECTION — no LLM keys, no writes
+│
 │
 ├── CodeReviewerAgent.Tests/             # xUnit tests with fake ILlmClient / IDiffSource
 │
 └── web/                                 # React + TypeScript + Vite viewer for the Api
-    ├── src/App.tsx                      # Routes: projects / reviews / assessments / evaluations (list + detail)
+    ├── src/App.tsx                      # Routes: projects / runs / reviews / assessments / evaluations (list + detail)
     ├── src/services/api.ts              # fetch wrapper over /api/* (proxied to the Api in dev)
     ├── src/pages/                       # One folder per route
     └── src/components/{layout,features,ui}/
@@ -145,8 +156,8 @@ src/CodeReviewerAgent/
 
 ## Configuration
 
-Each runnable project reads its own `.env` file (gitignored). Copy the project's
-`.env.example` and fill in your values. This is `CodeReviewerAgent.Console`'s:
+One `.env` at the root of the repository configures the Console, the Api and everything else
+(gitignored). Copy `.env.example`, rename the copy to `.env`, and fill in your values:
 
 ```
 # Repository to analyze — git/gh run here. Blank = the current directory.
@@ -176,8 +187,8 @@ SKILL_PROMPT_VERSION=v1        # assets/prompts/skill-selection-<version>.md + s
 EVAL_OUTPUT_DIR=
 
 # Where reviews + assessments are stored: files | sqlite | postgres
-# sqlite always uses %LOCALAPPDATA%/CodeReviewerAgent/review.db; DB_CONNECTION is the Postgres
-# connection string only (files and sqlite ignore it).
+# DB_CONNECTION is the connection string for postgres and sqlite; sqlite falls back to
+# %LOCALAPPDATA%/CodeReviewerAgent/review.db when it is blank, and files ignores it.
 STORAGE=files
 DB_CONNECTION=
 
@@ -188,6 +199,7 @@ ANTHROPIC_MODEL=claude-haiku-4-5
 # Ollama (used when LLM_ENGINE=ollama)
 OLLAMA_HOST=http://localhost:11434
 OLLAMA_MODEL=qwen2.5-coder:7b
+OLLAMA_TIMEOUT_SECONDS=600     # per-request limit for the local model
 
 # OpenAI (used when LLM_ENGINE=openai)
 OPENAI_API_KEY=your-key-here
@@ -196,6 +208,7 @@ OPENAI_MODEL=gpt-4o-mini
 # OpenRouter (used when LLM_ENGINE=openrouter)
 OPENROUTER_API_KEY=your-key-here
 OPENROUTER_MODEL=openai/gpt-4o-mini
+OPENROUTER_TIMEOUT_SECONDS=600 # models that reason by default outlast 120 s, and a timed-out attempt is still billed
 
 # Claude subscription engines (LLM_ENGINE=claude-code | claude-cli) — no API key
 CLAUDE_CODE_MODEL=             # optional model override
@@ -209,12 +222,14 @@ JUDGE_MODEL=claude-sonnet-4-6  # stronger than the executor, to avoid self-prefe
 RUBRIC_VERSION=                # assets/rubrics/judge-<version>.md; unset = v2 for `judge` (pairwise), v1 for `judge <assessmentId>` (absolute)
 JUDGE_RUNS=3                   # executions per pair in the pairwise judge, slots re-randomised each time
 JUDGE_THINKING=                # `off` disables the judge's reasoning; unset inherits the model's default
-EVAL_OUTPUT_DIR=               # where reports and raw reviews are written; unset = the build output
 ```
 
-> The API key is never committed — keep it only in your local `.env`. `CodeReviewerAgent.Api` has
-> its own `.env` (see its `.env.example`) but only needs `STORAGE` / `DB_CONNECTION` — it's
-> read-only and never calls an LLM.
+> The API key is never committed: keep it only in your local `.env`. There is **one `.env` for the whole
+> repository**, at its root, loaded by `EnvFile` (Infra), which walks up from the executable and loads every
+> `.env` it meets (nearest first, never overwriting a value already set), so the Console, the Api and the scripts always read the same configuration. A `.env`
+> placed next to a project still wins for that project, and variables already set in the environment win over
+> every file. `CodeReviewerAgent.Api` needs only `STORAGE` / `DB_CONNECTION`: it is read-only and never calls
+> an LLM.
 
 ## Running
 
@@ -247,7 +262,7 @@ dotnet run -- skills             # list the discovered catalog + validation diag
 dotnet run -- skills csharp      # print the block that skill injects into the prompt    (no LLM)
 
 # Evaluate the agent
-dotnet run -- eval               # golden set (detection + traps); persists reviews + assessments to the store
+dotnet run -- eval               # golden set (detection + traps); persists the reviews and, over the whole set, the golden run
 dotnet run -- eval extension-block          # only the named case(s), comma-separated
 dotnet run -- judge              # pairwise judge over reviews/eval-results.json (aggregate report)
 dotnet run -- all                # eval + judge in a single run
@@ -272,6 +287,10 @@ cd src/CodeReviewerAgent/web
 npm install                      # first run only
 npm run dev                      # http://localhost:5173 — Vite proxies /api/* to :5180
 ```
+
+Besides projects, reviews and assessments, **Runs** lists every golden run — model, skills, duration,
+cost, tokens, latency and verdict — and opens one with its five gates against their floors and its
+15 cases. The project dashboard shows latency as P50 / P95 / P99 rather than an average.
 
 ### Observability (optional)
 
@@ -334,18 +353,21 @@ persisted `Assessment`; there is no separate run log.
 
 ### Storage
 
-Four id-addressable entities behind repositories (`CodeReviewerAgent.Infra/`) — `Project (1) → Review (N) →
+Id-addressable entities behind repositories (`CodeReviewerAgent.Infra/`) — `Project (1) → Review (N) →
 Assessment (N) → Evaluation (N)`, with `Finding` hanging off `Assessment` — so the review, assess,
-report, and judge steps are all independent. Only `Review` points at `Project`; the rest cascade:
+report, and judge steps are all independent. Only `Review` points at `Project`; the rest cascade.
+The golden set adds `GoldenRun`, with one score per case and one row per gate, which its assessments
+point at:
 
 - `STORAGE=files` — JSON files under `projects/`, `reviews/`, `assessments/`, `evaluations/`; the
   next id is the highest existing id + 1, read from the file names (`review-<id>-<timestamp>.json`).
   Findings stay nested inside each assessment's JSON.
 - `STORAGE=sqlite | postgres` — `Ef*Repository` over a single `CodeReviewDbContext`; the relational
-  provider is chosen by a strategy (`UseSqlite` / `UseNpgsql`) from `STORAGE`. **sqlite** always uses
-  `%LOCALAPPDATA%/CodeReviewerAgent/review.db` (per-user, survives rebuilds, shared by Console + Api);
-  **postgres** takes `DB_CONNECTION`. Schema is created with `EnsureCreated()` (no migrations) and findings
-  are their own child table (cascade-deleted with the assessment).
+  provider is chosen by a strategy (`UseSqlite` / `UseNpgsql`) from `STORAGE`. Both take `DB_CONNECTION`;
+  **sqlite** falls back to `%LOCALAPPDATA%/CodeReviewerAgent/review.db` when it is blank. The schema comes
+  from the EF migrations in `CodeReviewerAgent.Infra/Migrations/`, applied on first use; a database created
+  by the old `EnsureCreated()` cannot be migrated, so point `DB_CONNECTION` at a new one. Findings are their
+  own child table (cascade-deleted with the assessment).
 
 `Review` carries a `ContentHash` (SHA-256) indexed together with `ProjectId`.
 `IReviewRepository.GetOrAdd` reuses an existing review of the **same project** with the same content
@@ -436,10 +458,22 @@ which skills were active, so a run with the harness is never confused with one w
 Each case has a ground-truth `.md` next to its `.diff` explaining the defect — or, for a
 trap, why the code is correct. Tests enforce that every case has one.
 
+**Approval (ADR-015).** A case is approved with at least **4 clean rounds in 5** — found the problem
+(or resisted the trap), said nothing that counts against precision, and got the severity exactly
+right. A model is approved only when **all five gates** pass, and none is averaged with another:
+detection ≥ 60%, trap resistance ≥ 50%, precision ≥ 85%, exact calibration ≥ 75%, and at most 1
+finding per round on the traps (`GoldenGates`). The report closes with an **Approval** section that
+prints each gate against its floor. Findings the grounding dropped are counted too (*discarded*),
+so a model that cited the wrong line is not mistaken for one that never saw the problem.
+
 The LLM calls run concurrently (`GOLDEN_PARALLELISM`); scoring and persistence stay
 sequential. Results persist to the store: each case's diff via `GetOrAdd` (reused across
 runs) and each run's `Assessment`, so the golden assessments are addressable by id
-afterwards. **A run that dies part-way produces no report** — a rate over a partial set is
+afterwards. A run over the **whole set** is also recorded as a **golden run** (`GoldenRun`), with one score per
+case and the five gates as raw numbers, and its assessments point at it (`Assessment.RunId`); the run
+carries its duration, cost, tokens and latency P50/P95/P99. A run narrowed with a case filter, or one
+that died part-way, stores its assessments but records no golden run — its gates would have nothing
+to stand on. **A run that dies part-way produces no report** — a rate over a partial set is
 not a smaller truth, it's a wrong number — so it writes what it bought, says how much was
 kept, and exits non-zero.
 
@@ -509,27 +543,31 @@ cd src/CodeReviewerAgent
 dotnet test
 ```
 
-227 xUnit tests, no network and no git: the review flow runs against fake `ILlmClient` /
+287 xUnit tests, no network and no git: the review flow runs against fake `ILlmClient` /
 `IDiffSource` implementations, the HTTP transport against a stub handler, and the EF repositories
-against a temporary SQLite file. They also cover the diff parser and filter, finding grounding,
+against a temporary SQLite file, created by running the migrations themselves. They also cover the diff parser and filter, finding grounding,
 cost, the golden scorer and reports, the skill catalog and selectors, and the judge (both paths).
 `GoldenFixtureTests` additionally guards the fixtures themselves — every case needs its ground-truth
 `.md`, and every trap's bait snippet must sit on an added line.
 
 `web/` has no test suite yet; `npm run lint` (oxlint) and `npm run build` are available.
 
+**CI** — `.github/workflows/build.yml` runs the .NET build and tests, and the web build and lint, on
+every push to `main` and every pull request. It calls no LLM and needs no secret.
+
 ## Extending
 
 - **New LLM engine** — implement `ILlmClient` in `CodeReviewerAgent.Infra/`, add a case in `LlmClientFactory` (also Infra) returning `(ILlmClient, string? Model)`, document its env vars. The model comes back from the same switch that builds the client so the two can't drift; the golden set keys its resume on it, and `null` means "unknown" and matches no stored round. HTTP engines take an `IHttpTransport` and are wrapped with the resilient transport in the factory; CLI/SDK engines self-heal and skip it. Core never references the factory — Console/Api instantiate it.
 - **New diff source** — implement `IDiffSource` and add a case in `DiffSourceFactory`.
-- **New storage backend** — implement the repository contracts (`IProjectRepository` / `IReviewRepository` / `IAssessmentRepository` / `IEvaluationRepository`) in `CodeReviewerAgent.Infra/` and add a case in `RepositoryFactory`.
+- **New storage backend** — implement the repository contracts (`IProjectRepository` / `IReviewRepository` / `IAssessmentRepository` / `IEvaluationRepository` / `IGoldenRunRepository`) in `CodeReviewerAgent.Infra/` and add a case in `RepositoryFactory`.
+- **Schema change** — change the entity and its mapping under `Infra/Configurations/`, then add a migration: `dotnet ef migrations add <Name> --project CodeReviewerAgent.Infra --startup-project CodeReviewerAgent.Infra`.
 - **New DB provider** — add an `IDbProviderStrategy` (e.g. `UseSqlServer`) and register it in `RepositoryFactory`; the context and model are unchanged.
 - **New prompt / rubric version** — add `assets/prompts/review-v6.md` (or `assets/rubrics/judge-v3.md`) and point the env var at it. Anything new under `assets/` also needs a matching `<None Include>` glob in `CodeReviewerAgent.Core.csproj`, or it never reaches the build output the code reads from.
 - **New golden case** — add a `.diff`, a `.md` with the ground truth, and an entry in `assets/evals/golden/cases.json` (`expect` is `"$type": "finding"` or `"noFinding"`). For a trap, check the code actually compiles first.
 - **New trigger case** — add a `.diff` and an entry in `assets/evals/triggers/cases.json` (`expectedSkills` + `set`).
 - **New skill** — add `assets/skills/<name>/SKILL.md` with `name` / `description` frontmatter (and `metadata.applies-to` if it should work under `SKILLS=globs`).
-- **New Api endpoint** — add a route in `CodeReviewerAgent.Api/Program.cs` (read-only, against the store); mirror the shape in `web/src/types/index.ts` and `web/src/services/api.ts`.
-- **New web page** — add a folder under `web/src/pages/` and a route in `web/src/App.tsx`.
+- **New Api endpoint** — add a route in `CodeReviewerAgent.Api/Program.cs` that takes `RepositoryContext store` as a parameter (one store per request; read-only); mirror the shape in `web/src/types/index.ts` and `web/src/services/api.ts`.
+- **New web page** — add a folder under `web/src/pages/`, a route in `web/src/App.tsx` and an entry in `web/src/components/layout/Layout.tsx`.
 
 Two C# conventions the code follows everywhere: the namespace mirrors the folder
 (`CodeReviewerAgent.Core.Judge` for `Core/Judge/`; Core's root files stay on `CodeReviewerAgent.Core`,

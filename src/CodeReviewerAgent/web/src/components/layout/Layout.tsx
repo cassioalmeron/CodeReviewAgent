@@ -207,6 +207,11 @@ export function Layout() {
           </Group>
         )}
 
+        <Nav>
+          <Label>Golden set</Label>
+          <Item to="/runs">Runs</Item>
+        </Nav>
+
         {projectId != null && (
           <Nav>
             <Label>Browse</Label>

@@ -2,6 +2,8 @@ import type {
   Assessment,
   AssessmentListItem,
   Evaluation,
+  GoldenRunDetail,
+  GoldenRunListItem,
   Project,
   ProjectListItem,
   ProjectStats,
@@ -36,4 +38,7 @@ export const api = {
 
   evaluations: () => get<Evaluation[]>('/evaluations'),
   evaluation: (id: number) => get<Evaluation>(`/evaluations/${id}`),
+
+  goldenRuns: () => get<GoldenRunListItem[]>('/golden-runs'),
+  goldenRun: (id: number) => get<GoldenRunDetail>(`/golden-runs/${id}`),
 }

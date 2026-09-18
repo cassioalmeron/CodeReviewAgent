@@ -9,7 +9,8 @@
 
   --text: #e4e3dd;
   --muted: #8b909e;
-  --faint: #5a6070;
+  /* Small uppercase labels live on this one, so it has to stay readable on --panel: 5.4:1. */
+  --faint: #868da0;
 
   --gold: #c9a227;
   --gold-soft: rgba(201, 162, 39, 0.14);

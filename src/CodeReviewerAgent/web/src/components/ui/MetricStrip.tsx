@@ -34,9 +34,18 @@ const Val = styled.dd`
   color: var(--text);
 `
 
+const Hint = styled.p`
+  margin: 4px 0 0;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--faint);
+`
+
 export interface Metric {
   key: string
   value: string
+  /** One short line under the number, for a metric whose name does not explain it. */
+  hint?: string
 }
 
 /** Instrument-panel readout of run metadata (cost / latency / tokens / model…). */
@@ -47,6 +56,7 @@ export function MetricStrip({ metrics }: { metrics: Metric[] }) {
         <Cell key={m.key}>
           <Key>{m.key}</Key>
           <Val>{m.value}</Val>
+          {m.hint && <Hint>{m.hint}</Hint>}
         </Cell>
       ))}
     </Strip>

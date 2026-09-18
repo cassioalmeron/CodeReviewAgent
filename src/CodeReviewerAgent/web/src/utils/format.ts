@@ -22,3 +22,18 @@ export const relativeDay = (iso: string) => {
   const d = new Date(iso)
   return d.toLocaleDateString('en-US', { month: 'short', day: '2-digit' })
 }
+
+/** Wall-clock time of a run: 6 min 14 s, 1 h 58 min 25 s, 53 s. */
+export const duration = (ms: number) => {
+  const total = Math.round(ms / 1000)
+  const hours = Math.floor(total / 3600)
+  const minutes = Math.floor((total % 3600) / 60)
+  const seconds = total % 60
+  return [
+    hours > 0 ? `${hours} h` : '',
+    hours > 0 || minutes > 0 ? `${minutes} min` : '',
+    `${seconds} s`,
+  ]
+    .filter(Boolean)
+    .join(' ')
+}

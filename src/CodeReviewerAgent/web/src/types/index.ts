@@ -70,7 +70,9 @@ export interface ProjectStats {
   totalCost: number
   totalInputTokens: number
   totalOutputTokens: number
-  avgLatencyMs: number
+  latencyP50Ms: number
+  latencyP95Ms: number
+  latencyP99Ms: number
   bySeverity: SliceCount[]
   byCategory: SliceCount[]
   topFiles: SliceCount[]
@@ -147,4 +149,65 @@ export interface Evaluation {
   inputTokens: number
   outputTokens: number
   createdAt: string
+}
+
+/** GET /api/golden-runs — one run of the golden set against one model. */
+export interface GoldenRunListItem {
+  id: number
+  model: string
+  engine: string | null
+  skills: string | null
+  promptVersion: string | null
+  startedAt: string
+  durationMs: number
+  cost: number
+  inputTokens: number
+  outputTokens: number
+  latencyP50Ms: number
+  latencyP95Ms: number
+  latencyP99Ms: number
+  approved: boolean
+  caseCount: number
+  approvedCaseCount: number
+  reviewCount: number
+  reportFile: string | null
+}
+
+export type GateDirection = 'Min' | 'Max'
+
+/** One of the five gates of ADR-015, as measured, with the wording the report prints. */
+export interface GoldenGateView {
+  name: string
+  part: number
+  whole: number
+  floor: number
+  direction: GateDirection
+  passed: boolean
+  value: string
+  floorText: string
+}
+
+export type GoldenKind = 'Detection' | 'Trap'
+
+/** How one case went in one run. */
+export interface GoldenCaseScore {
+  id: number
+  runId: number
+  caseName: string
+  kind: GoldenKind
+  runs: number
+  successes: number
+  cleanRounds: number
+  precisionCorrect: number
+  precisionCounted: number
+  exactCalibrations: number
+  discardedFindings: number
+  approved: boolean
+}
+
+/** GET /api/golden-runs/{id}. */
+export interface GoldenRunDetail {
+  run: GoldenRunListItem
+  gates: GoldenGateView[]
+  cases: GoldenCaseScore[]
 }
