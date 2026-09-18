@@ -1,0 +1,55 @@
+# Build and tests on every push and pull request. Nothing here calls an LLM, touches a database or
+# needs a secret: it is the cheap half of the CI, and it runs on every change.
+# The golden set, which costs money, is a separate workflow (US-014).
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend:
+    name: .NET build and tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        run: dotnet restore src/CodeReviewerAgent/CodeReviewerAgent.slnx
+
+      - name: Build
+        run: dotnet build src/CodeReviewerAgent/CodeReviewerAgent.slnx --no-restore
+
+      # The EF tests open SQLite files under the temp folder; no server is needed.
+      - name: Test
+        run: dotnet test src/CodeReviewerAgent/CodeReviewerAgent.Tests --no-build
+
+  web:
+    name: Web build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src/CodeReviewerAgent/web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: src/CodeReviewerAgent/web/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      # `npm run build` is tsc followed by vite, so a type error fails the job.
+      - name: Build
+        run: npm run build
+
+      - name: Lint
+        run: npm run lint
