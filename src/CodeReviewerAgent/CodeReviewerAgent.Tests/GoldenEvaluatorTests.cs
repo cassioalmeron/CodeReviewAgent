@@ -1,4 +1,5 @@
-﻿using CodeReviewerAgent.Core;
+﻿using Microsoft.EntityFrameworkCore;
+using CodeReviewerAgent.Core;
 using CodeReviewerAgent.Core.Golden;
 using CodeReviewerAgent.Infra;
 using CodeReviewerAgent.Tests.Fakes;
@@ -50,7 +51,7 @@ public class GoldenEvaluatorTests
 
             using var context = new CodeReviewDbContext(
                 o => new SqliteProviderStrategy().Configure(o, $"Data Source={dbPath}"));
-            context.Database.EnsureCreated();
+            context.Database.Migrate();
 
             var projects = new EfProjectRepository(context);
             var reviews = new EfReviewRepository(context);
@@ -123,7 +124,7 @@ public class GoldenEvaluatorTests
 
             using var context = new CodeReviewDbContext(
                 o => new SqliteProviderStrategy().Configure(o, $"Data Source={dbPath}"));
-            context.Database.EnsureCreated();
+            context.Database.Migrate();
 
             var run = GoldenEvaluator.Run(
                 new FakeLlmClient(FellForTheExtensionBlock), TestRepositories.For(context), SingleVersion).Scored();
@@ -164,7 +165,7 @@ public class GoldenEvaluatorTests
 
             using var context = new CodeReviewDbContext(
                 o => new SqliteProviderStrategy().Configure(o, $"Data Source={dbPath}"));
-            context.Database.EnsureCreated();
+            context.Database.Migrate();
 
             var run = GoldenEvaluator.Run(
                 new FakeLlmClient(CaughtSqlInjection), TestRepositories.For(context), SingleVersion, filter).Scored();
@@ -200,7 +201,7 @@ public class GoldenEvaluatorTests
 
             using var context = new CodeReviewDbContext(
                 o => new SqliteProviderStrategy().Configure(o, $"Data Source={dbPath}"));
-            context.Database.EnsureCreated();
+            context.Database.Migrate();
             var assessments = new EfAssessmentRepository(context);
 
             var run = GoldenEvaluator.Run(
@@ -246,7 +247,7 @@ public class GoldenEvaluatorTests
 
             using var context = new CodeReviewDbContext(
                 o => new SqliteProviderStrategy().Configure(o, $"Data Source={dbPath}"));
-            context.Database.EnsureCreated();
+            context.Database.Migrate();
 
             GoldenEvaluator.Run(
                 new FakeLlmClient(CaughtSqlInjection), TestRepositories.For(context), SingleVersion);
@@ -273,7 +274,7 @@ public class GoldenEvaluatorTests
         {
             using var context = new CodeReviewDbContext(
                 o => new SqliteProviderStrategy().Configure(o, $"Data Source={dbPath}"));
-            context.Database.EnsureCreated();
+            context.Database.Migrate();
 
             var error = Assert.Throws<InvalidOperationException>(() => GoldenEvaluator.Run(
                 new FakeLlmClient(CaughtSqlInjection), TestRepositories.For(context), SingleVersion,
@@ -304,7 +305,7 @@ public class GoldenEvaluatorTests
 
             using var context = new CodeReviewDbContext(
                 o => new SqliteProviderStrategy().Configure(o, $"Data Source={dbPath}"));
-            context.Database.EnsureCreated();
+            context.Database.Migrate();
 
             var projects = new EfProjectRepository(context);
             var reviews = new EfReviewRepository(context);
@@ -345,7 +346,7 @@ public class GoldenEvaluatorTests
 
             using var context = new CodeReviewDbContext(
                 o => new SqliteProviderStrategy().Configure(o, $"Data Source={dbPath}"));
-            context.Database.EnsureCreated();
+            context.Database.Migrate();
 
             var reviews = new EfReviewRepository(context);
             var assessments = new EfAssessmentRepository(context);

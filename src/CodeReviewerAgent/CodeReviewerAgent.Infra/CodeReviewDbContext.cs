@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using CodeReviewerAgent.Core;
 
 namespace CodeReviewerAgent.Infra;
@@ -6,11 +7,20 @@ namespace CodeReviewerAgent.Infra;
 /// <summary>
 /// The single EF Core context for both relational providers (SQLite / Postgres). The
 /// provider is injected as a configuration action (see <see cref="IDbProviderStrategy"/>),
-/// so there is one context and one model regardless of the backing database. All mapping
-/// lives here via Fluent API — the entities carry no persistence annotations.
+/// so there is one context and one model regardless of the backing database. The mapping lives in
+/// one <c>IEntityTypeConfiguration</c> per entity under <c>Configurations/</c>; the entities carry no
+/// persistence annotations. The schema comes from the migrations, not from <c>EnsureCreated</c>.
 /// </summary>
 public class CodeReviewDbContext : DbContext
 {
+    // Postgres stores DateTime as timestamp with time zone and refuses a value whose Kind is not UTC.
+    // A value read back comes out Unspecified, so without this it would break the next save.
+    private static readonly ValueConverter<DateTime, DateTime> UtcConverter = new(
+        value => value.Kind == DateTimeKind.Unspecified
+            ? DateTime.SpecifyKind(value, DateTimeKind.Utc)
+            : value.ToUniversalTime(),
+        value => DateTime.SpecifyKind(value, DateTimeKind.Utc));
+
     private readonly Action<DbContextOptionsBuilder> _configure;
 
     public CodeReviewDbContext(Action<DbContextOptionsBuilder> configure) => _configure = configure;
@@ -19,44 +29,21 @@ public class CodeReviewDbContext : DbContext
     public DbSet<Review> Reviews => Set<Review>();
     public DbSet<Assessment> Assessments => Set<Assessment>();
     public DbSet<Evaluation> Evaluations => Set<Evaluation>();
+    public DbSet<GoldenRun> GoldenRuns => Set<GoldenRun>();
+    public DbSet<GoldenCaseScore> GoldenCaseScores => Set<GoldenCaseScore>();
+    public DbSet<GoldenGate> GoldenGates => Set<GoldenGate>();
 
     protected override void OnConfiguring(DbContextOptionsBuilder options) => _configure(options);
 
     protected override void OnModelCreating(ModelBuilder model)
     {
-        var project = model.Entity<Project>();
-        project.ToTable("Project");
-        project.HasKey(p => p.Id);
-        project.Property(p => p.Name).IsRequired();
-        project.Property(p => p.Folder).IsRequired();
-        project.HasIndex(p => p.Folder).IsUnique();
+        model.ApplyConfigurationsFromAssembly(typeof(CodeReviewDbContext).Assembly);
 
-        var review = model.Entity<Review>();
-        review.ToTable("Review");
-        review.HasKey(r => r.Id);
-        review.Property(r => r.Content).IsRequired();
-        review.HasOne<Project>().WithMany().HasForeignKey(r => r.ProjectId);
-        // Content-addressed reuse is scoped to the project (GetOrAdd within ProjectId).
-        review.HasIndex(r => new { r.ProjectId, r.ContentHash });
+        var dateTimes = model.Model.GetEntityTypes()
+            .SelectMany(entity => entity.GetProperties())
+            .Where(property => property.ClrType == typeof(DateTime));
 
-        var assessment = model.Entity<Assessment>();
-        assessment.ToTable("Assessment");
-        assessment.HasKey(a => a.Id);
-        assessment.HasOne<Review>().WithMany().HasForeignKey(a => a.ReviewId);
-        // Findings are a child table now (was a JSON column): queryable on their own,
-        // cascade-deleted with their assessment.
-        assessment.HasMany(a => a.Findings)
-            .WithOne()
-            .HasForeignKey(f => f.AssessmentId)
-            .OnDelete(DeleteBehavior.Cascade);
-
-        var finding = model.Entity<Finding>();
-        finding.ToTable("Finding");
-        finding.HasKey(f => f.Id);
-
-        var evaluation = model.Entity<Evaluation>();
-        evaluation.ToTable("Evaluation");
-        evaluation.HasKey(e => e.Id);
-        evaluation.HasOne<Assessment>().WithMany().HasForeignKey(e => e.AssessmentId);
+        foreach (var property in dateTimes)
+            property.SetValueConverter(UtcConverter);
     }
 }

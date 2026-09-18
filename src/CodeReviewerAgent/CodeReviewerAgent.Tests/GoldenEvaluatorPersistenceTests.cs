@@ -1,4 +1,5 @@
-﻿using CodeReviewerAgent.Core;
+﻿using Microsoft.EntityFrameworkCore;
+using CodeReviewerAgent.Core;
 using CodeReviewerAgent.Core.Golden;
 using CodeReviewerAgent.Core.Llm;
 using CodeReviewerAgent.Infra;
@@ -44,7 +45,7 @@ public class GoldenEvaluatorPersistenceTests
         {
             using var context = new CodeReviewDbContext(
                 o => new SqliteProviderStrategy().Configure(o, $"Data Source={dbPath}"));
-            context.Database.EnsureCreated();
+            context.Database.Migrate();
 
             var client = new FailsAfterLlmClient(succeedFor: 3, EmptyReview);
 
@@ -61,6 +62,78 @@ public class GoldenEvaluatorPersistenceTests
             // Three rounds came back before the client started refusing, and all three are on disk.
             Assert.Equal(3, result.Completed.Count);
             Assert.Equal(3, context.Assessments.Count());
+
+            // But no golden run: there is nothing scored to record.
+            Assert.Empty(context.GoldenRuns);
+            Assert.All(context.Assessments, a => Assert.Null(a.RunId));
+        }
+        finally
+        {
+            try { File.Delete(dbPath); } catch { /* pooled connection may hold the file */ }
+        }
+    }
+
+    [Fact]
+    public void Persist_AScoredWholeRun_RecordsTheRunWithItsCasesAndGates_AndLinksEveryAssessment()
+    {
+        using var _ = new GoldenEnvironment(runs: "1", parallelism: "1");
+        var dbPath = Path.Combine(Path.GetTempPath(), $"cra-persist-{Guid.NewGuid():N}.db");
+
+        try
+        {
+            using var context = new CodeReviewDbContext(
+                o => new SqliteProviderStrategy().Configure(o, $"Data Source={dbPath}"));
+            context.Database.Migrate();
+            var before = DateTime.UtcNow;
+
+            var result = GoldenEvaluator.Run(new FakeLlmClient(EmptyReview), ["v3"]);
+            GoldenEvaluator.Persist(result, TestRepositories.For(context), "configured-model", "reports/report.md");
+
+            var run = new EfGoldenRunRepository(context).List().Single();
+            var caseCount = GoldenEvaluator.LoadCases().Count;
+
+            Assert.Equal("configured-model", run.Model);
+            Assert.Equal("off", run.Skills);
+            Assert.Equal("v3", run.PromptVersion);
+            Assert.Equal("reports/report.md", run.ReportFile);
+            Assert.InRange(run.StartedAt, before.AddSeconds(-1), DateTime.UtcNow);
+            Assert.True(run.DurationMs >= 0);
+            Assert.Equal(caseCount, run.Cases!.Count);
+            Assert.Equal(5, run.Gates!.Count);
+
+            // An empty review catches nothing, so the model cannot be approved.
+            Assert.False(run.Approved);
+
+            Assert.Equal(caseCount, context.Assessments.Count());
+            Assert.All(context.Assessments, a => Assert.Equal(run.Id, a.RunId));
+        }
+        finally
+        {
+            try { File.Delete(dbPath); } catch { /* pooled connection may hold the file */ }
+        }
+    }
+
+    [Fact]
+    public void Run_WithAFilter_KeepsTheAssessmentsButRecordsNoRun()
+    {
+        using var _ = new GoldenEnvironment(runs: "1", parallelism: "1");
+        var dbPath = Path.Combine(Path.GetTempPath(), $"cra-persist-{Guid.NewGuid():N}.db");
+
+        try
+        {
+            using var context = new CodeReviewDbContext(
+                o => new SqliteProviderStrategy().Configure(o, $"Data Source={dbPath}"));
+            context.Database.Migrate();
+
+            var firstCase = GoldenEvaluator.LoadCases()[0].Name;
+            var result = GoldenEvaluator.Run(
+                new FakeLlmClient(EmptyReview), TestRepositories.For(context), ["v3"], filter: firstCase);
+
+            Assert.NotNull(result.Score);
+            Assert.False(result.WholeSet);
+            Assert.Empty(context.GoldenRuns);
+            Assert.Equal(1, context.Assessments.Count());
+            Assert.All(context.Assessments, a => Assert.Null(a.RunId));
         }
         finally
         {

@@ -1,4 +1,5 @@
-﻿using System.Text.Json;
+﻿using System.Diagnostics;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 using CodeReviewerAgent.Core.Llm;
 
@@ -65,7 +66,7 @@ public static class GoldenEvaluator
         string? filter = null, IGoldenRoundStore? store = null)
     {
         var result = Run(client, promptVersions, filter, store);
-        Persist(result.Completed, repositories);
+        Persist(result, repositories);
         return result;
     }
 
@@ -93,21 +94,29 @@ public static class GoldenEvaluator
     {
         var (cases, diffs, runs) = Prepare(filter, promptVersions);
         var rounds = new RoundBuffer(cases.Count, runs, promptVersions.Count);
+        var wholeSet = string.IsNullOrWhiteSpace(filter);
+        var startedAt = DateTime.UtcNow;
+        var clock = Stopwatch.StartNew();
 
         try
         {
             ReviewEveryRound(rounds, client, cases, diffs, promptVersions, store);
+            clock.Stop();
 
             return new GoldenRunResult(
                 Score(rounds, cases, promptVersions),
                 CompletedRounds(rounds, cases, diffs),
-                null);
+                null,
+                wholeSet,
+                startedAt,
+                clock.ElapsedMilliseconds);
         }
         catch (Exception failure)
         {
             // Only the paid phase is caught. A bug in the scoring below is a bug and must still
             // crash: turning it into "the run failed" would hide it behind a plausible outcome.
-            return new GoldenRunResult(null, CompletedRounds(rounds, cases, diffs), failure);
+            return new GoldenRunResult(
+                null, CompletedRounds(rounds, cases, diffs), failure, wholeSet, startedAt, clock.ElapsedMilliseconds);
         }
     }
 
@@ -201,19 +210,33 @@ public static class GoldenEvaluator
     }
 
     /// <summary>
-    /// Writes what came back to the repositories, finished run or not. It takes the completed
-    /// rounds rather than a run, because a run that died has no scored result and its rounds are
-    /// exactly the part worth keeping.
+    /// Writes what came back to the repositories, finished run or not. Every completed round becomes
+    /// an assessment, because a run that died has no scored result and its rounds are exactly the part
+    /// worth keeping. A scored run over the whole set also becomes a <see cref="GoldenRun"/> per prompt
+    /// version, with its case scores and gates, and its assessments point at it.
+    /// <para>
+    /// Public so the caller can write after publishing the report, which is the only way the run can
+    /// carry the path of its report.
+    /// </para>
     /// <para>
     /// Sequential on purpose. Neither repository is thread-safe: <c>DbContext</c> forbids
     /// concurrent use outright, and the file store derives the next id from the highest one on
     /// disk, which races. Nothing here is paid, so the serialization costs milliseconds.
     /// </para>
     /// </summary>
-    private static void Persist(IReadOnlyList<CompletedRound> completed, RepositoryContext repositories)
+    /// <param name="model">
+    /// The model as configured, the name the imported runs carry. Null falls back to the name the
+    /// provider answered with, which can differ (gpt-4o-mini answers as gpt-4o-mini-2024-07-18).
+    /// </param>
+    /// <param name="reportFile">The published report of this run, when there is one.</param>
+    public static void Persist(
+        GoldenRunResult result, RepositoryContext repositories, string? model = null, string? reportFile = null)
     {
+        var completed = result.Completed;
         if (completed.Count == 0)
             return;
+
+        var runIds = SaveRuns(result, repositories, model, reportFile);
 
         // The golden set is its own project, so its reviews are kept apart from real repositories.
         var project = repositories.Projects.GetOrAdd("golden", "Golden Set");
@@ -231,8 +254,46 @@ public static class GoldenEvaluator
             });
 
             foreach (var round in group)
-                repositories.Assessments.Save(Assessment.FromReview(reviewId, round.Review));
+            {
+                int? runId = round.Review.PromptVersion is { } version && runIds.TryGetValue(version, out var id)
+                    ? id
+                    : null;
+                repositories.Assessments.Save(Assessment.FromReview(reviewId, round.Review, runId));
+            }
         }
+    }
+
+    // One golden run per prompt version, and only for a run that was scored over the whole set: a run
+    // that died has no numbers, and a filtered one has gates with nothing to stand on.
+    private static Dictionary<string, int> SaveRuns(
+        GoldenRunResult result, RepositoryContext repositories, string? model, string? reportFile)
+    {
+        var runIds = new Dictionary<string, int>();
+        if (result.Score is not { } score || !result.WholeSet)
+            return runIds;
+
+        foreach (var side in score.Results.GroupBy(r => r.PromptVersion))
+        {
+            var reviews = result.Completed
+                .Select(r => r.Review)
+                .Where(r => r.PromptVersion == side.Key)
+                .ToList();
+
+            var identity = new GoldenRun
+            {
+                Model = model ?? reviews.Select(r => r.Model).FirstOrDefault(m => m is not null) ?? "unknown",
+                Engine = reviews.Select(r => r.Engine).FirstOrDefault(e => e is not null),
+                Skills = score.Condition.Setting,
+                PromptVersion = side.Key,
+                StartedAt = result.StartedAt,
+                DurationMs = result.DurationMs,
+                ReportFile = reportFile,
+            };
+
+            runIds[side.Key] = repositories.GoldenRuns.Save(GoldenRunSummary.Build(identity, [.. side], reviews));
+        }
+
+        return runIds;
     }
 
     // Every round that came back, paired with the case and diff it belongs to. On a finished run
@@ -251,8 +312,12 @@ public static class GoldenEvaluator
     /// four findings which should not exist has to outweigh one that emitted a single one, and a
     /// mean of per-round rates would flatten exactly that.
     /// </para>
+    /// <para>
+    /// Public so rounds recorded earlier can be scored again without running anything, which is how
+    /// the US-013 matrix was imported into the database.
+    /// </para>
     /// </summary>
-    internal static (GoldenCaseResult Result, IReadOnlyList<string> Verdicts) ScoreOneSide(
+    public static (GoldenCaseResult Result, IReadOnlyList<string> Verdicts) ScoreOneSide(
         GoldenCase golden, string promptVersion, IReadOnlyList<ReviewResult> sideRounds)
     {
         var isTrap = golden.Expect is ExpectNoFinding;
@@ -266,6 +331,8 @@ public static class GoldenEvaluator
         var precisionCounted = 0;
         var distances = new List<int>();
         var unforeseen = new List<Finding>();
+        var cleanRounds = 0;
+        var discarded = 0;
 
         foreach (var review in sideRounds)
         {
@@ -279,6 +346,9 @@ public static class GoldenEvaluator
             unforeseen.AddRange(score.Outcomes
                 .Where(o => o.Verdict == FindingVerdict.Unforeseen)
                 .Select(o => o.Finding));
+            if (score.IsClean)
+                cleanRounds++;
+            discarded += review.DiscardedFindings;
 
             if (score.Succeeded)
             {
@@ -295,7 +365,7 @@ public static class GoldenEvaluator
         var result = new GoldenCaseResult(
             golden.Name, isTrap ? GoldenKind.Trap : GoldenKind.Detection,
             golden.Since, promptVersion, successes, sideRounds.Count, lastMiss,
-            precisionCorrect, precisionCounted, distances, unforeseen);
+            precisionCorrect, precisionCounted, distances, unforeseen, cleanRounds, discarded);
 
         return (result, labels);
     }

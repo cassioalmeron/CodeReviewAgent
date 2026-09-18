@@ -148,6 +148,86 @@ public class GoldenReportTests
         Assert.Contains("no skill", footer);
     }
 
+    // --- ADR-015 ---
+
+    /// <summary>
+    /// The trap precision rate could only ever print 0/N, so it is gone, and what it was really
+    /// counting is printed instead: findings per trap round.
+    /// </summary>
+    [Fact]
+    public void ReportsTrapNoiseInsteadOfTrapPrecision()
+    {
+        var trap = new GoldenCaseResult("clean", GoldenKind.Trap, null, "v3", 8, 15, null, 0, 13);
+
+        var footer = GoldenEvaluatorReport.BuildFooter([Detection("bug", 3), trap], GoldenCondition.From([], "off"));
+
+        Assert.Contains("**Trap noise** 13 finding(s) in 15 trap rounds", footer);
+        Assert.DoesNotContain("Precision (traps)", footer);
+    }
+
+    [Fact]
+    public void PrintsEveryGateAndTheVerdict()
+    {
+        var results = new[]
+        {
+            new GoldenCaseResult("bug", GoldenKind.Detection, null, "v3", 5, 5, null, 5, 5, [0, 0, 0, 0, 0], CleanRounds: 5),
+            new GoldenCaseResult("clean", GoldenKind.Trap, null, "v3", 5, 5, null, 0, 0, CleanRounds: 5),
+        };
+
+        var footer = GoldenEvaluatorReport.BuildFooter(results, GoldenCondition.From([], "off"));
+
+        Assert.Contains("## Approval", footer);
+        Assert.Contains("Cases approved (at least 4 clean rounds in 5): 2/2", footer);
+        foreach (var gate in new[] { "Detection", "Trap resistance", "Precision", "Exact calibration", "Trap noise" })
+            Assert.Contains($"| {gate} |", footer);
+        Assert.Contains("**Model approved.**", footer);
+    }
+
+    /// <summary>Two of the five gates are measured on traps, so a run without them cannot be judged.</summary>
+    [Fact]
+    public void DoesNotJudgeARunWithoutTraps()
+    {
+        var footer = GoldenEvaluatorReport.BuildFooter([Detection("bug", 3)], GoldenCondition.From([], "off"));
+
+        Assert.Contains("Not judged", footer);
+        Assert.DoesNotContain("Model approved", footer);
+        Assert.DoesNotContain("Model not approved", footer);
+    }
+
+    /// <summary>
+    /// PASS keeps meaning "found it every time". The clean count beside it is what the case is
+    /// approved on, and the two can disagree: that disagreement is the point of the new line.
+    /// </summary>
+    [Fact]
+    public void ACaseCanPassAndStillNotBeApproved()
+    {
+        var result = new GoldenCaseResult("collection-spread", GoldenKind.Trap, "C# 12", "v3", 5, 5, null, CleanRounds: 3);
+
+        var line = GoldenEvaluatorReport.FormatLine(result);
+
+        Assert.StartsWith("[PASS]", line);
+        Assert.Contains("clean 3/5, not approved", line);
+    }
+
+    [Fact]
+    public void ShowsDiscardedFindingsOnTheCaseLineOnlyWhenThereAreAny()
+    {
+        var none = new GoldenCaseResult("case", GoldenKind.Detection, null, "v3", 0, 5, "missed");
+        var some = none with { DiscardedFindings = 4 };
+
+        Assert.DoesNotContain("discarded", GoldenEvaluatorReport.FormatLine(none));
+        Assert.Contains("discarded 4", GoldenEvaluatorReport.FormatLine(some));
+    }
+
+    /// <summary>Zero is printed too: between models, zero is a result, and a missing line reads as "not measured".</summary>
+    [Fact]
+    public void ReportsDiscardedFindingsInTheFooterEvenAtZero()
+    {
+        var footer = GoldenEvaluatorReport.BuildFooter([Detection("bug", 3)], GoldenCondition.From([], "off"));
+
+        Assert.Contains("**Discarded** 0 finding(s)", footer);
+    }
+
     [Fact]
     public void DoesNotFlagMissingSkillsInTheBaselineCondition()
     {

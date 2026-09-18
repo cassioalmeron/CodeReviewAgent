@@ -124,6 +124,7 @@ public class CodeReviewerTests
         var result = new CodeReviewer(client, diff, "v3", new FakeSkillSelector()).Review();
 
         Assert.Empty(result.Findings!);
+        Assert.Equal(1, result.DiscardedFindings); // dropped, but not without a trace
     }
 
     [Fact]

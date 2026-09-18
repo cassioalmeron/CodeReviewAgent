@@ -56,6 +56,12 @@ public record Finding(
 /// (null when none were). Together with <see cref="PromptVersion"/> it is what makes the
 /// effective prompt of a run reconstructible.
 /// </param>
+/// <param name="DiscardedFindings">
+/// Findings the model emitted that the grounding dropped, because the code they cite is not among
+/// the added lines of the diff. Without this count a model that found the problem and cited the
+/// wrong line is indistinguishable from one that never saw it. Persisted as
+/// <see cref="Assessment.DiscardedFindings"/>.
+/// </param>
 public record ReviewResult(
     string? Summary,
     List<Finding>? Findings,
@@ -67,4 +73,5 @@ public record ReviewResult(
     int InputTokens = 0,
     int OutputTokens = 0,
     string? Diff = null,
-    string? Skills = null);
+    string? Skills = null,
+    int DiscardedFindings = 0);

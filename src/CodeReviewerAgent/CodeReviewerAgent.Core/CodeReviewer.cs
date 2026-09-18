@@ -109,6 +109,9 @@ public class CodeReviewer
         return result with
         {
             Findings = findings,
+            // What the grounding threw away. It is the only trace left of a finding that was about
+            // the right problem but cited a line the diff does not add.
+            DiscardedFindings = rawFindings.Count - findings.Count,
             Engine = engine,
             Model = response?.Model,
             PromptVersion = _promptVersion,

@@ -50,11 +50,19 @@ public record Assessment
     public long LatencyMs { get; init; }
     public int InputTokens { get; init; }
     public int OutputTokens { get; init; }
+    /// <summary>Findings the grounding dropped, because the code they cite is not in the diff.</summary>
+    public int DiscardedFindings { get; init; }
+    /// <summary>
+    /// The <see cref="GoldenRun"/> this assessment belongs to; null for an ordinary review, which
+    /// belongs to no run. It is what turns loose assessments into the fourteen runs of a matrix.
+    /// </summary>
+    public int? RunId { get; init; }
     public DateTime CreatedAt { get; init; }
 
     /// <summary>Builds a persistable assessment of <paramref name="reviewId"/> from a review result.</summary>
-    public static Assessment FromReview(int reviewId, ReviewResult r) => new()
+    public static Assessment FromReview(int reviewId, ReviewResult r, int? runId = null) => new()
     {
+        RunId = runId,
         ReviewId = reviewId,
         Summary = r.Summary,
         Findings = r.Findings,
@@ -66,6 +74,7 @@ public record Assessment
         LatencyMs = r.LatencyMs,
         InputTokens = r.InputTokens,
         OutputTokens = r.OutputTokens,
+        DiscardedFindings = r.DiscardedFindings,
         CreatedAt = DateTime.UtcNow,
     };
 }

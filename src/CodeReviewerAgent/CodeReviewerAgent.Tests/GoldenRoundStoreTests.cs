@@ -1,4 +1,5 @@
-﻿using CodeReviewerAgent.Core;
+﻿using Microsoft.EntityFrameworkCore;
+using CodeReviewerAgent.Core;
 using CodeReviewerAgent.Core.Golden;
 using CodeReviewerAgent.Core.Llm;
 using CodeReviewerAgent.Infra;
@@ -129,7 +130,7 @@ public class GoldenRoundStoreTests
 
             using var context = new CodeReviewDbContext(
                 o => new SqliteProviderStrategy().Configure(o, $"Data Source={dbPath}"));
-            context.Database.EnsureCreated();
+            context.Database.Migrate();
 
             const string model = "haiku";
             var client = new CountingLlmClient(model);

@@ -92,3 +92,31 @@ public class EfEvaluationRepository(CodeReviewDbContext context) : IEvaluationRe
 
     public IReadOnlyList<Evaluation> List() => [.. context.Evaluations.OrderBy(e => e.Id)];
 }
+
+public class EfGoldenRunRepository(CodeReviewDbContext context) : IGoldenRunRepository
+{
+    public GoldenRun? Find(string model, string? skills, string? promptVersion, DateTime startedAt) =>
+        WithChildren().FirstOrDefault(r =>
+            r.Model == model && r.Skills == skills && r.PromptVersion == promptVersion && r.StartedAt == startedAt);
+
+    public int Save(GoldenRun run)
+    {
+        // Ids reset so a run read from elsewhere (an import file, another store) is inserted, not updated.
+        var entity = run with
+        {
+            Id = 0,
+            Cases = run.Cases?.Select(c => c with { Id = 0, RunId = 0 }).ToList(),
+            Gates = run.Gates?.Select(g => g with { Id = 0, RunId = 0 }).ToList(),
+        };
+        context.GoldenRuns.Add(entity);
+        context.SaveChanges();
+        return entity.Id;
+    }
+
+    public GoldenRun? Get(int id) => WithChildren().FirstOrDefault(r => r.Id == id);
+
+    public IReadOnlyList<GoldenRun> List() => [.. WithChildren().OrderBy(r => r.Id)];
+
+    private IQueryable<GoldenRun> WithChildren() =>
+        context.GoldenRuns.Include(r => r.Cases).Include(r => r.Gates).AsSplitQuery();
+}

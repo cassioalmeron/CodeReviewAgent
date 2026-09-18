@@ -1,4 +1,6 @@
+using Microsoft.EntityFrameworkCore;
 using CodeReviewerAgent.Core;
+using CodeReviewerAgent.Core.Golden;
 using CodeReviewerAgent.Infra;
 using Xunit;
 
@@ -10,7 +12,7 @@ public class EfRepositoryTests
     {
         var context = new CodeReviewDbContext(
             o => new SqliteProviderStrategy().Configure(o, $"Data Source={dbPath}"));
-        context.Database.EnsureCreated();
+        context.Database.Migrate();
         return context;
     }
 
@@ -164,6 +166,99 @@ public class EfRepositoryTests
                 Assert.Equal(assessmentId, evaluation!.AssessmentId);
                 Assert.Equal(4, evaluation.Overall);
                 Assert.Equal("solid", evaluation.Rationale);
+            }
+        }
+        finally
+        {
+            try { File.Delete(dbPath); } catch { /* pooled connection may hold the file; leak the temp file */ }
+        }
+    }
+
+    [Fact]
+    public void GoldenRun_RoundTripsWithChildren_AndDeletingItRemovesEverythingButTheDiff()
+    {
+        var dbPath = Path.Combine(Path.GetTempPath(), $"cra-test-{Guid.NewGuid():N}.db");
+        try
+        {
+            int runId, reviewId;
+
+            using (var context = NewContext(dbPath))
+            {
+                var project = new EfProjectRepository(context).GetOrAdd("golden", "Golden Set");
+                reviewId = new EfReviewRepository(context).Save(new Review
+                {
+                    ProjectId = project.Id,
+                    Content = "diff --git a/a.cs b/a.cs",
+                    CreatedAt = DateTime.UtcNow,
+                });
+
+                var run = new GoldenRun
+                {
+                    Model = "deepseek/deepseek-v4-flash-0731",
+                    Engine = "openrouter",
+                    Skills = "off",
+                    PromptVersion = "v3",
+                    StartedAt = new DateTime(2026, 9, 11, 21, 49, 52, DateTimeKind.Utc),
+                    DurationMs = 2_957_000,
+                    Cost = 0.09660000m,
+                    InputTokens = 50_216,
+                    OutputTokens = 324_112,
+                    LatencyP50Ms = 59_871,
+                    LatencyP95Ms = 508_599,
+                    LatencyP99Ms = 1_082_010,
+                    Approved = true,
+                    Cases = [.. Enumerable.Range(1, 15).Select(i => new GoldenCaseScore
+                    {
+                        CaseName = $"case-{i}",
+                        Kind = i <= 12 ? GoldenKind.Detection : GoldenKind.Trap,
+                        Runs = 5,
+                        CleanRounds = 4,
+                        Approved = true,
+                    })],
+                    Gates = [.. new[] { "Detection", "Trap resistance", "Precision", "Exact calibration", "Trap noise" }
+                        .Select(name => new GoldenGate { Name = name, Part = 41, Whole = 60, Floor = 60, Passed = true })],
+                };
+                context.GoldenRuns.Add(run);
+                context.SaveChanges();
+                runId = run.Id;
+
+                var assessments = new EfAssessmentRepository(context);
+                for (var i = 0; i < 3; i++)
+                    assessments.Save(new Assessment
+                    {
+                        ReviewId = reviewId,
+                        RunId = runId,
+                        Cost = 0.00006774m,
+                        DiscardedFindings = 1,
+                        Findings = [new Finding("a.cs", "+ bad", Severity.Critical, Category.Security, "p", "s", 1)],
+                        CreatedAt = DateTime.UtcNow,
+                    });
+            }
+
+            using (var context = NewContext(dbPath))
+            {
+                var loaded = context.GoldenRuns
+                    .Include(r => r.Cases)
+                    .Include(r => r.Gates)
+                    .Single(r => r.Id == runId);
+
+                Assert.Equal(15, loaded.Cases!.Count);
+                Assert.Equal(5, loaded.Gates!.Count);
+                Assert.Equal(0.09660000m, loaded.Cost);
+                Assert.Equal(DateTimeKind.Utc, loaded.StartedAt.Kind);
+                var assessment = context.Assessments.Include(a => a.Findings).First(a => a.RunId == runId);
+                Assert.Equal(0.00006774m, assessment.Cost);
+                Assert.Equal(1, assessment.DiscardedFindings);
+
+                // Delete in the database, not in the change tracker, so the cascade under test is the
+                // schema's and not EF's.
+                context.GoldenRuns.Where(r => r.Id == runId).ExecuteDelete();
+
+                Assert.Equal(0, context.GoldenCaseScores.Count(c => c.RunId == runId));
+                Assert.Equal(0, context.GoldenGates.Count(g => g.RunId == runId));
+                Assert.Equal(0, context.Assessments.Count(a => a.RunId == runId));
+                Assert.Equal(0, context.Set<Finding>().Count());
+                Assert.NotNull(context.Reviews.Find(reviewId));
             }
         }
         finally

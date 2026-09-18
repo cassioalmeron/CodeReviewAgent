@@ -165,3 +165,34 @@ public class FileEvaluationRepository : IEvaluationRepository
 
     public IReadOnlyList<Evaluation> List() => FileStore.List<Evaluation>(Directory, "evaluation");
 }
+
+/// <summary>
+/// Runs as JSON files, with their cases and gates nested, the way findings stay nested in an
+/// assessment. The directory is a parameter only so the tests do not write into the build output.
+/// </summary>
+public class FileGoldenRunRepository(string? directory = null) : IGoldenRunRepository
+{
+    private const string Prefix = "golden-run";
+
+    private readonly string _directory = directory ?? Path.Combine(AppContext.BaseDirectory, "golden-runs");
+
+    public GoldenRun? Find(string model, string? skills, string? promptVersion, DateTime startedAt) =>
+        List().FirstOrDefault(r =>
+            r.Model == model && r.Skills == skills && r.PromptVersion == promptVersion && r.StartedAt == startedAt);
+
+    public int Save(GoldenRun run)
+    {
+        var id = FileStore.NextId(_directory, Prefix);
+        FileStore.Save(_directory, Prefix, id, run with
+        {
+            Id = id,
+            Cases = run.Cases?.Select(c => c with { RunId = id }).ToList(),
+            Gates = run.Gates?.Select(g => g with { RunId = id }).ToList(),
+        });
+        return id;
+    }
+
+    public GoldenRun? Get(int id) => FileStore.Get<GoldenRun>(_directory, Prefix, id);
+
+    public IReadOnlyList<GoldenRun> List() => FileStore.List<GoldenRun>(_directory, Prefix);
+}

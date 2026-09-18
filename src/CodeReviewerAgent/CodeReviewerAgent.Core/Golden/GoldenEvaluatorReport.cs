@@ -54,14 +54,22 @@ public static class GoldenEvaluatorReport
     // PASS = succeeded every run, FAIL = never, FLAKY = some but not all. The prompt version is
     // shown only when a run actually compares two of them — a single-side run reads exactly as
     // it did before this label existed.
+    //
+    // The clean count sits beside the old one on purpose. PASS still means what it always meant,
+    // found it every time; the clean count is what ADR-015 approves a case on, and a case can be
+    // PASS and not approved, which is exactly what the old line could not show.
     public static string FormatLine(GoldenCaseResult r, bool showPromptVersion = false)
     {
         var status = r.Successes == r.Runs ? "PASS" : r.Successes == 0 ? "FAIL" : "FLAKY";
         var kind = r.Kind == GoldenKind.Trap ? "trap" : "detection";
         var version = showPromptVersion ? $", {r.PromptVersion}" : "";
         var since = r.Since is null ? "" : $", {r.Since}";
+        var approval = GoldenGates.CaseApproved(r) ? "approved" : "not approved";
+        var clean = $" · clean {r.CleanRounds}/{r.Runs}, {approval}";
+        // Only when there are any: on the case line a zero is noise, and the footer carries the total.
+        var discarded = r.DiscardedFindings > 0 ? $" · discarded {r.DiscardedFindings}" : "";
         var detail = r.Successes == r.Runs ? "" : $" — {r.MissDetail}";
-        return $"[{status}] {r.Name} ({kind}{version}{since}) {r.Successes}/{r.Runs}{detail}";
+        return $"[{status}] {r.Name} ({kind}{version}{since}) {r.Successes}/{r.Runs}{clean}{discarded}{detail}";
     }
 
     /// <summary>
@@ -115,7 +123,13 @@ public static class GoldenEvaluatorReport
             var label = showPromptVersion ? $" ({side})" : "";
             AppendPrecision(footer, inSide, label);
             AppendCalibration(footer, inSide, label);
+            AppendTrapNoise(footer, inSide, label);
+            AppendDiscarded(footer, inSide, label);
         }
+
+        foreach (var side in sides)
+            AppendApproval(footer, [.. results.Where(r => r.PromptVersion == side)],
+                showPromptVersion ? side : null);
 
         foreach (var side in sides)
             AppendVersionLadder(footer, [.. results.Where(r => r.PromptVersion == side)], hasTraps,
@@ -127,23 +141,80 @@ public static class GoldenEvaluatorReport
 
     // Precision counts findings, not runs: a run that emitted four findings which should not exist
     // has to weigh four times one that emitted a single one, and a mean of per-run rates would
-    // flatten exactly that. The two kinds of case are reported apart for the same reason detection
-    // and trap resistance are — their denominators mean different things.
+    // flatten exactly that. Detection cases only: on a trap the same fraction can only be 0/N,
+    // which is why traps get a noise count instead.
     private static void AppendPrecision(StringBuilder footer, IReadOnlyList<GoldenCaseResult> results, string label)
     {
-        foreach (var kind in new[] { GoldenKind.Detection, GoldenKind.Trap })
-        {
-            var inKind = results.Where(r => r.Kind == kind).ToList();
-            var counted = inKind.Sum(r => r.PrecisionCounted);
-            if (counted == 0)
-                continue;
+        var detection = results.Where(r => r.Kind == GoldenKind.Detection).ToList();
+        var counted = detection.Sum(r => r.PrecisionCounted);
+        if (counted == 0)
+            return;
 
-            var correct = inKind.Sum(r => r.PrecisionCorrect);
-            var name = kind == GoldenKind.Detection ? "Precision" : "Precision (traps)";
-            footer.AppendLine(
-                $"- **{name}**{label} {correct}/{counted} ({(double)correct / counted:P1})" +
-                $" · {counted - correct} finding(s) that should not have been said");
+        var correct = detection.Sum(r => r.PrecisionCorrect);
+        footer.AppendLine(
+            $"- **Precision**{label} {correct}/{counted} ({(double)correct / counted:P1})" +
+            $" · {counted - correct} finding(s) that should not have been said");
+    }
+
+    // Replaces the trap precision rate, which printed 0/N for every model: nothing is planted on a
+    // trap and the acceptable lists are empty, so no finding there can be one that needed saying.
+    // The number that rate was really carrying is how many findings came out per trap round.
+    private static void AppendTrapNoise(StringBuilder footer, IReadOnlyList<GoldenCaseResult> results, string label)
+    {
+        var traps = results.Where(r => r.Kind == GoldenKind.Trap).ToList();
+        var rounds = traps.Sum(r => r.Runs);
+        if (rounds == 0)
+            return;
+
+        var findings = traps.Sum(r => r.FindingsAgainst);
+        footer.AppendLine(
+            $"- **Trap noise**{label} {findings} finding(s) in {rounds} trap rounds" +
+            $" ({(double)findings / rounds:0.00} per round)");
+    }
+
+    // Findings the grounding dropped because the code they cite is not among the added lines. They
+    // never reach the golden check, so a model that found the bug and cited the wrong line scores
+    // exactly like one that never saw it. Printed even at zero: between models, zero is a result,
+    // and a missing line would read as "not measured".
+    private static void AppendDiscarded(StringBuilder footer, IReadOnlyList<GoldenCaseResult> results, string label)
+    {
+        var discarded = results.Sum(r => r.DiscardedFindings);
+        footer.AppendLine(
+            $"- **Discarded**{label} {discarded} finding(s) cited code that is not among the added lines," +
+            " and were dropped before the golden check");
+    }
+
+    // ADR-015. Every gate is printed, passed or not: a verdict that names only the gate that
+    // failed hides how close the others came. A run without both kinds of case cannot be judged,
+    // since two of the five gates are measured on traps, so it says so rather than failing a model
+    // on gates it was never put through.
+    private static void AppendApproval(StringBuilder footer, IReadOnlyList<GoldenCaseResult> results, string? sideLabel)
+    {
+        footer.AppendLine();
+        footer.AppendLine(sideLabel is null ? "## Approval" : $"## Approval ({sideLabel})");
+        footer.AppendLine();
+
+        if (!results.Any(r => r.Kind == GoldenKind.Detection) || !results.Any(r => r.Kind == GoldenKind.Trap))
+        {
+            footer.AppendLine("Not judged: the approval needs both detection and trap cases in the same run.");
+            return;
         }
+
+        var approvedCases = results.Count(GoldenGates.CaseApproved);
+        footer.AppendLine(
+            $"Cases approved (at least {GoldenGates.CleanRoundsRequired} clean rounds in {GoldenGates.CleanRoundsOutOf}):" +
+            $" {approvedCases}/{results.Count}");
+        footer.AppendLine();
+
+        var verdict = GoldenGates.Judge(results);
+        footer.AppendLine("| Gate | Value | Floor | Result |");
+        footer.AppendLine("|---|---|---|---|");
+        foreach (var gate in verdict.Gates)
+            footer.AppendLine($"| {gate.Name} | {gate.ValueText} | {gate.FloorText} | {(gate.Passed ? "pass" : "**fail**")} |");
+        footer.AppendLine();
+        footer.AppendLine(verdict.Approved
+            ? "**Model approved.** Every gate passed."
+            : "**Model not approved.** Every gate has to pass, and none is averaged with another.");
     }
 
     // Signed distance on the severity scale: Info 0, Warning 1, Critical 2. The mean alone is not

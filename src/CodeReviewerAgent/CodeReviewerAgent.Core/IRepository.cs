@@ -47,12 +47,39 @@ public interface IEvaluationRepository
 }
 
 /// <summary>
+/// Persists and retrieves <see cref="GoldenRun"/>s, always together with their case scores and gates.
+/// </summary>
+public interface IGoldenRunRepository
+{
+    /// <summary>
+    /// The stored run with this identity, or null. Separate from <see cref="Save"/> rather than a
+    /// GetOrAdd, because an import has to know whether the run was already there: if it was, its
+    /// assessments are too, and writing them again would count the run twice.
+    /// </summary>
+    GoldenRun? Find(string model, string? skills, string? promptVersion, DateTime startedAt);
+    /// <summary>Stores the run with its cases and gates, and returns the run's id.</summary>
+    int Save(GoldenRun run);
+    GoldenRun? Get(int id);
+    IReadOnlyList<GoldenRun> List();
+}
+
+/// <summary>
 /// The repositories backing a run, passed around as one unit — same store, and a shared
 /// <c>DbContext</c> when relational. Lives in Core because it is only the contracts;
 /// <c>RepositoryFactory</c> (Infra) is what fills it with implementations.
 /// </summary>
+/// <param name="Owned">
+/// What the store holds open, disposed with the context: the <c>DbContext</c> of a relational store,
+/// null for the file store. It is what lets a caller with a lifetime of its own — a web request —
+/// close the connection when it ends instead of leaving one per request to the garbage collector.
+/// </param>
 public record RepositoryContext(
     IProjectRepository Projects,
     IReviewRepository Reviews,
     IAssessmentRepository Assessments,
-    IEvaluationRepository Evaluations);
+    IEvaluationRepository Evaluations,
+    IGoldenRunRepository GoldenRuns,
+    IDisposable? Owned = null) : IDisposable
+{
+    public void Dispose() => Owned?.Dispose();
+}

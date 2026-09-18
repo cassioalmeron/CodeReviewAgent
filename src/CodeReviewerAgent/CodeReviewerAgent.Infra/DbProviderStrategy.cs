@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 
 namespace CodeReviewerAgent.Infra;
 
@@ -19,12 +20,15 @@ public sealed class SqliteProviderStrategy : IDbProviderStrategy
 {
     public string Name => "sqlite";
 
-    // The SQLite database always lives under the user's local application data
-    // (%LOCALAPPDATA%/CodeReviewerAgent/review.db) — a stable, per-user location that survives
-    // rebuilds and is shared by the Console and the Api. DB_CONNECTION does not apply to SQLite
-    // (it configures Postgres only); the folder is created on first run.
+    // DB_CONNECTION when set. When blank, the database lives under the user's local application data
+    // (%LOCALAPPDATA%/CodeReviewerAgent/review.db): a stable, per-user location that survives
+    // rebuilds and is shared by the Console and the Api, and the one every setup opened before
+    // DB_CONNECTION applied to SQLite. The folder is created on first run.
     public string ResolveConnectionString(string? configured)
     {
+        if (!string.IsNullOrWhiteSpace(configured))
+            return configured;
+
         var directory = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "CodeReviewerAgent");
@@ -32,8 +36,13 @@ public sealed class SqliteProviderStrategy : IDbProviderStrategy
         return $"Data Source={Path.Combine(directory, "review.db")}";
     }
 
+    // The migrations are generated against Postgres, so their snapshot carries Postgres column types.
+    // Compared with the SQLite model, that reads as a pending model change on every migrate, which
+    // is a false positive. The real check runs against the Postgres model, in
+    // MigrationTests.PostgresModel_HasNoPendingChanges.
     public void Configure(DbContextOptionsBuilder options, string connectionString) =>
-        options.UseSqlite(connectionString);
+        options.UseSqlite(connectionString)
+            .ConfigureWarnings(warnings => warnings.Ignore(RelationalEventId.PendingModelChangesWarning));
 }
 
 public sealed class PostgresProviderStrategy : IDbProviderStrategy

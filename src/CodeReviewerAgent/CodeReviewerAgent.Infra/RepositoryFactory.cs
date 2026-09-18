@@ -1,4 +1,5 @@
 using CodeReviewerAgent.Core;
+using Microsoft.EntityFrameworkCore;
 
 namespace CodeReviewerAgent.Infra;
 
@@ -13,7 +14,11 @@ public static class RepositoryFactory
         new IDbProviderStrategy[] { new SqliteProviderStrategy(), new PostgresProviderStrategy() }
             .ToDictionary(s => s.Name);
 
-    public static RepositoryContext Create()
+    /// <param name="applyMigrations">
+    /// False for a caller that builds a store per request: the schema is applied once, at startup, and
+    /// migrating again on every request would cost a round trip for nothing.
+    /// </param>
+    public static RepositoryContext Create(bool applyMigrations = true)
     {
         var storage = (Environment.GetEnvironmentVariable("STORAGE") ?? "files").ToLowerInvariant();
 
@@ -22,7 +27,8 @@ public static class RepositoryFactory
                 new FileProjectRepository(),
                 new FileReviewRepository(),
                 new FileAssessmentRepository(),
-                new FileEvaluationRepository());
+                new FileEvaluationRepository(),
+                new FileGoldenRunRepository());
 
         if (!Providers.TryGetValue(storage, out var provider))
             throw new InvalidOperationException(
@@ -32,12 +38,17 @@ public static class RepositoryFactory
             Environment.GetEnvironmentVariable("DB_CONNECTION"));
 
         var context = new CodeReviewDbContext(options => provider.Configure(options, connectionString));
-        context.Database.EnsureCreated();
+        // Migrate, not EnsureCreated: EnsureCreated does nothing on a database that already exists,
+        // so a table added later would never reach it.
+        if (applyMigrations)
+            context.Database.Migrate();
 
         return new RepositoryContext(
             new EfProjectRepository(context),
             new EfReviewRepository(context),
             new EfAssessmentRepository(context),
-            new EfEvaluationRepository(context));
+            new EfEvaluationRepository(context),
+            new EfGoldenRunRepository(context),
+            context);
     }
 }

@@ -74,7 +74,10 @@ public static class LlmClientFactory
             ?? throw new InvalidOperationException("OLLAMA_MODEL is not configured. Add it to the .env file.");
         var host = Environment.GetEnvironmentVariable("OLLAMA_HOST") ?? "http://localhost:11434";
 
-        var http = new HttpClient { BaseAddress = new Uri(host), Timeout = TimeSpan.FromSeconds(120) };
+        // A local model answers at the speed of the machine it runs on, and the resilient transport
+        // retries a timeout from scratch: a limit sized for a hosted API would throw away minutes
+        // of local work on every attempt. Hosted engines keep their two minutes.
+        var http = new HttpClient { BaseAddress = new Uri(host), Timeout = TimeoutFrom("OLLAMA_TIMEOUT_SECONDS", 600) };
         return (new OllamaClient(Resilient(http), model), model);
     }
 
@@ -105,12 +108,22 @@ public static class LlmClientFactory
         var http = new HttpClient
         {
             BaseAddress = new Uri("https://openrouter.ai"),
-            Timeout = TimeSpan.FromSeconds(120),
+            // Several models behind OpenRouter reason before answering by default, and a long chain
+            // outlasts two minutes. A timeout is retried from scratch while the aborted attempt is
+            // still billed, so a tight limit here costs money, not just time.
+            Timeout = TimeoutFrom("OPENROUTER_TIMEOUT_SECONDS", 600),
         };
         http.DefaultRequestHeaders.Add("Authorization", $"Bearer {apiKey}");
 
         return (new OpenRouterClient(Resilient(http), model), model);
     }
+
+    // A per-request limit from the environment, falling back to the engine's own default.
+    private static TimeSpan TimeoutFrom(string variable, int defaultSeconds) =>
+        TimeSpan.FromSeconds(
+            int.TryParse(Environment.GetEnvironmentVariable(variable), out var seconds) && seconds > 0
+                ? seconds
+                : defaultSeconds);
 
     // Composes the resilient HTTP transport shared by every HTTP-based client.
     private static IHttpTransport Resilient(HttpClient http) =>

@@ -123,10 +123,22 @@ public record CompletedRound(string Case, string Diff, ReviewResult Review);
 /// what makes a failed run still worth something.
 /// </param>
 /// <param name="Failure">What went wrong, kept rather than swallowed, so the caller can report it.</param>
+/// <param name="WholeSet">
+/// False when a filter narrowed the run to some cases. Such a run is a tuning pass, not a verdict on
+/// the model: its gates have nothing to stand on, so it is never recorded as a golden run.
+/// </param>
+/// <param name="StartedAt">When the run started, in UTC.</param>
+/// <param name="DurationMs">
+/// Wall-clock time of the reviews. Not the sum of their latencies, which counts parallel rounds once
+/// each; with two prompt versions it is the time of both sides together.
+/// </param>
 public record GoldenRunResult(
     GoldenScore? Score,
     IReadOnlyList<CompletedRound> Completed,
-    Exception? Failure)
+    Exception? Failure,
+    bool WholeSet = true,
+    DateTime StartedAt = default,
+    long DurationMs = 0)
 {
     public bool Succeeded => Failure is null;
 }
@@ -161,6 +173,19 @@ public record RoundScore(
     public int PrecisionCounted => Kind == GoldenKind.Detection
         ? PrecisionCorrect + Count(FindingVerdict.Duplicate)
         : Outcomes.Count;
+
+    /// <summary>
+    /// A round with nothing to answer for: it found the planted problem or resisted the trap, said
+    /// nothing that counts against precision, and got the severity exactly right.
+    /// <para>
+    /// One rule for both kinds of case, because precision already carries the difference. On a
+    /// detection case that means no duplicate, and an unforeseen remark does not spoil the round,
+    /// since it is outside precision on both sides. On a trap every finding counts, so a clean
+    /// round is a silent one. A trap has no expected severity, so there is nothing to calibrate.
+    /// </para>
+    /// </summary>
+    public bool IsClean =>
+        Succeeded && PrecisionCounted == PrecisionCorrect && CalibrationDistance is null or 0;
 }
 
 /// <summary>
@@ -184,6 +209,16 @@ public record RoundScore(
 /// penalty; they are here so a human can read them and decide what belongs in
 /// <c>AlsoAcceptable</c>. This is how the list is meant to grow.
 /// </param>
+/// <param name="CleanRounds">
+/// Rounds with nothing to answer for (<see cref="RoundScore.IsClean"/>). Counted here, while each
+/// round is still at hand: the calibration list only holds rounds that found something, so it
+/// cannot be lined up with the rounds afterwards to recover this.
+/// </param>
+/// <param name="DiscardedFindings">
+/// Findings the grounding dropped, summed over the runs. They never reach any verdict here, so a
+/// detection miss can be a model that saw nothing or one that cited the wrong line; this count is
+/// what tells the two apart.
+/// </param>
 public record GoldenCaseResult(
     string Name,
     GoldenKind Kind,
@@ -195,7 +230,13 @@ public record GoldenCaseResult(
     int PrecisionCorrect = 0,
     int PrecisionCounted = 0,
     IReadOnlyList<int>? CalibrationDistances = null,
-    IReadOnlyList<Finding>? Unforeseen = null);
+    IReadOnlyList<Finding>? Unforeseen = null,
+    int CleanRounds = 0,
+    int DiscardedFindings = 0)
+{
+    /// <summary>Findings that should not have been said, summed over the runs.</summary>
+    public int FindingsAgainst => PrecisionCounted - PrecisionCorrect;
+}
 
 /// <summary>
 /// Everything a finished golden run produced, with no side effect attached: the per-case

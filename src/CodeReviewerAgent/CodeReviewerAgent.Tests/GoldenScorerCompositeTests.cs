@@ -200,4 +200,20 @@ public class GoldenScorerCompositeTests
         Assert.Equal(0, score.PrecisionCorrect);
         Assert.Equal(0, score.PrecisionCounted);
     }
+
+    /// <summary>
+    /// Findings the grounding dropped are summed per case. They never reach a verdict, so this
+    /// count is the only way to tell a model that cited the wrong line from one that saw nothing.
+    /// </summary>
+    [Fact]
+    public void DiscardedFindings_AreSummedAcrossRounds()
+    {
+        var missed = new ReviewResult("ok", [], DiscardedFindings: 1);
+        var caught = new ReviewResult("ok", [Found("SQL injection through concatenation")], DiscardedFindings: 2);
+
+        var (result, _) = GoldenEvaluator.ScoreOneSide(Detection(), "v3", [missed, caught]);
+
+        Assert.Equal(3, result.DiscardedFindings);
+        Assert.Equal(1, result.Successes);
+    }
 }
