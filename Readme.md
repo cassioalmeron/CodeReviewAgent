@@ -106,7 +106,7 @@ src/CodeReviewerAgent/
 │       ├── prompts/review-v1..v5.md     # Versioned review system prompts (PROMPT_VERSION)
 │       ├── prompts/skill-selection-v1.md / skill-guidelines-v1.md   # Skill prompt fragments
 │       ├── rubrics/judge-v1.md / judge-v2.md  # Versioned judge rubrics (v1 absolute, v2 pairwise)
-│       ├── skills/{csharp,csharp-modern,react}/SKILL.md   # Bundled skills (not versioned — see below)
+│       ├── skills/{csharp,csharp-modern,react}/SKILL.md   # Bundled skills
 │       ├── evals/golden/                # cases.json + 15 diffs + a ground-truth .md each (detection + traps)
 │       └── evals/triggers/              # cases.json + 10 labelled diffs (skill selection)
 │
@@ -409,10 +409,9 @@ front, and only the selected skills have their body injected. `SKILLS` decides w
 `dotnet run -- skills` lists the catalog with validation diagnostics, and `dotnet run -- skills
 <name>` prints the exact block that skill injects — both without calling an LLM.
 
-> `assets/skills/` is **not versioned in this repository** (it is excluded locally, in
-> `.git/info/exclude`): the guidelines change often and will eventually come from a separate
-> project. A fresh clone runs with an empty catalog and stays silent about it, so golden-set
-> numbers from a clone are baseline numbers, not harness numbers.
+> The skills are versioned here for now, so a clone and the CI run with the same guidelines. They
+> are expected to give way to retrieval (RAG) over a vector store, which would fetch only the
+> rules a diff needs instead of loading a whole skill.
 
 ## Evaluation
 
