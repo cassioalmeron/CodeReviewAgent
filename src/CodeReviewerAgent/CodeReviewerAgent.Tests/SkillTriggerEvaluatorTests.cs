@@ -1,5 +1,6 @@
 ﻿using CodeReviewerAgent.Core;
 using CodeReviewerAgent.Core.Skill;
+using CodeReviewerAgent.Tests.Fakes;
 using Xunit;
 
 namespace CodeReviewerAgent.Tests;
@@ -40,7 +41,7 @@ public class SkillTriggerEvaluatorTests
     [Fact]
     public void Run_ScoresEveryBundledCase()
     {
-        var results = SkillTriggerEvaluator.Run(new FixedSelector());
+        var results = SkillTriggerEvaluator.Run(new FixedSelector(), FakeSkillSource.Default);
 
         Assert.Equal(10, results.Count);
         Assert.Contains(results, r => r.Name == "csharp-braces" && r.Expected.SequenceEqual(["csharp"]));
@@ -55,7 +56,7 @@ public class SkillTriggerEvaluatorTests
     {
         var selector = new OracleSelector();
 
-        SkillTriggerEvaluator.Run(selector);
+        SkillTriggerEvaluator.Run(selector, FakeSkillSource.Default);
 
         Assert.Contains(selector.SeenFiles, files => files.SequenceEqual(["src/Api/UserController.cs"]));
         // The full-stack case must arrive as one diff with both files, not split in two.
@@ -66,7 +67,7 @@ public class SkillTriggerEvaluatorTests
     [Fact]
     public void Run_WithASelectorThatAlwaysSaysCsharp_FailsTheNegativeCases()
     {
-        var results = SkillTriggerEvaluator.Run(new FixedSelector("csharp"));
+        var results = SkillTriggerEvaluator.Run(new FixedSelector("csharp"), FakeSkillSource.Default);
 
         Assert.True(Result(results, "csharp-braces").Passed(Catalog));
         // A .cs comment-only diff and a SQL migration expect nothing: over-triggering is a fail.
@@ -79,7 +80,7 @@ public class SkillTriggerEvaluatorTests
     [Fact]
     public void Run_WithASelectorThatSaysNothing_PassesOnlyTheNegatives()
     {
-        var results = SkillTriggerEvaluator.Run(new FixedSelector());
+        var results = SkillTriggerEvaluator.Run(new FixedSelector(), FakeSkillSource.Default);
 
         Assert.True(Result(results, "sql-migration").Passed(Catalog));
         Assert.True(Result(results, "python-script").Passed(Catalog));
@@ -93,7 +94,7 @@ public class SkillTriggerEvaluatorTests
         Environment.SetEnvironmentVariable("SKILL_EVAL_RUNS", "4");
         try
         {
-            var result = Result(SkillTriggerEvaluator.Run(new FixedSelector("csharp")), "csharp-braces");
+            var result = Result(SkillTriggerEvaluator.Run(new FixedSelector("csharp"), FakeSkillSource.Default), "csharp-braces");
 
             Assert.Equal(4, result.Runs);
             Assert.Equal(4, result.Triggers["csharp"]);
@@ -129,8 +130,8 @@ public class SkillTriggerEvaluatorTests
     [Fact]
     public void Run_CountsTheRunsWhoseAnswerCouldNotBeRead()
     {
-        var read = SkillTriggerEvaluator.Run(new FixedSelector("csharp"));
-        var unreadable = SkillTriggerEvaluator.Run(new UnreadableSelector());
+        var read = SkillTriggerEvaluator.Run(new FixedSelector("csharp"), FakeSkillSource.Default);
+        var unreadable = SkillTriggerEvaluator.Run(new UnreadableSelector(), FakeSkillSource.Default);
 
         Assert.All(read, r => Assert.Equal(0, r.Unreadable));
         Assert.All(unreadable, r => Assert.Equal(r.Runs, r.Unreadable));
@@ -140,7 +141,7 @@ public class SkillTriggerEvaluatorTests
     public void Report_FlagsAReportBuiltOnUnreadableAnswers()
     {
         var report = SkillTriggerEvaluator.Generate(
-            SkillTriggerEvaluator.Run(new UnreadableSelector()), Catalog);
+            SkillTriggerEvaluator.Run(new UnreadableSelector(), FakeSkillSource.Default), Catalog);
 
         // Negative cases "pass" when nothing is selected, so a run that never answered would
         // otherwise look like a good score.
@@ -161,7 +162,7 @@ public class SkillTriggerEvaluatorTests
         Environment.SetEnvironmentVariable("SKILL_EVAL_RUNS", "2");
         try
         {
-            var result = Result(SkillTriggerEvaluator.Run(new MeteredSelector()), "csharp-braces");
+            var result = Result(SkillTriggerEvaluator.Run(new MeteredSelector(), FakeSkillSource.Default), "csharp-braces");
 
             Assert.Equal(600, result.InputTokens);
             Assert.Equal(40, result.OutputTokens);
@@ -179,7 +180,7 @@ public class SkillTriggerEvaluatorTests
     public void Report_ReportsTokensCostAndLatency()
     {
         var report = SkillTriggerEvaluator.Generate(
-            SkillTriggerEvaluator.Run(new MeteredSelector()), Catalog);
+            SkillTriggerEvaluator.Run(new MeteredSelector(), FakeSkillSource.Default), Catalog);
 
         Assert.Contains("## Cost", report);
         Assert.Contains("Tokens", report);
@@ -191,7 +192,7 @@ public class SkillTriggerEvaluatorTests
     public void Report_WritesAReportWithTheRatesPerSet()
     {
         var report = SkillTriggerEvaluator.Generate(
-            SkillTriggerEvaluator.Run(new FixedSelector("csharp")), Catalog);
+            SkillTriggerEvaluator.Run(new FixedSelector("csharp"), FakeSkillSource.Default), Catalog);
         Assert.Contains("# Skill trigger eval", report);
         Assert.Contains("csharp-braces", report);
         Assert.Contains("**train**", report);

@@ -19,13 +19,18 @@ public class CodeReviewer
     private readonly string _diff;
     private readonly string _promptVersion;
     private readonly ISkillSelector _skillSelector;
+    private readonly ISkillSource _skills;
 
-    public CodeReviewer(ILlmClient client, string diff, string promptVersion, ISkillSelector? skillSelector = null)
+    /// <param name="skills">Where the skills come from; the files under <c>assets/skills/</c> by default.</param>
+    public CodeReviewer(
+        ILlmClient client, string diff, string promptVersion,
+        ISkillSelector? skillSelector = null, ISkillSource? skills = null)
     {
         _client = client;
         _diff = diff;
         _promptVersion = promptVersion;
         _skillSelector = skillSelector ?? SkillSelectorFactory.Create(client);
+        _skills = skills ?? new FileSkillSource();
     }
 
     /// <summary>
@@ -142,14 +147,14 @@ public class CodeReviewer
     /// </summary>
     private SkillActivation ActivateSkills(IReadOnlyList<string> files)
     {
-        var (catalog, _) = SkillCatalog.Discover();
+        var catalog = _skills.Catalog();
         if (catalog.Count == 0 || files.Count == 0)
             return SkillActivation.None;
 
         var selection = _skillSelector.Select(catalog, files);
         var activated = catalog
             .Where(s => selection.Names.Contains(s.Name, StringComparer.OrdinalIgnoreCase))
-            .Select(SkillCatalog.Activate)
+            .Select(_skills.Activate)
             .ToList();
 
         if (activated.Count > 0)

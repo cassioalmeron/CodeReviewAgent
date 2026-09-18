@@ -59,14 +59,15 @@ public static class SkillTriggerEvaluator
         PropertyNameCaseInsensitive = true,
     };
 
-    public static IReadOnlyList<SkillTriggerResult> Run(ISkillSelector selector)
+    /// <param name="skills">Where the catalog comes from; the files under <c>assets/skills/</c> by default.</param>
+    public static IReadOnlyList<SkillTriggerResult> Run(ISkillSelector selector, ISkillSource? skills = null)
     {
         var runs = int.TryParse(Environment.GetEnvironmentVariable("SKILL_EVAL_RUNS"), out var n) && n > 0 ? n : 3;
         var directory = Path.Combine(AppContext.BaseDirectory, "assets", "evals", "triggers");
         var cases = JsonSerializer.Deserialize<List<SkillTriggerCase>>(
             File.ReadAllText(Path.Combine(directory, "cases.json")), JsonOptions) ?? [];
 
-        var (catalog, _) = SkillCatalog.Discover();
+        var catalog = (skills ?? new FileSkillSource()).Catalog();
         var results = new List<SkillTriggerResult>();
 
         foreach (var triggerCase in cases)
