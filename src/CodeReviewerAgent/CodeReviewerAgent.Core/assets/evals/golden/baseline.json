@@ -1,0 +1,71 @@
+{
+  "configuration": {
+    "model": "gpt-4o-mini",
+    "skills": "globs",
+    "promptVersion": "v3",
+    "runs": 5,
+    "temperature": 0
+  },
+  "cases": {
+    "collection-spread": {
+      "successes": 0,
+      "cleanRounds": 0
+    },
+    "csharp-conventions": {
+      "successes": 5,
+      "cleanRounds": 0
+    },
+    "enum-switch-gap": {
+      "successes": 4,
+      "cleanRounds": 1
+    },
+    "enumerator-cancellation": {
+      "successes": 0,
+      "cleanRounds": 0
+    },
+    "extension-block": {
+      "successes": 0,
+      "cleanRounds": 0
+    },
+    "hardcoded-secret": {
+      "successes": 5,
+      "cleanRounds": 5
+    },
+    "mutable-struct-key": {
+      "successes": 5,
+      "cleanRounds": 4
+    },
+    "null-dereference": {
+      "successes": 4,
+      "cleanRounds": 4
+    },
+    "off-by-one": {
+      "successes": 5,
+      "cleanRounds": 5
+    },
+    "primary-ctor-capture": {
+      "successes": 1,
+      "cleanRounds": 0
+    },
+    "quadratic-loop": {
+      "successes": 5,
+      "cleanRounds": 0
+    },
+    "raw-string-literal": {
+      "successes": 0,
+      "cleanRounds": 0
+    },
+    "react-conventions": {
+      "successes": 5,
+      "cleanRounds": 5
+    },
+    "required-bypass": {
+      "successes": 5,
+      "cleanRounds": 0
+    },
+    "sql-injection": {
+      "successes": 5,
+      "cleanRounds": 0
+    }
+  }
+}

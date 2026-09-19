@@ -72,6 +72,32 @@ public class GoldenRoundStoreTests
     }
 
     /// <summary>
+    /// A round sampled at the provider's default is not a round at temperature 0. Records written
+    /// before the temperature existed read as the default, so they never leak into a run at 0.
+    /// </summary>
+    [Fact]
+    public void Find_IgnoresRoundsFromAnotherTemperature()
+    {
+        var path = TempPath();
+        try
+        {
+            new FileGoldenRoundStore(path, "gpt-4o-mini", "globs")
+                .Record("sql-injection", "v3", 0, Review("at the default"));
+            new FileGoldenRoundStore(path, "gpt-4o-mini", "globs", temperature: 0)
+                .Record("sql-injection", "v3", 1, Review("at zero"));
+
+            var atZero = new FileGoldenRoundStore(path, "gpt-4o-mini", "globs", temperature: 0);
+            var atDefault = new FileGoldenRoundStore(path, "gpt-4o-mini", "globs");
+
+            Assert.Null(atZero.Find("sql-injection", "v3", 0));
+            Assert.Equal("at zero", atZero.Find("sql-injection", "v3", 1)!.Summary);
+            Assert.Equal("at the default", atDefault.Find("sql-injection", "v3", 0)!.Summary);
+            Assert.Null(atDefault.Find("sql-injection", "v3", 1));
+        }
+        finally { File.Delete(path); }
+    }
+
+    /// <summary>
     /// A run that cannot name its own model cannot claim a stored round was produced by it. It
     /// still records, so the work is not lost; it just refuses to resume.
     /// </summary>

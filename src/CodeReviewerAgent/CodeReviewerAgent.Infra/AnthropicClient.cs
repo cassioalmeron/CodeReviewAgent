@@ -5,7 +5,9 @@ using CodeReviewerAgent.Core.Llm;
 
 namespace CodeReviewerAgent.Infra;
 
-internal class AnthropicClient(IHttpTransport transport, string model) : ILlmClient
+/// <param name="temperature">Sent only when set; null leaves the provider's default, which is what
+/// every run did before <c>LLM_TEMPERATURE</c> existed.</param>
+internal class AnthropicClient(IHttpTransport transport, string model, double? temperature = null) : ILlmClient
 {
     public MessageResponse Request(object requestBody)
     {
@@ -27,6 +29,9 @@ internal class AnthropicClient(IHttpTransport transport, string model) : ILlmCli
                 },
             };
         }
+
+        if (temperature is { } value)
+            node["temperature"] = value;
 
         var body = transport.Post("/v1/messages", node.ToJsonString());
         return JsonSerializer.Deserialize<MessageResponse>(body)

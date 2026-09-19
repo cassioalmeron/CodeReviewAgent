@@ -6,7 +6,9 @@ using CodeReviewerAgent.Core.Llm;
 
 namespace CodeReviewerAgent.Infra;
 
-internal class OllamaClient(IHttpTransport transport, string model) : ILlmClient
+/// <param name="temperature">Sent only when set; null leaves the provider's default, which is what
+/// every run did before <c>LLM_TEMPERATURE</c> existed.</param>
+internal class OllamaClient(IHttpTransport transport, string model, double? temperature = null) : ILlmClient
 {
     public MessageResponse Request(object requestBody)
     {
@@ -36,6 +38,10 @@ internal class OllamaClient(IHttpTransport transport, string model) : ILlmClient
             ["messages"] = JsonSerializer.SerializeToNode(messages),
             ["stream"] = false,
         };
+
+        // Ollama takes sampling settings under "options", not at the top level.
+        if (temperature is { } value)
+            ollamaRequest["options"] = new JsonObject { ["temperature"] = value };
 
         // Pass the JSON schema as Ollama's structured-output format.
         if (anthropic.TryGetProperty("json_schema", out var schema))

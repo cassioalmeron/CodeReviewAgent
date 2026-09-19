@@ -248,13 +248,15 @@ static void RunAll()
 static void RunGoldenSet(ILlmClient executor, string? executorModel, string? filter = null)
 {
     var repos = RepositoryFactory.Create();
+    var temperature = LlmClientFactory.ExecutorTemperature();
 
     // Each paid round is made durable as it comes back, and a run that died halfway resumes
     // instead of buying the same reviews twice. Wired here, not inside the evaluator: running
     // the set stays free of I/O unless this layer asks for it. The model comes from the factory
-    // that built the client, so what keys the resume is what will actually be called.
+    // that built the client, so what keys the resume is what will actually be called; the
+    // temperature keys it too, since a round sampled at 0 and one at the default differ.
     var store = new FileGoldenRoundStore(
-        FileGoldenRoundStore.DefaultPath, executorModel, Environment.GetEnvironmentVariable("SKILLS"));
+        FileGoldenRoundStore.DefaultPath, executorModel, Environment.GetEnvironmentVariable("SKILLS"), temperature);
     if (store.ResumableCount > 0)
         Console.WriteLine($"Resuming: {store.ResumableCount} round(s) already recorded for this configuration.");
     else if (executorModel is null)
@@ -287,7 +289,63 @@ static void RunGoldenSet(ILlmClient executor, string? executorModel, string? fil
     foreach (var r in run.Results)
         Console.WriteLine(GoldenEvaluatorReport.FormatLine(r, comparingSides));
     Console.WriteLine(GoldenEvaluatorReport.FormatTotals(run.Results));
+
+    CheckBaseline(result, run, executorModel, temperature);
 }
+
+// Plan 015. GOLDEN_BASELINE compares the run with a stored baseline and fails the process when a case
+// regressed: this is the check CI runs. GOLDEN_BASELINE_WRITE stores this run as the new baseline:
+// this is how a change is accepted on purpose. Neither set, and `eval` is exactly what it was.
+static void CheckBaseline(GoldenRunResult result, GoldenScore run, string? executorModel, double? temperature)
+{
+    var comparePath = Setting("GOLDEN_BASELINE");
+    var writePath = Setting("GOLDEN_BASELINE_WRITE");
+    if (comparePath is null && writePath is null)
+        return;
+
+    // The baseline is for PROMPT_VERSION; a comparison run's other side is not its business.
+    var promptVersion = PromptVersions()[0];
+    var side = run.Results.Where(r => r.PromptVersion == promptVersion).ToList();
+    var configuration = new GoldenConfiguration(
+        executorModel ?? run.Reviews.Select(r => r.Model).FirstOrDefault(m => m is not null) ?? "unknown",
+        run.Condition.Setting,
+        promptVersion,
+        side.Max(r => r.Runs),
+        temperature);
+
+    // Compared before written, so setting both checks against the old baseline and then replaces it.
+    if (comparePath is not null)
+    {
+        var report = GoldenRegression.Compare(GoldenBaseline.Load(comparePath), configuration, side);
+        var markdown = report.ToMarkdown();
+        Console.WriteLine();
+        Console.WriteLine(markdown);
+
+        // On GitHub Actions this file becomes the run page's summary, so the table needs no download.
+        if (Setting("GITHUB_STEP_SUMMARY") is { } summary)
+            File.AppendAllText(summary, markdown);
+
+        if (report.Failed)
+            Environment.ExitCode = 1;
+    }
+
+    if (writePath is null)
+        return;
+
+    // A filtered run covers some cases only; as a baseline it would silently drop the others.
+    if (!result.WholeSet)
+    {
+        Console.Error.WriteLine("GOLDEN_BASELINE_WRITE ignored: a filtered run cannot be a baseline for the whole set.");
+        Environment.ExitCode = 1;
+        return;
+    }
+
+    GoldenBaseline.From(configuration, side).Save(writePath);
+    Console.WriteLine($"Baseline written to {writePath} ({configuration}).");
+}
+
+static string? Setting(string name) =>
+    Environment.GetEnvironmentVariable(name) is { } value && !string.IsNullOrWhiteSpace(value) ? value : null;
 
 static void ListSkills()
 {

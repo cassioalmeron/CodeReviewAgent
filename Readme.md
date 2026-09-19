@@ -204,6 +204,7 @@ OLLAMA_TIMEOUT_SECONDS=600     # per-request limit for the local model
 # OpenAI (used when LLM_ENGINE=openai)
 OPENAI_API_KEY=your-key-here
 OPENAI_MODEL=gpt-4o-mini
+LLM_TEMPERATURE=               # optional, the review model's temperature; unset = the provider's default
 
 # OpenRouter (used when LLM_ENGINE=openrouter)
 OPENROUTER_API_KEY=your-key-here
@@ -217,6 +218,8 @@ CLAUDE_CLI_PATH=               # optional explicit path to claude.exe (claude-cl
 # Evaluation
 GOLDEN_RUNS=3                  # runs per golden case (averages out non-determinism)
 GOLDEN_PARALLELISM=4           # concurrent LLM calls in the golden set
+GOLDEN_BASELINE=               # compare `eval` with this baseline; exit 1 when a case regressed
+GOLDEN_BASELINE_WRITE=         # write this `eval` as the new baseline (whole set only)
 SKILL_EVAL_RUNS=3              # runs per trigger-eval case (`skills-eval`)
 JUDGE_MODEL=claude-sonnet-4-6  # stronger than the executor, to avoid self-preference bias
 RUBRIC_VERSION=                # assets/rubrics/judge-<version>.md; unset = v2 for `judge` (pairwise), v1 for `judge <assessmentId>` (absolute)
@@ -553,6 +556,15 @@ cost, the golden scorer and reports, the skill catalog and selectors, and the ju
 
 **CI** — `.github/workflows/build.yml` runs the .NET build and tests, and the web build and lint, on
 every push to `main` and every pull request. It calls no LLM and needs no secret.
+
+`.github/workflows/golden.yml` runs the **golden set as a regression check**, only when a prompt, a skill,
+a golden case or the workflow itself changes: gpt-4o-mini at temperature 0, skills by globs, 5 rounds,
+about US$ 0.03 per run, with `OPENAI_API_KEY` as a repository secret. It compares the run with
+`assets/evals/golden/baseline.json` and fails when a case loses 3 or more of its 5 clean rounds; the
+comparison table shows on the run's summary page. To accept a change on purpose, run `eval` locally with
+the same configuration and `GOLDEN_BASELINE_WRITE` pointing at that file, and commit it with the change.
+The tolerance and the temperature were measured, not guessed: at the default temperature, identical runs
+moved a case by up to 3 clean rounds of 5.
 
 ## Extending
 

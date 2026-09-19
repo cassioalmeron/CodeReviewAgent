@@ -23,13 +23,14 @@ public static class LlmClientFactory
     {
         var engine = Environment.GetEnvironmentVariable("LLM_ENGINE")
             ?? throw new InvalidOperationException("LLM_ENGINE is not configured. Add it to the .env file.");
+        var temperature = ExecutorTemperature();
 
         return engine.ToLowerInvariant() switch
         {
-            "ollama" => CreateOllama(),
-            "claude" => CreateClaudeWithModel(null),
-            "openai" => CreateOpenAi(),
-            "openrouter" => CreateOpenRouter(),
+            "ollama" => CreateOllama(temperature),
+            "claude" => CreateClaudeWithModel(null, temperature),
+            "openai" => CreateOpenAi(temperature),
+            "openrouter" => CreateOpenRouter(temperature),
             // These read CLAUDE_CODE_MODEL themselves and treat blank as "the CLI decides".
             // Reading the same variable here reports what was asked for; blank stays null, which
             // is the honest answer, because the choice is not visible from this side.
@@ -38,6 +39,25 @@ public static class LlmClientFactory
             _ => throw new InvalidOperationException(
                 $"Unknown LLM_ENGINE '{engine}'. Supported values: 'ollama', 'claude', 'openai', 'openrouter', 'claude-code', 'claude-cli'."),
         };
+    }
+
+    /// <summary>
+    /// <c>LLM_TEMPERATURE</c>, for the executor only: the judge is built through
+    /// <see cref="CreateClaude"/> and keeps its own settings. Unset means the provider's default,
+    /// which is 1.0 on OpenAI and the setting that varies the answer most; the golden set in CI runs
+    /// at 0 so a change is measured against the model's past and not against its dice.
+    /// </summary>
+    public static double? ExecutorTemperature()
+    {
+        var configured = Environment.GetEnvironmentVariable("LLM_TEMPERATURE");
+        if (string.IsNullOrWhiteSpace(configured))
+            return null;
+
+        return double.TryParse(configured, System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture, out var value) && value >= 0
+            ? value
+            : throw new InvalidOperationException(
+                $"LLM_TEMPERATURE '{configured}' is not a non-negative number (use a dot: 0.2).");
     }
 
     private static string? CliModel()
@@ -49,7 +69,7 @@ public static class LlmClientFactory
     // Builds a Claude (Anthropic HTTP) client. The judge uses this with a stronger model.
     public static ILlmClient CreateClaude(string? model = null) => CreateClaudeWithModel(model).Client;
 
-    private static (ILlmClient Client, string? Model) CreateClaudeWithModel(string? model)
+    private static (ILlmClient Client, string? Model) CreateClaudeWithModel(string? model, double? temperature = null)
     {
         var apiKey = Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY")
             ?? throw new InvalidOperationException("ANTHROPIC_API_KEY is not configured. Add it to the .env file.");
@@ -65,10 +85,10 @@ public static class LlmClientFactory
         http.DefaultRequestHeaders.Add("x-api-key", apiKey);
         http.DefaultRequestHeaders.Add("anthropic-version", "2023-06-01");
 
-        return (new AnthropicClient(Resilient(http), resolvedModel), resolvedModel);
+        return (new AnthropicClient(Resilient(http), resolvedModel, temperature), resolvedModel);
     }
 
-    private static (ILlmClient Client, string? Model) CreateOllama()
+    private static (ILlmClient Client, string? Model) CreateOllama(double? temperature)
     {
         var model = Environment.GetEnvironmentVariable("OLLAMA_MODEL")
             ?? throw new InvalidOperationException("OLLAMA_MODEL is not configured. Add it to the .env file.");
@@ -78,10 +98,10 @@ public static class LlmClientFactory
         // retries a timeout from scratch: a limit sized for a hosted API would throw away minutes
         // of local work on every attempt. Hosted engines keep their two minutes.
         var http = new HttpClient { BaseAddress = new Uri(host), Timeout = TimeoutFrom("OLLAMA_TIMEOUT_SECONDS", 600) };
-        return (new OllamaClient(Resilient(http), model), model);
+        return (new OllamaClient(Resilient(http), model, temperature), model);
     }
 
-    private static (ILlmClient Client, string? Model) CreateOpenAi()
+    private static (ILlmClient Client, string? Model) CreateOpenAi(double? temperature)
     {
         var apiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY")
             ?? throw new InvalidOperationException("OPENAI_API_KEY is not configured. Add it to the .env file.");
@@ -95,10 +115,10 @@ public static class LlmClientFactory
         };
         http.DefaultRequestHeaders.Add("Authorization", $"Bearer {apiKey}");
 
-        return (new OpenAiClient(Resilient(http), model), model);
+        return (new OpenAiClient(Resilient(http), model, temperature), model);
     }
 
-    private static (ILlmClient Client, string? Model) CreateOpenRouter()
+    private static (ILlmClient Client, string? Model) CreateOpenRouter(double? temperature)
     {
         var apiKey = Environment.GetEnvironmentVariable("OPENROUTER_API_KEY")
             ?? throw new InvalidOperationException("OPENROUTER_API_KEY is not configured. Add it to the .env file.");
@@ -115,7 +135,7 @@ public static class LlmClientFactory
         };
         http.DefaultRequestHeaders.Add("Authorization", $"Bearer {apiKey}");
 
-        return (new OpenRouterClient(Resilient(http), model), model);
+        return (new OpenRouterClient(Resilient(http), model, temperature), model);
     }
 
     // A per-request limit from the environment, falling back to the engine's own default.

@@ -5,7 +5,9 @@ using CodeReviewerAgent.Core.Llm;
 
 namespace CodeReviewerAgent.Infra;
 
-internal class OpenRouterClient(IHttpTransport transport, string model) : ILlmClient
+/// <param name="temperature">Sent only when set; null leaves the provider's default, which is what
+/// every run did before <c>LLM_TEMPERATURE</c> existed.</param>
+internal class OpenRouterClient(IHttpTransport transport, string model, double? temperature = null) : ILlmClient
 {
     public MessageResponse Request(object requestBody)
     {
@@ -41,6 +43,9 @@ internal class OpenRouterClient(IHttpTransport transport, string model) : ILlmCl
 
         if (anthropic.TryGetProperty("max_tokens", out var maxTokens))
             openRouterRequest["max_tokens"] = maxTokens.GetInt32();
+
+        if (temperature is { } value)
+            openRouterRequest["temperature"] = value;
 
         // Structured output: same response_format.json_schema shape as OpenAI.
         if (anthropic.TryGetProperty("json_schema", out var schema))

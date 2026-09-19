@@ -1,0 +1,62 @@
+# The golden set as a regression check (plan 015, US-014): a change to what the LLM is told cannot make
+# an old case worse. It runs only when something that changes the answer changes, and it costs about
+# US$ 0.03 per run on gpt-4o-mini. The configuration lives here, not in a .env, so changing the model
+# is an edit to this file, and that edit runs the check.
+name: golden set
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/CodeReviewerAgent/CodeReviewerAgent.Core/assets/prompts/**'
+      - 'src/CodeReviewerAgent/CodeReviewerAgent.Core/assets/skills/**'
+      - 'src/CodeReviewerAgent/CodeReviewerAgent.Core/assets/evals/golden/**'
+      - '.github/workflows/golden.yml'
+  pull_request:
+    paths:
+      - 'src/CodeReviewerAgent/CodeReviewerAgent.Core/assets/prompts/**'
+      - 'src/CodeReviewerAgent/CodeReviewerAgent.Core/assets/skills/**'
+      - 'src/CodeReviewerAgent/CodeReviewerAgent.Core/assets/evals/golden/**'
+      - '.github/workflows/golden.yml'
+  workflow_dispatch:
+
+jobs:
+  golden:
+    name: Golden set regression
+    # Pull requests from forks get no secrets, so the run could not call the model.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      LLM_ENGINE: openai
+      OPENAI_MODEL: gpt-4o-mini
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      # 0, measured in plan 015: at the default temperature identical runs moved a case by up to 3 of
+      # 5 clean rounds, and no tolerance separated a real drop from the dice.
+      LLM_TEMPERATURE: '0'
+      PROMPT_VERSION: v3
+      SKILLS: globs
+      GOLDEN_RUNS: '5'
+      GOLDEN_PARALLELISM: '4'
+      STORAGE: files
+      EVAL_OUTPUT_DIR: ${{ github.workspace }}/golden-output
+      GOLDEN_BASELINE: ${{ github.workspace }}/src/CodeReviewerAgent/CodeReviewerAgent.Core/assets/evals/golden/baseline.json
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      # Exits 1 when a case lost more clean rounds than the tolerance allows, or when the baseline was
+      # measured under another configuration. The comparison table goes to the run's summary page.
+      - name: Golden set against the baseline
+        run: dotnet run --project src/CodeReviewerAgent/CodeReviewerAgent.Console --no-launch-profile -- eval
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: golden-report
+          path: golden-output/reports/
+          if-no-files-found: ignore

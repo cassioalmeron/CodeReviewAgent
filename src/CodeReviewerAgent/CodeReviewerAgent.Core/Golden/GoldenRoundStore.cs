@@ -13,6 +13,12 @@ namespace CodeReviewerAgent.Core.Golden;
 /// wrong rubric: wrong output that looks exactly like clean output. Null model means the
 /// configuration could not be established, and matches nothing.
 /// </para>
+/// <para>
+/// <see cref="Temperature"/> is the third condition (plan 015): a round sampled at the provider's
+/// default and one at 0 are different measurements. Null means the default, which is what every
+/// record written before <c>LLM_TEMPERATURE</c> existed was, so those stay reusable by default runs
+/// and are never offered to a run at 0.
+/// </para>
 /// </summary>
 public record GoldenRoundRecord(
     string Case,
@@ -20,7 +26,8 @@ public record GoldenRoundRecord(
     int RunIndex,
     string? Model,
     string? Skills,
-    ReviewResult Review);
+    ReviewResult Review,
+    double? Temperature = null);
 
 /// <summary>
 /// Durable record of the golden set's paid rounds. <see cref="GoldenEvaluator.Run"/> takes this
@@ -62,6 +69,7 @@ public sealed class FileGoldenRoundStore : IGoldenRoundStore
     private readonly string _path;
     private readonly string? _model;
     private readonly string? _skills;
+    private readonly double? _temperature;
     private readonly Dictionary<(string, string, int), ReviewResult> _completed;
     private readonly Lock _writeLock = new();
 
@@ -72,12 +80,14 @@ public sealed class FileGoldenRoundStore : IGoldenRoundStore
     /// model it is about to call has no business claiming a stored round was produced by it.
     /// </param>
     /// <param name="skills">The <c>SKILLS</c> setting, which is the run's other condition.</param>
-    public FileGoldenRoundStore(string path, string? model, string? skills)
+    /// <param name="temperature">The executor's temperature; null is the provider's default.</param>
+    public FileGoldenRoundStore(string path, string? model, string? skills, double? temperature = null)
     {
         _path = path;
         _model = model;
         _skills = skills;
-        _completed = model is null ? [] : LoadMatching(path, model, skills);
+        _temperature = temperature;
+        _completed = model is null ? [] : LoadMatching(path, model, skills, temperature);
     }
 
     /// <summary>How many rounds a previous run already paid for and this one can skip.</summary>
@@ -88,7 +98,7 @@ public sealed class FileGoldenRoundStore : IGoldenRoundStore
 
     public void Record(string caseName, string promptVersion, int runIndex, ReviewResult review)
     {
-        var record = new GoldenRoundRecord(caseName, promptVersion, runIndex, _model, _skills, review);
+        var record = new GoldenRoundRecord(caseName, promptVersion, runIndex, _model, _skills, review, _temperature);
         var line = JsonSerializer.Serialize(record, Options);
 
         lock (_writeLock)
@@ -138,11 +148,11 @@ public sealed class FileGoldenRoundStore : IGoldenRoundStore
     /// so a re-run of the same round under the same configuration reads as the newer answer.
     /// </summary>
     public static Dictionary<(string, string, int), ReviewResult> LoadMatching(
-        string path, string model, string? skills)
+        string path, string model, string? skills, double? temperature = null)
     {
         var matching = new Dictionary<(string, string, int), ReviewResult>();
         foreach (var record in Load(path))
-            if (record.Model == model && record.Skills == skills)
+            if (record.Model == model && record.Skills == skills && record.Temperature == temperature)
                 matching[(record.Case, record.PromptVersion, record.RunIndex)] = record.Review;
         return matching;
     }
