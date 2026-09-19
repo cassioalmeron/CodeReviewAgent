@@ -120,6 +120,18 @@ public static class GoldenEvaluator
         }
     }
 
+    /// <summary>
+    /// A case's diff with its line endings made <c>\n</c>, whatever the checkout did to the file.
+    /// <para>
+    /// Git on Windows (<c>core.autocrlf</c>) hands the fixtures over with <c>\r\n</c>, and the Linux CI
+    /// runner with <c>\n</c>. A real diff, from <c>git diff</c> or a pull request, arrives with <c>\n</c>,
+    /// so that is the form the set reads. The larger cause of the first CI failure, on 19/09, was
+    /// elsewhere: <c>DiffSplitter</c> rebuilt every diff with the OS line ending, so this alone did not
+    /// make the model's input the same on both machines.
+    /// </para>
+    /// </summary>
+    internal static string LoadDiff(string path) => File.ReadAllText(path).ReplaceLineEndings("\n");
+
     // Everything both overloads need before the first call goes out. Reading the cases can throw
     // (an unknown filter name, a case with no expected severity), and it costs nothing, so it
     // happens before anything is paid for.
@@ -128,7 +140,7 @@ public static class GoldenEvaluator
     {
         var runs = int.TryParse(Environment.GetEnvironmentVariable("GOLDEN_RUNS"), out var n) && n > 0 ? n : 3;
         var cases = SelectCases(LoadCases(), filter);
-        var diffs = cases.Select(c => File.ReadAllText(Path.Combine(CasesDirectory, c.Diff))).ToList();
+        var diffs = cases.Select(c => LoadDiff(Path.Combine(CasesDirectory, c.Diff))).ToList();
 
         if (promptVersions.Count > 1)
             System.Console.WriteLine(

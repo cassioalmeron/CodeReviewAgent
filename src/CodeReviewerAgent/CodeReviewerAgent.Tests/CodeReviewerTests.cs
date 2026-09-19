@@ -23,6 +23,25 @@ public class CodeReviewerTests
     private static string SystemPrompt(FakeLlmClient client) =>
         JsonSerializer.SerializeToElement(client.LastRequestBody).GetProperty("system").GetString()!;
 
+    /// <summary>
+    /// The model reads the same diff on every operating system. A diff arriving with \r\n used to reach
+    /// the model with \r\n on Windows and \n on Linux (DiffSplitter wrote Environment.NewLine), so the
+    /// golden set measured two different inputs and its first CI run failed against a Windows baseline.
+    /// </summary>
+    [Fact]
+    public void Review_SendsTheDiffWithUnixLineEndings_WhateverItArrivedWith()
+    {
+        var client = new FakeLlmClient("{}");
+        var windowsDiff = CsharpDiff.ReplaceLineEndings("\r\n");
+
+        new CodeReviewer(client, windowsDiff, "v3", new FakeSkillSelector(), FakeSkillSource.Default).Review();
+
+        var userMessage = JsonSerializer.SerializeToElement(client.LastRequestBody)
+            .GetProperty("messages")[0].GetProperty("content").GetString()!;
+        Assert.Contains("App.cs", userMessage);
+        Assert.DoesNotContain('\r', userMessage);
+    }
+
     [Fact]
     public void Review_WithEmptyDiff_DoesNotCallClientAndReturnsNoFindings()
     {

@@ -16,8 +16,8 @@
       "cleanRounds": 0
     },
     "enum-switch-gap": {
-      "successes": 4,
-      "cleanRounds": 1
+      "successes": 0,
+      "cleanRounds": 0
     },
     "enumerator-cancellation": {
       "successes": 0,
@@ -29,35 +29,35 @@
     },
     "hardcoded-secret": {
       "successes": 5,
-      "cleanRounds": 5
+      "cleanRounds": 2
     },
     "mutable-struct-key": {
-      "successes": 5,
-      "cleanRounds": 4
+      "successes": 4,
+      "cleanRounds": 1
     },
     "null-dereference": {
-      "successes": 4,
-      "cleanRounds": 4
+      "successes": 5,
+      "cleanRounds": 3
     },
     "off-by-one": {
       "successes": 5,
       "cleanRounds": 5
     },
     "primary-ctor-capture": {
-      "successes": 1,
+      "successes": 0,
       "cleanRounds": 0
     },
     "quadratic-loop": {
       "successes": 5,
-      "cleanRounds": 0
+      "cleanRounds": 1
     },
     "raw-string-literal": {
-      "successes": 0,
-      "cleanRounds": 0
+      "successes": 5,
+      "cleanRounds": 5
     },
     "react-conventions": {
       "successes": 5,
-      "cleanRounds": 5
+      "cleanRounds": 4
     },
     "required-bypass": {
       "successes": 5,

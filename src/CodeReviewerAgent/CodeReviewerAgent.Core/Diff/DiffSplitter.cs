@@ -37,7 +37,10 @@ internal static class DiffSplitter
             if (current is null)
                 continue;
 
-            current.AppendLine(line);
+            // '\n', never AppendLine: AppendLine writes Environment.NewLine, so on Windows this put back
+            // the \r the line above had just removed, and the model read a different diff on Windows
+            // than on Linux. Found on 19/09, when the first CI run failed against a Windows baseline.
+            current.Append(line).Append('\n');
 
             // Prefer the new path; fall back to the old path for deletions.
             if (line.StartsWith("+++ "))
