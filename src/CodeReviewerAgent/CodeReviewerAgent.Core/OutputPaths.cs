@@ -6,8 +6,8 @@ namespace CodeReviewerAgent.Core;
 /// These all used to be anchored to <see cref="AppContext.BaseDirectory"/>, which is the build
 /// output. That put months of paid evaluation history one <c>clean</c> away from gone, and it
 /// also put the eval artefacts in the same <c>reviews</c> folder as the file-backed repository's
-/// own store, so the two were indistinguishable on disk. <c>EVAL_OUTPUT_DIR</c> moves the eval
-/// side out; the repository store stays where it is, which separates them.
+/// own store, so the two were indistinguishable on disk. A configured root moves the eval side
+/// out; the repository store stays where it is, which separates them.
 /// </para>
 /// <para>
 /// The default is the old location on purpose: someone who clones the repository and runs it
@@ -15,35 +15,40 @@ namespace CodeReviewerAgent.Core;
 /// outside the working tree.
 /// </para>
 /// <para>
-/// Resolved once per process. The environment is read on first access, not at load time, which
-/// matters because the entry point loads the env file as its first statement — a value captured
-/// before that would be the one from before the configuration existed. The consequence is that
-/// changing <c>EVAL_OUTPUT_DIR</c> after something has already asked for a path has no effect
-/// for the rest of the process.
+/// The root arrives through <see cref="Configure"/>, called once by the entry point after it has
+/// loaded the configuration file. Core no longer reads <c>EVAL_OUTPUT_DIR</c> itself (US-018):
+/// reading it here made the value depend on which line of the process ran first, and it froze
+/// whatever the first test class to touch a path happened to have set. Configuring after
+/// something has already asked for a path still has no effect on that path, so the call belongs
+/// at startup and nowhere else.
 /// </para>
 /// </summary>
 public static class OutputPaths
 {
-    private static readonly Lazy<string> RootPath = new(Resolve);
-    private static readonly Lazy<string> ReportsPath = new(() => Path.Combine(Root, "reports"));
-    private static readonly Lazy<string> ReviewsPath = new(() => Path.Combine(Root, "reviews"));
+    private static string? _root;
 
-    public static string Root => RootPath.Value;
+    public static string Root => _root ?? AppContext.BaseDirectory;
 
     /// <summary>Generated reports, one file per run.</summary>
-    public static string Reports => ReportsPath.Value;
+    public static string Reports => Path.Combine(Root, "reports");
 
     /// <summary>Raw reviews and judgments, the durable input a report can be rebuilt from.</summary>
-    public static string Reviews => ReviewsPath.Value;
+    public static string Reviews => Path.Combine(Root, "reviews");
 
     /// <summary>
-    /// The resolution rule, kept separate and reachable from the tests. The properties above
-    /// answer from a value frozen on first access, so a test that set the variable and then read
-    /// them would be pinning whichever test ran first, not the rule. This is the rule.
+    /// Sets the root for every path above. Null or blank keeps the default, which is the build
+    /// output directory.
     /// </summary>
-    internal static string Resolve() =>
-        Environment.GetEnvironmentVariable("EVAL_OUTPUT_DIR") is { } configured
-        && !string.IsNullOrWhiteSpace(configured)
-            ? configured.Trim()
-            : AppContext.BaseDirectory;
+    public static void Configure(string? root) => _root = Normalize(root);
+
+    /// <summary>
+    /// The rule that turns a configured value into a root, kept separate and reachable from the
+    /// tests: the trimming and the blank-is-unset case are pinned here, without a test having to
+    /// move the process-wide state the properties above answer from.
+    /// </summary>
+    internal static string Resolve(string? configured) =>
+        Normalize(configured) ?? AppContext.BaseDirectory;
+
+    private static string? Normalize(string? configured) =>
+        string.IsNullOrWhiteSpace(configured) ? null : configured.Trim();
 }

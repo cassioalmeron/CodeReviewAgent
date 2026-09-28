@@ -9,7 +9,6 @@ namespace CodeReviewerAgent.Tests;
 /// The trigger eval over the bundled cases, driven by stub selectors — no LLM involved, so the
 /// pass rule and the plumbing are exercised without spending a call.
 /// </summary>
-[Collection(EnvironmentCollection.Name)]
 public class SkillTriggerEvaluatorTests
 {
     private static readonly string[] Catalog = ["csharp", "react"];
@@ -87,24 +86,21 @@ public class SkillTriggerEvaluatorTests
         Assert.False(Result(results, "csharp-braces").Passed(Catalog));
     }
 
+    /// <summary>
+    /// The round count is an argument, so this no longer moves SKILL_EVAL_RUNS in the process
+    /// environment to say "four" (US-018).
+    /// </summary>
     [Fact]
     public void Run_CountsTriggersPerRun()
     {
-        var previous = Environment.GetEnvironmentVariable("SKILL_EVAL_RUNS");
-        Environment.SetEnvironmentVariable("SKILL_EVAL_RUNS", "4");
-        try
-        {
-            var result = Result(SkillTriggerEvaluator.Run(new FixedSelector("csharp"), FakeSkillSource.Default), "csharp-braces");
+        var result = Result(
+            SkillTriggerEvaluator.Run(new FixedSelector("csharp"), FakeSkillSource.Default, runs: 4),
+            "csharp-braces");
 
-            Assert.Equal(4, result.Runs);
-            Assert.Equal(4, result.Triggers["csharp"]);
-            Assert.Equal(0, result.Triggers["react"]);
-            Assert.Equal(1.0, result.Rate("csharp"));
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable("SKILL_EVAL_RUNS", previous);
-        }
+        Assert.Equal(4, result.Runs);
+        Assert.Equal(4, result.Triggers["csharp"]);
+        Assert.Equal(0, result.Triggers["react"]);
+        Assert.Equal(1.0, result.Rate("csharp"));
     }
 
     [Fact]
@@ -158,22 +154,15 @@ public class SkillTriggerEvaluatorTests
     [Fact]
     public void Run_SumsTheUsageOfEveryRunOfACase()
     {
-        var previous = Environment.GetEnvironmentVariable("SKILL_EVAL_RUNS");
-        Environment.SetEnvironmentVariable("SKILL_EVAL_RUNS", "2");
-        try
-        {
-            var result = Result(SkillTriggerEvaluator.Run(new MeteredSelector(), FakeSkillSource.Default), "csharp-braces");
+        var result = Result(
+            SkillTriggerEvaluator.Run(new MeteredSelector(), FakeSkillSource.Default, runs: 2),
+            "csharp-braces");
 
-            Assert.Equal(600, result.InputTokens);
-            Assert.Equal(40, result.OutputTokens);
-            Assert.Equal(0.0008m, result.Cost);
-            // Measured around the call, so it exists even for strategies that report no usage.
-            Assert.True(result.LatencyMs >= 0);
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable("SKILL_EVAL_RUNS", previous);
-        }
+        Assert.Equal(600, result.InputTokens);
+        Assert.Equal(40, result.OutputTokens);
+        Assert.Equal(0.0008m, result.Cost);
+        // Measured around the call, so it exists even for strategies that report no usage.
+        Assert.True(result.LatencyMs >= 0);
     }
 
     [Fact]

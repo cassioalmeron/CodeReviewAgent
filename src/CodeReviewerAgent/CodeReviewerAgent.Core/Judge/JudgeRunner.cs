@@ -43,12 +43,25 @@ public static class JudgeRunner
     /// How many times each pair is judged. Each execution re-draws the slot assignment, so the
     /// N also samples position bias instead of merely repeating it (Design Decision 3, plan 015).
     /// </param>
-    public static void Run(ILlmClient judgeClient, int judgeRuns)
+    /// <param name="judgeModel">
+    /// The model doing the judging, stronger than the executor to avoid self-preference bias. It
+    /// is also part of what keys a resume, so it is stated rather than read from the environment
+    /// here (US-018): a run that resumed under a different model would blend two judges.
+    /// </param>
+    /// <param name="rubricVersion">Which versioned rubric the judge scores against.</param>
+    /// <param name="thinkingDisabled">Whether to tell the model not to reason before answering.</param>
+    /// <param name="progress">
+    /// Where the run's progress goes, line by line, because a paid loop that says nothing for
+    /// twenty minutes is indistinguishable from a hung one. Null stays silent.
+    /// </param>
+    public static void Run(
+        ILlmClient judgeClient, int judgeRuns, string judgeModel, string rubricVersion,
+        bool thinkingDisabled = false, IProgress<string>? progress = null)
     {
         var resultsPath = Path.Combine(OutputPaths.Reviews, "eval-results.json");
         if (!File.Exists(resultsPath))
         {
-            System.Console.WriteLine("No eval-results.json found. Run `eval` first.");
+            progress?.Report("No eval-results.json found. Run `eval` first.");
             return;
         }
 
@@ -56,15 +69,11 @@ public static class JudgeRunner
             File.ReadAllText(resultsPath), LoadOptions) ?? [];
         if (reviews.Count == 0)
         {
-            System.Console.WriteLine("eval-results.json has no reviews.");
+            progress?.Report("eval-results.json has no reviews.");
             return;
         }
 
-        var judgeModel = Environment.GetEnvironmentVariable("JUDGE_MODEL") ?? "claude-sonnet-4-6";
-        // v2 is the pairwise rubric (reasoning first, A/B/tie verdicts). The stored-assessment
-        // path is untouched by this plan and keeps resolving its own default independently ("v1").
-        var rubricVersion = Environment.GetEnvironmentVariable("RUBRIC_VERSION") ?? "v2";
-        var judge = new Judge(judgeClient, rubricVersion);
+        var judge = new Judge(judgeClient, rubricVersion, thinkingDisabled);
 
         var plan = PlanPairs(reviews);
         var resultsFile = JudgeResultsStore.DefaultPath;
@@ -72,10 +81,10 @@ public static class JudgeRunner
             JudgeResultsStore.Load(resultsFile), judgeModel, rubricVersion);
         var pending = Pending(plan, judgeRuns, completed);
         if (completed.Count > 0)
-            System.Console.WriteLine(
+            progress?.Report(
                 $"Resuming: {completed.Count} execution(s) already recorded, {pending.Count} remaining.");
 
-        System.Console.WriteLine("=== Pairwise judge ===");
+        progress?.Report("=== Pairwise judge ===");
         try
         {
             foreach (var (diff, label, pairIndex, runIndex, reviewA, reviewB) in pending)
@@ -86,14 +95,14 @@ public static class JudgeRunner
                     resultsFile,
                     new JudgeExecutionRecord(
                         diff, label, pairIndex, runIndex, judgeModel, rubricVersion, outcome));
-                System.Console.WriteLine($"{label}: pair {pairIndex + 1}, run {runIndex + 1}/{judgeRuns} — judged");
+                progress?.Report($"{label}: pair {pairIndex + 1}, run {runIndex + 1}/{judgeRuns} — judged");
             }
         }
         finally
         {
             // Whatever made it to disk gets a report, crash or not — the point of persisting as
             // we go is that a fatal error never loses judgments that were already paid for.
-            SaveReport(resultsFile, judgeModel, rubricVersion, judgeRuns, plan.Count);
+            SaveReport(resultsFile, judgeModel, rubricVersion, judgeRuns, plan.Count, progress);
         }
     }
 
@@ -116,7 +125,8 @@ public static class JudgeRunner
     // Reloads whatever is durably on disk — not the in-memory results of this run, which may be
     // incomplete if this is running inside a `finally` after a fatal error — and reports on that.
     private static void SaveReport(
-        string resultsFile, string judgeModel, string rubricVersion, int judgeRuns, int pairsPlanned)
+        string resultsFile, string judgeModel, string rubricVersion, int judgeRuns, int pairsPlanned,
+        IProgress<string>? progress)
     {
         var allRecords = JudgeResultsStore.Load(resultsFile);
         var records = JudgeResultsStore.ForConfiguration(allRecords, judgeModel, rubricVersion);
@@ -126,12 +136,12 @@ public static class JudgeRunner
         // identical to one where this run judged fewer pairs than it meant to.
         var foreign = allRecords.Count - records.Count;
         if (foreign > 0)
-            System.Console.WriteLine(
+            progress?.Report(
                 $"Ignoring {foreign} execution(s) judged under a different model or rubric.");
 
         if (records.Count == 0)
         {
-            System.Console.WriteLine("No judge results recorded; nothing to report.");
+            progress?.Report("No judge results recorded; nothing to report.");
             return;
         }
 
@@ -143,10 +153,10 @@ public static class JudgeRunner
         var judgedPairs = PairwiseJudgeReport.ToJudgedPairs(records);
         var reportPath = PairwiseJudgeReport.Save(judgedPairs, judgeModel, rubricVersion, judgeRuns, partial);
 
-        System.Console.WriteLine(
+        progress?.Report(
             $"Judge: {judgedPairs.Count} pairs, {records.Count} executions — " +
             $"{Utils.Money(records.Sum(r => r.Outcome.Cost))}, {records.Sum(r => r.Outcome.LatencyMs)} ms");
-        System.Console.WriteLine($"Judge report saved to {reportPath}");
+        progress?.Report($"Judge report saved to {reportPath}");
     }
 
     // Every (diff, pairIndex) this run intends to judge, in the order eval-results.json presents

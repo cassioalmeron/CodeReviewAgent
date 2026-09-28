@@ -3,11 +3,8 @@ namespace CodeReviewerAgent.Core.Diff;
 /// <summary>
 /// The diff of a real pull request, fetched via the GitHub CLI (`gh pr diff`).
 /// </summary>
-public class PullRequestDiffSource : IDiffSource
+/// <param name="repositoryDirectory">Where to run the GitHub CLI; blank means the current directory.</param>
+public class PullRequestDiffSource(int prNumber, string repositoryDirectory = "") : IDiffSource
 {
-    private readonly int _prNumber;
-
-    public PullRequestDiffSource(int prNumber) => _prNumber = prNumber;
-
-    public string GetDiff() => ProcessRunner.Run("gh", $"pr diff {_prNumber}");
+    public string GetDiff() => ProcessRunner.Run("gh", repositoryDirectory, $"pr diff {prNumber}");
 }

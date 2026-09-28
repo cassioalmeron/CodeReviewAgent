@@ -4,18 +4,17 @@ using Xunit;
 namespace CodeReviewerAgent.Tests;
 
 /// <summary>
-/// The whole point of <c>EVAL_OUTPUT_DIR</c>: months of paid evaluation history stop living in
-/// the build output, where a clean rebuild erases them. Nothing else in the suite pins that
+/// The whole point of the configured output root: months of paid evaluation history stop living
+/// in the build output, where a clean rebuild erases them. Nothing else in the suite pins that
 /// down, and a silent regression would send the archive back to <c>bin</c> without a test going
 /// red.
 /// <para>
-/// These exercise <see cref="OutputPaths.Resolve"/> rather than the properties. The properties
-/// answer from a value resolved once per process, which is right for the application (the
-/// environment is loaded at startup and never changes) and useless to assert against: whichever
-/// test touched the class first would decide the answer for all the others.
+/// These exercise <see cref="OutputPaths.Resolve"/>, the rule, rather than the properties, which
+/// answer from a value the entry point sets once at startup. The rule takes the value as an
+/// argument now, so nothing here moves the process environment and the class no longer has to
+/// serialize against the rest of the suite (US-018).
 /// </para>
 /// </summary>
-[Collection(EnvironmentCollection.Name)]
 public class OutputPathsTests
 {
     [Fact]
@@ -23,7 +22,7 @@ public class OutputPathsTests
     {
         var configured = Path.Combine(Path.GetTempPath(), "cra-output-probe");
 
-        Assert.Equal(configured, WithVariable(configured, OutputPaths.Resolve));
+        Assert.Equal(configured, OutputPaths.Resolve(configured));
     }
 
     /// <summary>
@@ -32,20 +31,20 @@ public class OutputPathsTests
     /// </summary>
     [Fact]
     public void Resolve_FallsBackToTheBuildOutputWhenUnset() =>
-        Assert.Equal(AppContext.BaseDirectory, WithVariable(null, OutputPaths.Resolve));
+        Assert.Equal(AppContext.BaseDirectory, OutputPaths.Resolve(null));
 
     /// <summary>Blank is not a directory: whitespace reads as unset, never as the drive root.</summary>
     [Fact]
     public void Resolve_ReadsBlankAsUnset() =>
-        Assert.Equal(AppContext.BaseDirectory, WithVariable("   ", OutputPaths.Resolve));
+        Assert.Equal(AppContext.BaseDirectory, OutputPaths.Resolve("   "));
 
-    /// <summary>Trailing whitespace in the file is the author's, not part of the path.</summary>
+    /// <summary>Trailing whitespace in the configuration file is the author's, not part of the path.</summary>
     [Fact]
     public void Resolve_TrimsWhatItReads()
     {
         var configured = Path.Combine(Path.GetTempPath(), "cra-output-probe");
 
-        Assert.Equal(configured, WithVariable($"  {configured}  ", OutputPaths.Resolve));
+        Assert.Equal(configured, OutputPaths.Resolve($"  {configured}  "));
     }
 
     /// <summary>
@@ -57,16 +56,5 @@ public class OutputPathsTests
     {
         Assert.Equal(Path.Combine(OutputPaths.Root, "reports"), OutputPaths.Reports);
         Assert.Equal(Path.Combine(OutputPaths.Root, "reviews"), OutputPaths.Reviews);
-    }
-
-    private static string WithVariable(string? value, Func<string> read)
-    {
-        var previous = Environment.GetEnvironmentVariable("EVAL_OUTPUT_DIR");
-        try
-        {
-            Environment.SetEnvironmentVariable("EVAL_OUTPUT_DIR", value);
-            return read();
-        }
-        finally { Environment.SetEnvironmentVariable("EVAL_OUTPUT_DIR", previous); }
     }
 }

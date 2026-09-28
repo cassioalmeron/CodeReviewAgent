@@ -12,19 +12,24 @@ namespace CodeReviewerAgent.Core.Golden;
 /// </summary>
 public static class GoldenEvaluatorReport
 {
+    /// <summary>Where publishing a finished run put what it wrote.</summary>
+    /// <param name="ReportPath">The Markdown report covering every round.</param>
+    /// <param name="ReviewsPath">The raw reviews, which are the judge's input.</param>
+    public readonly record struct GoldenArtefacts(string ReportPath, string ReviewsPath);
+
     /// <summary>
     /// Publishes a finished run: one report covering every round, each labelled with its golden
     /// verdict and the rate summary appended as a footer, plus the raw reviews for the judge.
+    /// Both paths are returned rather than announced: what reaches a terminal is decided by
+    /// whoever owns one (US-018).
     /// </summary>
-    public static string SaveReport(GoldenScore run)
+    public static GoldenArtefacts SaveReport(GoldenScore run)
     {
         var reportPath = ReportGenerator.Save(
             [.. run.Reviews], BuildFooter(run.Results, run.Condition),
             r => run.Verdicts.GetValueOrDefault(r));
-        System.Console.WriteLine($"Report saved to {reportPath}");
 
-        PersistReviews(run.Reviews);
-        return reportPath;
+        return new GoldenArtefacts(reportPath, PersistReviews(run.Reviews));
     }
 
     // Persist the raw reviews so the judge can score them in a separate run, without
@@ -35,7 +40,7 @@ public static class GoldenEvaluatorReport
     // round as it comes back, so a run that dies loses nothing it paid for and resumes from what
     // is on disk. This file is the judge's input, rebuilt from a finished run — not the durable
     // record of one.
-    private static void PersistReviews(IReadOnlyList<ReviewResult> reviews)
+    private static string PersistReviews(IReadOnlyList<ReviewResult> reviews)
     {
         var directory = OutputPaths.Reviews;
         Directory.CreateDirectory(directory);
@@ -47,7 +52,7 @@ public static class GoldenEvaluatorReport
             Converters = { new JsonStringEnumConverter() },
         };
         File.WriteAllText(path, JsonSerializer.Serialize(reviews, options));
-        System.Console.WriteLine($"Eval results saved to {path}");
+        return path;
     }
 
     // A single result line, shared by the console output and the report footer:

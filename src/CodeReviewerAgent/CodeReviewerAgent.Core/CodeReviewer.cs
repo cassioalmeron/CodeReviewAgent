@@ -17,32 +17,33 @@ public class CodeReviewer
 
     private readonly ILlmClient _client;
     private readonly string _diff;
-    private readonly string _promptVersion;
+    private readonly ReviewSettings _settings;
     private readonly ISkillSelector _skillSelector;
     private readonly ISkillSource _skills;
+    private readonly IProgress<string>? _progress;
 
+    /// <param name="settings">
+    /// Prompt version, engine and skill strategy. These used to be read from the environment
+    /// inside this class and its collaborators (US-018).
+    /// </param>
     /// <param name="skills">Where the skills come from; the files under <c>assets/skills/</c> by default.</param>
+    /// <param name="progress">
+    /// Where a notice that only makes sense mid-flow goes, such as a diff with nothing left to
+    /// review. Everything the caller can see in the returned result is left for the caller to
+    /// report; null stays silent, which is what the golden set's parallel rounds want.
+    /// </param>
     public CodeReviewer(
-        ILlmClient client, string diff, string promptVersion,
-        ISkillSelector? skillSelector = null, ISkillSource? skills = null)
+        ILlmClient client, string diff, ReviewSettings settings,
+        ISkillSelector? skillSelector = null, ISkillSource? skills = null,
+        IProgress<string>? progress = null)
     {
         _client = client;
         _diff = diff;
-        _promptVersion = promptVersion;
-        _skillSelector = skillSelector ?? SkillSelectorFactory.Create(client);
+        _settings = settings;
+        _skillSelector = skillSelector ?? SkillSelectorFactory.Create(
+            client, settings.Skills, settings.SkillPromptVersion, settings.Engine, progress);
         _skills = skills ?? new FileSkillSource();
-    }
-
-    /// <summary>
-    /// Runs a review and writes its Markdown report, returning the result. Keeps
-    /// report generation out of the core <see cref="Review"/> flow.
-    /// </summary>
-    public static ReviewResult ReviewAndReport(ILlmClient client, string diff, string promptVersion)
-    {
-        var result = new CodeReviewer(client, diff, promptVersion).Review();
-        var reportPath = ReportGenerator.Save(result);
-        System.Console.WriteLine($"Report saved to {reportPath}");
-        return result;
+        _progress = progress;
     }
 
     public ReviewResult Review()
@@ -51,13 +52,13 @@ public class CodeReviewer
         var diff = DiffFilter.ExcludeMarkdown(_diff);
         if (string.IsNullOrWhiteSpace(diff))
         {
-            System.Console.WriteLine("No changes to review.");
+            _progress?.Report("No changes to review.");
             return new ReviewResult(null, []);
         }
 
         // Send the diff to the LLM, using the versioned system prompt and a JSON
         // schema so the model returns structured output (summary + findings).
-        var systemPrompt = LoadSystemPrompt(_promptVersion);
+        var systemPrompt = LoadSystemPrompt(_settings.PromptVersion);
 
         // The clock covers both LLM calls: the selection below and the review itself.
         var stopwatch = Stopwatch.StartNew();
@@ -66,7 +67,7 @@ public class CodeReviewer
         // reports convention violations as findings.
         var files = DiffSplitter.ByFile(diff).Select(f => f.Path).Distinct().ToList();
         var skills = ActivateSkills(files);
-        systemPrompt += SkillPrompt.Guidelines(skills.Skills, SkillPrompt.Version);
+        systemPrompt += SkillPrompt.Guidelines(skills.Skills, _settings.SkillPromptVersion);
 
         var requestBody = new
         {
@@ -95,17 +96,12 @@ public class CodeReviewer
         var parsedDiff = DiffParser.Parse(diff);
         var findings = FindingValidator.Validate(rawFindings, parsedDiff);
 
-        if (!string.IsNullOrWhiteSpace(result.Summary))
-            System.Console.WriteLine(result.Summary);
-        DisplayFindings(findings);
-
         // The selection call is part of the review: its tokens and cost are folded into the
         // totals, so an assessment never reports less than the run actually spent.
         var inputTokens = (response?.Usage?.InputTokens ?? 0) + skills.InputTokens;
         var outputTokens = (response?.Usage?.OutputTokens ?? 0) + skills.OutputTokens;
-        var engine = Environment.GetEnvironmentVariable("LLM_ENGINE");
         var cost = (response?.Cost
-            ?? CostCalculator.Estimate(engine, response?.Model,
+            ?? CostCalculator.Estimate(_settings.Engine, response?.Model,
                 response?.Usage?.InputTokens ?? 0, response?.Usage?.OutputTokens ?? 0))
             + skills.Cost;
 
@@ -117,9 +113,9 @@ public class CodeReviewer
             // What the grounding threw away. It is the only trace left of a finding that was about
             // the right problem but cited a line the diff does not add.
             DiscardedFindings = rawFindings.Count - findings.Count,
-            Engine = engine,
+            Engine = _settings.Engine,
             Model = response?.Model,
-            PromptVersion = _promptVersion,
+            PromptVersion = _settings.PromptVersion,
             Skills = skills.Names,
             Cost = cost,
             LatencyMs = stopwatch.ElapsedMilliseconds,
@@ -156,9 +152,6 @@ public class CodeReviewer
             .Where(s => selection.Names.Contains(s.Name, StringComparer.OrdinalIgnoreCase))
             .Select(_skills.Activate)
             .ToList();
-
-        if (activated.Count > 0)
-            System.Console.WriteLine($"Skills: {string.Join(", ", activated.Select(s => s.Name))}");
 
         return new SkillActivation(
             activated, selection.InputTokens, selection.OutputTokens, selection.Cost);
@@ -214,15 +207,6 @@ public class CodeReviewer
         {
             return new ReviewResult(null, null);
         }
-    }
-
-    private static void DisplayFindings(List<Finding> findings)
-    {
-        System.Console.WriteLine();
-        System.Console.WriteLine($"Findings: {findings.Count}");
-        foreach (var f in findings)
-            System.Console.WriteLine(
-                $"  [{f.Severity}] {f.File}:{f.Line} ({f.Category}) — {f.Problem} -> {f.Suggestion}");
     }
 
 }

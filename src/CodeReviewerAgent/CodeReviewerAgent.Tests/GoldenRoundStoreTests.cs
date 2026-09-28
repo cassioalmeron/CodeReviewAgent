@@ -13,7 +13,6 @@ namespace CodeReviewerAgent.Tests;
 /// produced it, because a round silently borrowed from another model is a wrong result that
 /// looks exactly like a right one.
 /// </summary>
-[Collection(EnvironmentCollection.Name)]
 public class GoldenRoundStoreTests
 {
     private static ReviewResult Review(string summary) =>
@@ -147,13 +146,8 @@ public class GoldenRoundStoreTests
     {
         var path = TempPath();
         var dbPath = Path.Combine(Path.GetTempPath(), $"cra-golden-{Guid.NewGuid():N}.db");
-        var previousRuns = Environment.GetEnvironmentVariable("GOLDEN_RUNS");
-        var previousSkills = Environment.GetEnvironmentVariable("SKILLS");
         try
         {
-            Environment.SetEnvironmentVariable("GOLDEN_RUNS", "1");
-            Environment.SetEnvironmentVariable("SKILLS", "off");
-
             using var context = new CodeReviewDbContext(
                 o => new SqliteProviderStrategy().Configure(o, $"Data Source={dbPath}"));
             context.Database.Migrate();
@@ -175,20 +169,21 @@ public class GoldenRoundStoreTests
         }
         finally
         {
-            Environment.SetEnvironmentVariable("GOLDEN_RUNS", previousRuns);
-            Environment.SetEnvironmentVariable("SKILLS", previousSkills);
             File.Delete(path);
             try { File.Delete(dbPath); } catch { /* pooled connection may hold the file */ }
         }
     }
 
+    // One round, skills off: what this class measures is the reuse, not the selection. It used to
+    // be GOLDEN_RUNS and SKILLS in the process environment (US-018).
     private static void RunOnce(CodeReviewDbContext context, ILlmClient client, IGoldenRoundStore store) =>
         GoldenEvaluator.Run(
             client,
             TestRepositories.For(context),
             ["v3"],
             filter: null,
-            store: store);
+            store: store,
+            settings: new GoldenSettings(Runs: 1, Skills: "off"));
 
     /// <summary>Answers anything, and counts how many times it was asked.</summary>
     private sealed class CountingLlmClient(string? model) : ILlmClient

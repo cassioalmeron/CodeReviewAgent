@@ -6,7 +6,8 @@ namespace CodeReviewerAgent.Core;
 /// </summary>
 public static class PrPublisher
 {
-    public static void Publish(int prNumber, ReviewResult review)
+    /// <param name="repositoryDirectory">Where to run the GitHub CLI; blank means the current directory.</param>
+    public static void Publish(int prNumber, ReviewResult review, string repositoryDirectory = "")
     {
         var body = PrCommentFormatter.Format(review);
 
@@ -15,13 +16,12 @@ public static class PrPublisher
         File.WriteAllText(tempFile, body);
         try
         {
-            ProcessRunner.Run("gh", "pr", "comment", prNumber.ToString(), "--body-file", tempFile);
+            ProcessRunner.Run(
+                "gh", repositoryDirectory, "pr", "comment", prNumber.ToString(), "--body-file", tempFile);
         }
         finally
         {
             File.Delete(tempFile);
         }
-
-        System.Console.WriteLine($"Published review to PR #{prNumber}.");
     }
 }

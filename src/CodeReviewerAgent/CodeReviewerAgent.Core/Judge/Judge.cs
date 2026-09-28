@@ -106,7 +106,9 @@ public class Judge
     };
 
     /// <summary>
-    /// Whether to ask the model explicitly not to reason before answering.
+    /// Whether to ask the model explicitly not to reason before answering. The entry point
+    /// resolves it from <c>JUDGE_THINKING</c> and hands it in; this class used to read that
+    /// variable itself (US-018).
     /// <para>
     /// Omitting the parameter does not mean the same thing on every model, and that bit us:
     /// generation 4.6 runs without extended thinking when it is absent, generation 5 runs adaptive
@@ -116,17 +118,15 @@ public class Judge
     /// that changes its mind measures nothing, so this is stated rather than inherited.
     /// </para>
     /// </summary>
-    private static bool ThinkingDisabled =>
-        string.Equals(Environment.GetEnvironmentVariable("JUDGE_THINKING"), "off",
-            StringComparison.OrdinalIgnoreCase);
-
     private readonly ILlmClient _client;
     private readonly string _rubricVersion;
+    private readonly bool _thinkingDisabled;
 
-    public Judge(ILlmClient client, string rubricVersion)
+    public Judge(ILlmClient client, string rubricVersion, bool thinkingDisabled = false)
     {
         _client = client;
         _rubricVersion = rubricVersion;
+        _thinkingDisabled = thinkingDisabled;
     }
 
     /// <summary>
@@ -137,7 +137,7 @@ public class Judge
     /// would send one where none was intended.
     /// </para>
     /// </summary>
-    private static Dictionary<string, object> BuildRequest(string rubric, object schema, string userContent)
+    private Dictionary<string, object> BuildRequest(string rubric, object schema, string userContent)
     {
         var request = new Dictionary<string, object>
         {
@@ -147,7 +147,7 @@ public class Judge
             ["messages"] = new[] { new { role = "user", content = userContent } },
         };
 
-        if (ThinkingDisabled)
+        if (_thinkingDisabled)
             request["thinking"] = new { type = "disabled" };
 
         return request;

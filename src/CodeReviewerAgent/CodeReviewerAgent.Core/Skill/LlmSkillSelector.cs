@@ -15,7 +15,19 @@ namespace CodeReviewerAgent.Core.Skill;
 /// as <c>SKILLS=globs</c>.
 /// </para>
 /// </summary>
-public sealed class LlmSkillSelector(ILlmClient client) : ISkillSelector
+/// <param name="skillPromptVersion">Which versioned selection prompt to send.</param>
+/// <param name="engine">
+/// The engine name, used to estimate the cost of the selection call when the client reports none.
+/// </param>
+/// <param name="progress">
+/// Where the unreadable-answer notice goes. Null stays silent, which is what a parallel run
+/// wants: the golden set calls this once per round and interleaved notices would be noise.
+/// </param>
+public sealed class LlmSkillSelector(
+    ILlmClient client,
+    string skillPromptVersion = SkillPrompt.DefaultVersion,
+    string? engine = null,
+    IProgress<string>? progress = null) : ISkillSelector
 {
     // The answer itself is a dozen tokens, but models that reason before answering spend the
     // budget on the way there — and a truncated response is an unreadable one. A run pegged at
@@ -29,7 +41,7 @@ public sealed class LlmSkillSelector(ILlmClient client) : ISkillSelector
         var requestBody = new
         {
             max_tokens = MaxTokens,
-            system = SkillPrompt.Selection(catalog, SkillPrompt.Version),
+            system = SkillPrompt.Selection(catalog, skillPromptVersion),
             json_schema = new
             {
                 type = "object",
@@ -60,7 +72,6 @@ public sealed class LlmSkillSelector(ILlmClient client) : ISkillSelector
         // of exactly what needs measuring.
         var inputTokens = response?.Usage?.InputTokens ?? 0;
         var outputTokens = response?.Usage?.OutputTokens ?? 0;
-        var engine = Environment.GetEnvironmentVariable("LLM_ENGINE");
         var cost = response?.Cost
             ?? CostCalculator.Estimate(engine, response?.Model, inputTokens, outputTokens);
 
@@ -69,7 +80,7 @@ public sealed class LlmSkillSelector(ILlmClient client) : ISkillSelector
         {
             // The answer itself, not just the verdict: without seeing what came back there is
             // no way to tell prose from a truncated payload from an unexpected shape.
-            System.Console.WriteLine(
+            progress?.Report(
                 $"Skill selection unreadable — no skills loaded for this review. Got: {Preview(content)}");
             return new SkillSelection([], inputTokens, outputTokens, cost) { Unreadable = true };
         }

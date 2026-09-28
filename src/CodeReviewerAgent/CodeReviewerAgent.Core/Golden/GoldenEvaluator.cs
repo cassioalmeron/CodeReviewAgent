@@ -63,9 +63,9 @@ public static class GoldenEvaluator
     /// </summary>
     public static GoldenRunResult Run(
         ILlmClient client, RepositoryContext repositories, IReadOnlyList<string> promptVersions,
-        string? filter = null, IGoldenRoundStore? store = null)
+        string? filter = null, IGoldenRoundStore? store = null, GoldenSettings? settings = null)
     {
-        var result = Run(client, promptVersions, filter, store);
+        var result = Run(client, promptVersions, filter, store, settings);
         Persist(result, repositories);
         return result;
     }
@@ -88,11 +88,16 @@ public static class GoldenEvaluator
     /// reviews already bought. Optional, and null by default: without it <c>Run</c> touches no
     /// file at all, which keeps running the set free of I/O and publishing the caller's job.
     /// </param>
+    /// <param name="settings">
+    /// How many rounds, how much concurrency, and what the rounds review under. Null runs the
+    /// defaults, which are the ones the environment variables used to fall back to (US-018).
+    /// </param>
     public static GoldenRunResult Run(
         ILlmClient client, IReadOnlyList<string> promptVersions, string? filter = null,
-        IGoldenRoundStore? store = null)
+        IGoldenRoundStore? store = null, GoldenSettings? settings = null)
     {
-        var (cases, diffs, runs) = Prepare(filter, promptVersions);
+        settings ??= new GoldenSettings();
+        var (cases, diffs, runs) = Prepare(filter, settings.Runs);
         var rounds = new RoundBuffer(cases.Count, runs, promptVersions.Count);
         var wholeSet = string.IsNullOrWhiteSpace(filter);
         var startedAt = DateTime.UtcNow;
@@ -100,11 +105,11 @@ public static class GoldenEvaluator
 
         try
         {
-            ReviewEveryRound(rounds, client, cases, diffs, promptVersions, store);
+            ReviewEveryRound(rounds, client, cases, diffs, promptVersions, store, settings);
             clock.Stop();
 
             return new GoldenRunResult(
-                Score(rounds, cases, promptVersions),
+                Score(rounds, cases, promptVersions, settings),
                 CompletedRounds(rounds, cases, diffs),
                 null,
                 wholeSet,
@@ -136,16 +141,10 @@ public static class GoldenEvaluator
     // (an unknown filter name, a case with no expected severity), and it costs nothing, so it
     // happens before anything is paid for.
     private static (IReadOnlyList<GoldenCase> Cases, IReadOnlyList<string> Diffs, int Runs) Prepare(
-        string? filter, IReadOnlyList<string> promptVersions)
+        string? filter, int runs)
     {
-        var runs = int.TryParse(Environment.GetEnvironmentVariable("GOLDEN_RUNS"), out var n) && n > 0 ? n : 3;
         var cases = SelectCases(LoadCases(), filter);
         var diffs = cases.Select(c => LoadDiff(Path.Combine(CasesDirectory, c.Diff))).ToList();
-
-        if (promptVersions.Count > 1)
-            System.Console.WriteLine(
-                $"Prompt versions: {string.Join(" vs ", promptVersions)} — this doubles the cost of this run.");
-
         return (cases, diffs, runs);
     }
 
@@ -161,9 +160,9 @@ public static class GoldenEvaluator
     private static void ReviewEveryRound(
         RoundBuffer rounds,
         ILlmClient client, IReadOnlyList<GoldenCase> cases, IReadOnlyList<string> diffs,
-        IReadOnlyList<string> promptVersions, IGoldenRoundStore? store)
+        IReadOnlyList<string> promptVersions, IGoldenRoundStore? store, GoldenSettings settings)
     {
-        Parallel.For(0, rounds.Length, ParallelOptions(), slot =>
+        Parallel.For(0, rounds.Length, ParallelOptions(settings.Parallelism), slot =>
         {
             var (caseIndex, sideIndex, runIndex) = rounds.Locate(slot);
             var promptVersion = promptVersions[sideIndex];
@@ -177,7 +176,7 @@ public static class GoldenEvaluator
                 return;
             }
 
-            var review = new CodeReviewer(client, diffs[caseIndex], promptVersion).Review();
+            var review = new CodeReviewer(client, diffs[caseIndex], settings.Review(promptVersion)).Review();
             // Durable before the next paid call goes out, not batched until the run finishes.
             store?.Record(cases[caseIndex].Name, promptVersion, runIndex, review);
             rounds.Record(slot, review);
@@ -191,7 +190,8 @@ public static class GoldenEvaluator
     private static GoldenScore Score(
         RoundBuffer rounds,
         IReadOnlyList<GoldenCase> cases,
-        IReadOnlyList<string> promptVersions)
+        IReadOnlyList<string> promptVersions,
+        GoldenSettings settings)
     {
         var results = new List<GoldenCaseResult>();
         var reviews = new List<ReviewResult>();
@@ -217,7 +217,7 @@ public static class GoldenEvaluator
             }
         }
 
-        var condition = GoldenCondition.From(reviews, Environment.GetEnvironmentVariable("SKILLS"));
+        var condition = GoldenCondition.From(reviews, settings.Skills);
         return new GoldenScore(results, reviews, condition, verdicts);
     }
 
@@ -382,12 +382,9 @@ public static class GoldenEvaluator
         return (result, labels);
     }
 
-    // Capped on purpose: uncapped concurrency trades latency for 429s, and the transport's
-    // retry/backoff then gives the time back with interest.
-    private static ParallelOptions ParallelOptions() => new()
+    private static ParallelOptions ParallelOptions(int parallelism) => new()
     {
-        MaxDegreeOfParallelism =
-            int.TryParse(Environment.GetEnvironmentVariable("GOLDEN_PARALLELISM"), out var p) && p > 0 ? p : 4,
+        MaxDegreeOfParallelism = parallelism,
     };
 
     // An unknown name is a typo, not an empty selection: scoring nothing and reporting "0/0"

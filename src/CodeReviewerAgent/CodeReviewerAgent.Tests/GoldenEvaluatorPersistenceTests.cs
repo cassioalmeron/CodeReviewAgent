@@ -14,17 +14,21 @@ namespace CodeReviewerAgent.Tests;
 /// the persisting one keeps the rounds already paid for when the run dies part-way, which is the
 /// failure this project has actually lived through.
 /// </summary>
-[Collection(EnvironmentCollection.Name)]
 public class GoldenEvaluatorPersistenceTests
 {
     private const string EmptyReview = "{\"summary\":\"nothing found\",\"findings\":[]}";
 
+    // One round at a time, so "the client refused after three" means exactly three came back, and
+    // skills off so the fake is not also asked to choose them. These were GOLDEN_RUNS,
+    // GOLDEN_PARALLELISM and SKILLS in the process environment, set and restored around each test
+    // by a disposable; the evaluator takes them as an argument now (US-018).
+    private static readonly GoldenSettings Sequential = new(Runs: 1, Parallelism: 1, Skills: "off");
+
     [Fact]
     public void Run_WithoutRepositories_EvaluatesTheWholeSet()
     {
-        using var _ = new GoldenEnvironment(runs: "1", parallelism: "1");
-
-        var run = GoldenEvaluator.Run(new FakeLlmClient(EmptyReview), ["v3"]).Scored();
+        var run = GoldenEvaluator.Run(
+            new FakeLlmClient(EmptyReview), ["v3"], settings: Sequential).Scored();
 
         Assert.Equal(GoldenEvaluator.LoadCases().Count, run.Results.Count);
         Assert.All(run.Results, r => Assert.Equal(1, r.Runs));
@@ -38,7 +42,6 @@ public class GoldenEvaluatorPersistenceTests
     [Fact]
     public void Run_WhenThePaidPhaseDies_StillPersistsWhatWasAlreadyBought()
     {
-        using var _ = new GoldenEnvironment(runs: "1", parallelism: "1");
         var dbPath = Path.Combine(Path.GetTempPath(), $"cra-persist-{Guid.NewGuid():N}.db");
 
         try
@@ -49,7 +52,8 @@ public class GoldenEvaluatorPersistenceTests
 
             var client = new FailsAfterLlmClient(succeedFor: 3, EmptyReview);
 
-            var result = GoldenEvaluator.Run(client, TestRepositories.For(context), ["v3"]);
+            var result = GoldenEvaluator.Run(
+                client, TestRepositories.For(context), ["v3"], settings: Sequential);
 
             // The failure is a value, not an exception: that is what lets the caller persist and
             // report what came back instead of unwinding past it.
@@ -76,7 +80,6 @@ public class GoldenEvaluatorPersistenceTests
     [Fact]
     public void Persist_AScoredWholeRun_RecordsTheRunWithItsCasesAndGates_AndLinksEveryAssessment()
     {
-        using var _ = new GoldenEnvironment(runs: "1", parallelism: "1");
         var dbPath = Path.Combine(Path.GetTempPath(), $"cra-persist-{Guid.NewGuid():N}.db");
 
         try
@@ -86,7 +89,7 @@ public class GoldenEvaluatorPersistenceTests
             context.Database.Migrate();
             var before = DateTime.UtcNow;
 
-            var result = GoldenEvaluator.Run(new FakeLlmClient(EmptyReview), ["v3"]);
+            var result = GoldenEvaluator.Run(new FakeLlmClient(EmptyReview), ["v3"], settings: Sequential);
             GoldenEvaluator.Persist(result, TestRepositories.For(context), "configured-model", "reports/report.md");
 
             var run = new EfGoldenRunRepository(context).List().Single();
@@ -116,7 +119,6 @@ public class GoldenEvaluatorPersistenceTests
     [Fact]
     public void Run_WithAFilter_KeepsTheAssessmentsButRecordsNoRun()
     {
-        using var _ = new GoldenEnvironment(runs: "1", parallelism: "1");
         var dbPath = Path.Combine(Path.GetTempPath(), $"cra-persist-{Guid.NewGuid():N}.db");
 
         try
@@ -127,7 +129,8 @@ public class GoldenEvaluatorPersistenceTests
 
             var firstCase = GoldenEvaluator.LoadCases()[0].Name;
             var result = GoldenEvaluator.Run(
-                new FakeLlmClient(EmptyReview), TestRepositories.For(context), ["v3"], filter: firstCase);
+                new FakeLlmClient(EmptyReview), TestRepositories.For(context), ["v3"], filter: firstCase,
+                settings: Sequential);
 
             Assert.NotNull(result.Score);
             Assert.False(result.WholeSet);
@@ -138,29 +141,6 @@ public class GoldenEvaluatorPersistenceTests
         finally
         {
             try { File.Delete(dbPath); } catch { /* pooled connection may hold the file */ }
-        }
-    }
-
-    /// <summary>Sets the run's environment and puts back whatever was there before.</summary>
-    private sealed class GoldenEnvironment : IDisposable
-    {
-        private readonly string? _runs = Environment.GetEnvironmentVariable("GOLDEN_RUNS");
-        private readonly string? _parallelism = Environment.GetEnvironmentVariable("GOLDEN_PARALLELISM");
-        private readonly string? _skills = Environment.GetEnvironmentVariable("SKILLS");
-
-        public GoldenEnvironment(string runs, string parallelism)
-        {
-            Environment.SetEnvironmentVariable("GOLDEN_RUNS", runs);
-            // One at a time, so "the client refused after three" means exactly three came back.
-            Environment.SetEnvironmentVariable("GOLDEN_PARALLELISM", parallelism);
-            Environment.SetEnvironmentVariable("SKILLS", "off");
-        }
-
-        public void Dispose()
-        {
-            Environment.SetEnvironmentVariable("GOLDEN_RUNS", _runs);
-            Environment.SetEnvironmentVariable("GOLDEN_PARALLELISM", _parallelism);
-            Environment.SetEnvironmentVariable("SKILLS", _skills);
         }
     }
 

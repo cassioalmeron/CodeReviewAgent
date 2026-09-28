@@ -11,6 +11,11 @@ using CodeReviewerAgent.Infra;
 
 EnvFile.Load();
 
+// The boundary of US-018: every setting Core used to read from the process environment is read
+// on this side of the line and handed in. Nothing below this project consults the environment,
+// which is what lets a second caller (the Api, an MCP host) run under its own configuration.
+OutputPaths.Configure(Setting("EVAL_OUTPUT_DIR"));
+
 // Dispatch only: every command's body is a method below, in the same order as the branches here.
 // Order matters where patterns overlap — the id-bearing forms of `judge` and `judge-report` have to
 // be tested before their catch-alls.
@@ -32,7 +37,7 @@ if (args is ["judge", var judgeIdArg, ..] && int.TryParse(judgeIdArg, out var ju
 // its own (stronger) client.
 if (args is ["judge", ..])
 {
-    JudgeRunner.Run(JudgeClient(), ResolvedJudgeRuns());
+    RunPairwiseJudge();
     return;
 }
 
@@ -162,15 +167,16 @@ static void RunJson(string[] args)
         return;
     }
 
-    var diff = DiffSourceFactory.Create(sourceArgs).GetDiff();
+    var diff = DiffSourceFactory.Create(sourceArgs, RepositoryDirectory()).GetDiff();
 
     // Redirect the pipeline's human progress to stderr so stdout stays pure JSON; the review and
     // assessment are persisted to the configured store (STORAGE) just like the interactive flow.
     var realOut = Console.Out;
     Console.SetOut(Console.Error);
     var repos = RepositoryFactory.Create();
-    var project = ProjectResolver.Resolve(repos.Projects);
-    var review = new CodeReviewer(LlmClientFactory.Create(), diff, ResolvedPromptVersion()).Review();
+    var project = ProjectResolver.Resolve(repos.Projects, RepositoryDirectory());
+    var review = new CodeReviewer(
+        LlmClientFactory.Create(), diff, ResolvedReviewSettings(), progress: ConsoleProgress.Out).Review();
     var reviewId = repos.Reviews.GetOrAdd(new Review
     {
         ProjectId = project.Id,
@@ -229,9 +235,10 @@ static void JudgeAssessment(int assessmentId)
     var review = store.Reviews.Get(assessment.ReviewId)
         ?? throw new InvalidOperationException($"No review with id {assessment.ReviewId}.");
 
-    var judgeModel = Environment.GetEnvironmentVariable("JUDGE_MODEL") ?? "claude-sonnet-4-6";
+    var judgeModel = ResolvedJudgeModel();
     var rubricVersion = Environment.GetEnvironmentVariable("RUBRIC_VERSION") ?? "v1";
-    var judge = new Judge(LlmClientFactory.CreateClaude(judgeModel), rubricVersion);
+    var judge = new Judge(
+        LlmClientFactory.CreateClaude(judgeModel), rubricVersion, ResolvedThinkingDisabled());
     var outcome = judge.Evaluate(review.Content, ToReviewResult(assessment, review.Content));
 
     var evaluationId = store.Evaluations.Save(ToEvaluation(assessmentId, judgeModel, rubricVersion, outcome));
@@ -242,8 +249,15 @@ static void RunAll()
 {
     var (executor, executorModel) = LlmClientFactory.CreateWithModel();
     RunGoldenSet(executor, executorModel);
-    JudgeRunner.Run(JudgeClient(), ResolvedJudgeRuns());
+    RunPairwiseJudge();
 }
+
+// The judge's whole configuration is resolved here and passed in; JudgeRunner used to read the
+// model and the rubric from the environment itself, which hid what a resumed run would blend.
+static void RunPairwiseJudge() => JudgeRunner.Run(
+    JudgeClient(), ResolvedJudgeRuns(), ResolvedJudgeModel(),
+    Environment.GetEnvironmentVariable("RUBRIC_VERSION") ?? "v2",
+    ResolvedThinkingDisabled(), ConsoleProgress.Out);
 
 static void RunGoldenSet(ILlmClient executor, string? executorModel, string? filter = null)
 {
@@ -262,9 +276,16 @@ static void RunGoldenSet(ILlmClient executor, string? executorModel, string? fil
     else if (executorModel is null)
         Console.WriteLine("Model unknown for this engine: rounds will be recorded but not resumed.");
 
+    // Announced before anything is paid for, and here rather than inside the evaluator: the
+    // caller is the one that chose to compare two sides.
+    var promptVersions = PromptVersions();
+    if (promptVersions.Count > 1)
+        Console.WriteLine(
+            $"Prompt versions: {string.Join(" vs ", promptVersions)} — this doubles the cost of this run.");
+
     // The evaluation without repositories, and the writing done here: the golden run has to carry the
     // path of its report, and the report only exists after the run is scored.
-    var result = GoldenEvaluator.Run(executor, PromptVersions(), filter, store);
+    var result = GoldenEvaluator.Run(executor, promptVersions, filter, store, ResolvedGoldenSettings());
 
     // A run that died still writes every round it bought, both to the store and to the repositories.
     // What it has no right to produce is a report: a rate over a partial set is not a smaller
@@ -279,9 +300,12 @@ static void RunGoldenSet(ILlmClient executor, string? executorModel, string? fil
         return;
     }
 
-    // Running the set is free of I/O by default; publishing the result is this layer's job.
-    var reportPath = GoldenEvaluatorReport.SaveReport(run);
-    GoldenEvaluator.Persist(result, repos, executorModel, reportPath);
+    // Running the set is free of I/O by default; publishing the result is this layer's job, and
+    // so is saying where it landed.
+    var artefacts = GoldenEvaluatorReport.SaveReport(run);
+    Console.WriteLine($"Report saved to {artefacts.ReportPath}");
+    Console.WriteLine($"Eval results saved to {artefacts.ReviewsPath}");
+    GoldenEvaluator.Persist(result, repos, executorModel, artefacts.ReportPath);
 
     Console.WriteLine();
     Console.WriteLine("=== Golden set ===");
@@ -373,9 +397,12 @@ static void ShowSkill(string skillName)
 
 static void RunSkillTriggerEval()
 {
-    var selector = SkillSelectorFactory.Create(LlmClientFactory.Create());
+    var settings = ResolvedReviewSettings();
+    var selector = SkillSelectorFactory.Create(
+        LlmClientFactory.Create(), settings.Skills, settings.SkillPromptVersion, settings.Engine,
+        ConsoleProgress.Out);
     var names = SkillCatalog.Discover().Skills.Select(s => s.Name).ToList();
-    var results = SkillTriggerEvaluator.Run(selector);
+    var results = SkillTriggerEvaluator.Run(selector, runs: ResolvedSkillEvalRuns());
 
     Console.WriteLine();
     Console.WriteLine("=== Skill trigger eval ===");
@@ -412,11 +439,11 @@ static void RenameProject(int projectId, string[] nameParts)
 static void CaptureReview(string[] sourceArgs)
 {
     var repos = RepositoryFactory.Create();
-    var project = ProjectResolver.Resolve(repos.Projects);
+    var project = ProjectResolver.Resolve(repos.Projects, RepositoryDirectory());
     var id = repos.Reviews.GetOrAdd(new Review
     {
         ProjectId = project.Id,
-        Content = DiffSourceFactory.Create(sourceArgs).GetDiff(),
+        Content = DiffSourceFactory.Create(sourceArgs, RepositoryDirectory()).GetDiff(),
         Source = Label(sourceArgs),
         CreatedAt = DateTime.UtcNow,
     });
@@ -428,7 +455,10 @@ static void AssessReview(int reviewId)
     var repos = RepositoryFactory.Create();
     var review = repos.Reviews.Get(reviewId)
         ?? throw new InvalidOperationException($"No review with id {reviewId}.");
-    var result = new CodeReviewer(LlmClientFactory.Create(), review.Content, ResolvedPromptVersion()).Review();
+    var result = new CodeReviewer(
+        LlmClientFactory.Create(), review.Content, ResolvedReviewSettings(),
+        progress: ConsoleProgress.Out).Review();
+    PrintReview(result);
     var assessmentId = repos.Assessments.Save(Assessment.FromReview(reviewId, result));
     Console.WriteLine($"Assessment saved with id {assessmentId}");
 }
@@ -507,10 +537,10 @@ static void ReviewAndPublish(string[] args)
 {
     var repos = RepositoryFactory.Create();
     var client = LlmClientFactory.Create();
-    var diffSource = DiffSourceFactory.Create(args);
+    var diffSource = DiffSourceFactory.Create(args, RepositoryDirectory());
     try
     {
-        var project = ProjectResolver.Resolve(repos.Projects);
+        var project = ProjectResolver.Resolve(repos.Projects, RepositoryDirectory());
         var content = diffSource.GetDiff();
         var reviewId = repos.Reviews.GetOrAdd(new Review
         {
@@ -520,11 +550,17 @@ static void ReviewAndPublish(string[] args)
             CreatedAt = DateTime.UtcNow,
         });
 
-        var review = CodeReviewer.ReviewAndReport(client, content, ResolvedPromptVersion());
+        var review = new CodeReviewer(
+            client, content, ResolvedReviewSettings(), progress: ConsoleProgress.Out).Review();
+        PrintReview(review);
+        Console.WriteLine($"Report saved to {ReportGenerator.Save(review)}");
         repos.Assessments.Save(Assessment.FromReview(reviewId, review));
 
         if (args is ["pr", var prArg, ..] && args.Contains("--publish") && int.TryParse(prArg, out var prNumber))
-            PrPublisher.Publish(prNumber, review);
+        {
+            PrPublisher.Publish(prNumber, review, RepositoryDirectory());
+            Console.WriteLine($"Published review to PR #{prNumber}.");
+        }
     }
     catch (Exception ex) when (args is ["pr", ..])
     {
@@ -538,17 +574,55 @@ static void ReviewAndPublish(string[] args)
 // ---------------------------------------------------------------------------------------------
 
 // The judge uses a stronger model (JUDGE_MODEL) than the executor to avoid self-preference bias.
-static ILlmClient JudgeClient() =>
-    LlmClientFactory.CreateClaude(Environment.GetEnvironmentVariable("JUDGE_MODEL") ?? "claude-sonnet-4-6");
+static ILlmClient JudgeClient() => LlmClientFactory.CreateClaude(ResolvedJudgeModel());
 
-// How many times the pairwise judge scores each pair, read here and passed in — consistent with
-// how PROMPT_VERSION reaches CodeReviewer, and out of scope for the rest of Core's environment reads.
+static string ResolvedJudgeModel() =>
+    Environment.GetEnvironmentVariable("JUDGE_MODEL") ?? "claude-sonnet-4-6";
+
+// How many times the pairwise judge scores each pair.
 static int ResolvedJudgeRuns() =>
     int.TryParse(Environment.GetEnvironmentVariable("JUDGE_RUNS"), out var n) && n > 0 ? n : 3;
+
+// Absent does not mean the same thing on every model: 4.6 runs without extended thinking, 5 runs
+// adaptive thinking. Stating it keeps a judge repeatable across a model swap.
+static bool ResolvedThinkingDisabled() =>
+    string.Equals(Environment.GetEnvironmentVariable("JUDGE_THINKING"), "off",
+        StringComparison.OrdinalIgnoreCase);
 
 // The environment is read here and nowhere below Console: CodeReviewer takes the version as a
 // required constructor parameter instead of reaching for it itself.
 static string ResolvedPromptVersion() => Environment.GetEnvironmentVariable("PROMPT_VERSION") ?? "v2";
+
+// Everything a review runs under, in one value. Each field was an environment read inside Core
+// until US-018.
+static ReviewSettings ResolvedReviewSettings() => new(
+    ResolvedPromptVersion(),
+    Environment.GetEnvironmentVariable("LLM_ENGINE"),
+    Environment.GetEnvironmentVariable("SKILL_PROMPT_VERSION") ?? SkillPrompt.DefaultVersion,
+    Environment.GetEnvironmentVariable("SKILLS"));
+
+// The same, for a golden run: its own round count and concurrency, plus what the rounds review under.
+static GoldenSettings ResolvedGoldenSettings() => new(
+    int.TryParse(Environment.GetEnvironmentVariable("GOLDEN_RUNS"), out var runs) && runs > 0 ? runs : 3,
+    int.TryParse(Environment.GetEnvironmentVariable("GOLDEN_PARALLELISM"), out var p) && p > 0 ? p : 4,
+    Environment.GetEnvironmentVariable("SKILLS"),
+    Environment.GetEnvironmentVariable("LLM_ENGINE"),
+    Environment.GetEnvironmentVariable("SKILL_PROMPT_VERSION") ?? SkillPrompt.DefaultVersion);
+
+static int ResolvedSkillEvalRuns() =>
+    int.TryParse(Environment.GetEnvironmentVariable("SKILL_EVAL_RUNS"), out var n) && n > 0 ? n : 3;
+
+// Where git and the GitHub CLI run, and which project a review belongs to. Blank is the current
+// directory, which is what an unset REPO_DIR always meant.
+static string RepositoryDirectory() => Environment.GetEnvironmentVariable("REPO_DIR") ?? "";
+
+// What a finished review shows on a terminal. The wording lives in Core, next to the result it
+// describes; the writing is this project's, because this project is the one with a terminal.
+static void PrintReview(ReviewResult review)
+{
+    foreach (var line in ReviewConsoleReport.Lines(review))
+        Console.WriteLine(line);
+}
 
 // One version reproduces today's `eval`; PROMPT_VERSION_COMPARISON, when set, adds a second side
 // so the golden set runs as a pairwise comparison over the same diffs.
@@ -619,3 +693,13 @@ static Evaluation ToEvaluation(int assessmentId, string judgeModel, string rubri
     OutputTokens = o.OutputTokens,
     CreatedAt = DateTime.UtcNow,
 };
+
+// Core reports what only makes sense mid-flow through IProgress<string>; here that is a line on
+// stdout. Deliberately not Progress<T>: that posts the callback to the thread pool, so its lines
+// would interleave with the ones written directly around it.
+sealed class ConsoleProgress : IProgress<string>
+{
+    public static readonly ConsoleProgress Out = new();
+
+    public void Report(string value) => Console.WriteLine(value);
+}

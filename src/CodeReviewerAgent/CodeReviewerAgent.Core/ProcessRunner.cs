@@ -3,23 +3,24 @@ using System.Diagnostics;
 namespace CodeReviewerAgent.Core;
 
 /// <summary>
-/// Runs an external command and returns its standard output. Commands run in the
-/// repository directory given by the <c>REPO_DIR</c> environment variable, so diffs
-/// and pull requests can be analyzed from another repository; when it is blank the
-/// current working directory is used.
+/// Runs an external command and returns its standard output. Commands run in the repository
+/// directory the caller hands in, so diffs and pull requests can be analyzed from another
+/// repository; when it is blank the current working directory is used.
+/// <para>
+/// That directory used to be read here from <c>REPO_DIR</c>. The entry point resolves it now
+/// (US-018), which is also why it is a parameter rather than a field: nothing below the entry
+/// point should be able to move where a command runs.
+/// </para>
 /// </summary>
 internal static class ProcessRunner
 {
-    private static string RepoDirectory =>
-        Environment.GetEnvironmentVariable("REPO_DIR") ?? "";
-
-    public static string Run(string fileName, string arguments)
+    public static string Run(string fileName, string workingDirectory, string arguments)
     {
         var startInfo = new ProcessStartInfo
         {
             FileName = fileName,
             Arguments = arguments,
-            WorkingDirectory = RepoDirectory,
+            WorkingDirectory = workingDirectory,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
@@ -33,12 +34,12 @@ internal static class ProcessRunner
     /// Runs an external command with each argument passed separately, so values
     /// containing spaces (e.g. user-supplied file paths) are escaped correctly.
     /// </summary>
-    public static string Run(string fileName, params string[] arguments)
+    public static string Run(string fileName, string workingDirectory, params string[] arguments)
     {
         var startInfo = new ProcessStartInfo
         {
             FileName = fileName,
-            WorkingDirectory = RepoDirectory,
+            WorkingDirectory = workingDirectory,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,

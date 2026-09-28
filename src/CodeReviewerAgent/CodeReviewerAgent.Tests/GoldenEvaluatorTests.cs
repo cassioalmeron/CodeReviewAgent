@@ -13,11 +13,16 @@ namespace CodeReviewerAgent.Tests;
 /// <see cref="GoldenScorerTests"/> cannot is the wiring — that each case turns into a result of
 /// the right kind, and that the diffs and assessments are persisted as the run goes.
 /// </summary>
-[Collection(EnvironmentCollection.Name)]
 public class GoldenEvaluatorTests
 {
     // One prompt version reproduces today's set: same round count, same results, no comparison.
     private static readonly List<string> SingleVersion = ["v3"];
+
+    // One round, and skills off so the fake is not also asked to choose them: these cover the
+    // loop, not the selection. This used to be GOLDEN_RUNS=1 and SKILLS=off in the process
+    // environment, which is why the class had to serialize against every other one that moved a
+    // variable. The evaluator takes them as an argument now (US-018), so it no longer does.
+    private static readonly GoldenSettings OneRound = new(Runs: 1, Skills: "off");
 
     // Answers with the finding that case-01 plants: right file, a snippet that really is an
     // added line of its diff, and a keyword the case expects.
@@ -41,14 +46,8 @@ public class GoldenEvaluatorTests
     public void Run_ScoresEveryBundledCaseAndPersistsAsItGoes()
     {
         var dbPath = Path.Combine(Path.GetTempPath(), $"cra-golden-{Guid.NewGuid():N}.db");
-        var previousRuns = Environment.GetEnvironmentVariable("GOLDEN_RUNS");
-        var previousSkills = Environment.GetEnvironmentVariable("SKILLS");
         try
         {
-            Environment.SetEnvironmentVariable("GOLDEN_RUNS", "1");
-            // Off, so the fake is not also asked to choose skills — this test is about the loop.
-            Environment.SetEnvironmentVariable("SKILLS", "off");
-
             using var context = new CodeReviewDbContext(
                 o => new SqliteProviderStrategy().Configure(o, $"Data Source={dbPath}"));
             context.Database.Migrate();
@@ -58,7 +57,8 @@ public class GoldenEvaluatorTests
             var assessments = new EfAssessmentRepository(context);
 
             var run = GoldenEvaluator.Run(
-                new FakeLlmClient(CaughtSqlInjection), TestRepositories.For(context), SingleVersion).Scored();
+                new FakeLlmClient(CaughtSqlInjection), TestRepositories.For(context), SingleVersion,
+                settings: OneRound).Scored();
 
             var cases = GoldenEvaluator.LoadCases();
             Assert.Equal(cases.Count, run.Results.Count);
@@ -83,8 +83,6 @@ public class GoldenEvaluatorTests
         }
         finally
         {
-            Environment.SetEnvironmentVariable("GOLDEN_RUNS", previousRuns);
-            Environment.SetEnvironmentVariable("SKILLS", previousSkills);
             try { File.Delete(dbPath); } catch { /* pooled connection may hold the file */ }
         }
     }
@@ -115,19 +113,15 @@ public class GoldenEvaluatorTests
     public void Run_CountsATrapAsLostWhenTheModelFlagsTheBait()
     {
         var dbPath = Path.Combine(Path.GetTempPath(), $"cra-golden-{Guid.NewGuid():N}.db");
-        var previousRuns = Environment.GetEnvironmentVariable("GOLDEN_RUNS");
-        var previousSkills = Environment.GetEnvironmentVariable("SKILLS");
         try
         {
-            Environment.SetEnvironmentVariable("GOLDEN_RUNS", "1");
-            Environment.SetEnvironmentVariable("SKILLS", "off");
-
             using var context = new CodeReviewDbContext(
                 o => new SqliteProviderStrategy().Configure(o, $"Data Source={dbPath}"));
             context.Database.Migrate();
 
             var run = GoldenEvaluator.Run(
-                new FakeLlmClient(FellForTheExtensionBlock), TestRepositories.For(context), SingleVersion).Scored();
+                new FakeLlmClient(FellForTheExtensionBlock), TestRepositories.For(context), SingleVersion,
+                settings: OneRound).Scored();
 
             var trap = run.Results.Single(r => r.Name == "extension-block");
             Assert.Equal(0, trap.Successes);
@@ -140,8 +134,6 @@ public class GoldenEvaluatorTests
         }
         finally
         {
-            Environment.SetEnvironmentVariable("GOLDEN_RUNS", previousRuns);
-            Environment.SetEnvironmentVariable("SKILLS", previousSkills);
             try { File.Delete(dbPath); } catch { /* pooled connection may hold the file */ }
         }
     }
@@ -156,27 +148,21 @@ public class GoldenEvaluatorTests
     public void Run_WithAFilter_ScoresOnlyTheNamedCases(string filter, int expected)
     {
         var dbPath = Path.Combine(Path.GetTempPath(), $"cra-golden-{Guid.NewGuid():N}.db");
-        var previousRuns = Environment.GetEnvironmentVariable("GOLDEN_RUNS");
-        var previousSkills = Environment.GetEnvironmentVariable("SKILLS");
         try
         {
-            Environment.SetEnvironmentVariable("GOLDEN_RUNS", "1");
-            Environment.SetEnvironmentVariable("SKILLS", "off");
-
             using var context = new CodeReviewDbContext(
                 o => new SqliteProviderStrategy().Configure(o, $"Data Source={dbPath}"));
             context.Database.Migrate();
 
             var run = GoldenEvaluator.Run(
-                new FakeLlmClient(CaughtSqlInjection), TestRepositories.For(context), SingleVersion, filter).Scored();
+                new FakeLlmClient(CaughtSqlInjection), TestRepositories.For(context), SingleVersion, filter,
+                settings: OneRound).Scored();
 
             Assert.Equal(expected, run.Results.Count);
             Assert.All(run.Results, r => Assert.Contains(r.Name, filter, StringComparison.OrdinalIgnoreCase));
         }
         finally
         {
-            Environment.SetEnvironmentVariable("GOLDEN_RUNS", previousRuns);
-            Environment.SetEnvironmentVariable("SKILLS", previousSkills);
             try { File.Delete(dbPath); } catch { /* pooled connection may hold the file */ }
         }
     }
@@ -190,22 +176,16 @@ public class GoldenEvaluatorTests
     public void Run_InParallel_KeepsCaseOrderAndPersistsEveryRunExactlyOnce()
     {
         var dbPath = Path.Combine(Path.GetTempPath(), $"cra-golden-{Guid.NewGuid():N}.db");
-        var previousRuns = Environment.GetEnvironmentVariable("GOLDEN_RUNS");
-        var previousSkills = Environment.GetEnvironmentVariable("SKILLS");
-        var previousParallel = Environment.GetEnvironmentVariable("GOLDEN_PARALLELISM");
         try
         {
-            Environment.SetEnvironmentVariable("GOLDEN_RUNS", "3");
-            Environment.SetEnvironmentVariable("SKILLS", "off");
-            Environment.SetEnvironmentVariable("GOLDEN_PARALLELISM", "8");
-
             using var context = new CodeReviewDbContext(
                 o => new SqliteProviderStrategy().Configure(o, $"Data Source={dbPath}"));
             context.Database.Migrate();
             var assessments = new EfAssessmentRepository(context);
 
             var run = GoldenEvaluator.Run(
-                new FakeLlmClient(CaughtSqlInjection), TestRepositories.For(context), SingleVersion).Scored();
+                new FakeLlmClient(CaughtSqlInjection), TestRepositories.For(context), SingleVersion,
+                settings: new GoldenSettings(Runs: 3, Parallelism: 8, Skills: "off")).Scored();
 
             var cases = GoldenEvaluator.LoadCases();
             Assert.Equal(cases.Select(c => c.Name), run.Results.Select(r => r.Name));
@@ -218,9 +198,6 @@ public class GoldenEvaluatorTests
         }
         finally
         {
-            Environment.SetEnvironmentVariable("GOLDEN_RUNS", previousRuns);
-            Environment.SetEnvironmentVariable("SKILLS", previousSkills);
-            Environment.SetEnvironmentVariable("GOLDEN_PARALLELISM", previousParallel);
             try { File.Delete(dbPath); } catch { /* pooled connection may hold the file */ }
         }
     }
@@ -234,30 +211,23 @@ public class GoldenEvaluatorTests
     public void Run_WritesNothingToDisk()
     {
         var dbPath = Path.Combine(Path.GetTempPath(), $"cra-golden-{Guid.NewGuid():N}.db");
-        var previousRuns = Environment.GetEnvironmentVariable("GOLDEN_RUNS");
-        var previousSkills = Environment.GetEnvironmentVariable("SKILLS");
         try
         {
-            Environment.SetEnvironmentVariable("GOLDEN_RUNS", "1");
-            Environment.SetEnvironmentVariable("SKILLS", "off");
-
             var reports = OutputPaths.Reports;
             var reviews = OutputPaths.Reviews;
             var before = (Count(reports), Count(reviews));
-
             using var context = new CodeReviewDbContext(
                 o => new SqliteProviderStrategy().Configure(o, $"Data Source={dbPath}"));
             context.Database.Migrate();
 
             GoldenEvaluator.Run(
-                new FakeLlmClient(CaughtSqlInjection), TestRepositories.For(context), SingleVersion);
+                new FakeLlmClient(CaughtSqlInjection), TestRepositories.For(context), SingleVersion,
+                settings: OneRound);
 
             Assert.Equal(before, (Count(reports), Count(reviews)));
         }
         finally
         {
-            Environment.SetEnvironmentVariable("GOLDEN_RUNS", previousRuns);
-            Environment.SetEnvironmentVariable("SKILLS", previousSkills);
             try { File.Delete(dbPath); } catch { /* pooled connection may hold the file */ }
         }
     }
@@ -278,7 +248,7 @@ public class GoldenEvaluatorTests
 
             var error = Assert.Throws<InvalidOperationException>(() => GoldenEvaluator.Run(
                 new FakeLlmClient(CaughtSqlInjection), TestRepositories.For(context), SingleVersion,
-                "no-such-case"));
+                "no-such-case", settings: OneRound));
 
             Assert.Contains("no-such-case", error.Message);
         }
@@ -296,13 +266,8 @@ public class GoldenEvaluatorTests
     public void Run_ReusesTheStoredDiffsOnASecondRun()
     {
         var dbPath = Path.Combine(Path.GetTempPath(), $"cra-golden-{Guid.NewGuid():N}.db");
-        var previousRuns = Environment.GetEnvironmentVariable("GOLDEN_RUNS");
-        var previousSkills = Environment.GetEnvironmentVariable("SKILLS");
         try
         {
-            Environment.SetEnvironmentVariable("GOLDEN_RUNS", "1");
-            Environment.SetEnvironmentVariable("SKILLS", "off");
-
             using var context = new CodeReviewDbContext(
                 o => new SqliteProviderStrategy().Configure(o, $"Data Source={dbPath}"));
             context.Database.Migrate();
@@ -313,8 +278,8 @@ public class GoldenEvaluatorTests
             var client = new FakeLlmClient(CaughtSqlInjection);
 
             var repositories = TestRepositories.For(context);
-            GoldenEvaluator.Run(client, repositories, SingleVersion);
-            GoldenEvaluator.Run(client, repositories, SingleVersion);
+            GoldenEvaluator.Run(client, repositories, SingleVersion, settings: OneRound);
+            GoldenEvaluator.Run(client, repositories, SingleVersion, settings: OneRound);
 
             var cases = GoldenEvaluator.LoadCases();
             Assert.Equal(cases.Count, reviews.List().Count);          // diffs reused
@@ -322,8 +287,6 @@ public class GoldenEvaluatorTests
         }
         finally
         {
-            Environment.SetEnvironmentVariable("GOLDEN_RUNS", previousRuns);
-            Environment.SetEnvironmentVariable("SKILLS", previousSkills);
             try { File.Delete(dbPath); } catch { /* pooled connection may hold the file */ }
         }
     }
@@ -337,13 +300,8 @@ public class GoldenEvaluatorTests
     public void Run_WithTwoPromptVersions_YieldsOneResultPerCasePerSide()
     {
         var dbPath = Path.Combine(Path.GetTempPath(), $"cra-golden-{Guid.NewGuid():N}.db");
-        var previousRuns = Environment.GetEnvironmentVariable("GOLDEN_RUNS");
-        var previousSkills = Environment.GetEnvironmentVariable("SKILLS");
         try
         {
-            Environment.SetEnvironmentVariable("GOLDEN_RUNS", "1");
-            Environment.SetEnvironmentVariable("SKILLS", "off");
-
             using var context = new CodeReviewDbContext(
                 o => new SqliteProviderStrategy().Configure(o, $"Data Source={dbPath}"));
             context.Database.Migrate();
@@ -354,7 +312,7 @@ public class GoldenEvaluatorTests
             var run = GoldenEvaluator.Run(
                 new FakeLlmClient(CaughtSqlInjection), TestRepositories.For(context),
                 ["v3", "v1"],
-                "sql-injection").Scored();
+                "sql-injection", settings: OneRound).Scored();
 
             Assert.Equal(2, run.Results.Count);
             Assert.Equal(["v3", "v1"], run.Results.Select(r => r.PromptVersion));
@@ -366,8 +324,6 @@ public class GoldenEvaluatorTests
         }
         finally
         {
-            Environment.SetEnvironmentVariable("GOLDEN_RUNS", previousRuns);
-            Environment.SetEnvironmentVariable("SKILLS", previousSkills);
             try { File.Delete(dbPath); } catch { /* pooled connection may hold the file */ }
         }
     }

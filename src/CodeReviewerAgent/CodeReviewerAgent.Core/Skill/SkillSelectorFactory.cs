@@ -11,15 +11,19 @@ namespace CodeReviewerAgent.Core.Skill;
 ///   <item><c>&lt;name&gt;,&lt;name&gt;</c> — exactly these, no LLM call</item>
 /// </list>
 /// </summary>
+/// <remarks>
+/// The setting arrives as a parameter: it used to be read from the environment here, which made
+/// the strategy of a run invisible at the call site (US-018).
+/// </remarks>
 public static class SkillSelectorFactory
 {
-    public static ISkillSelector Create(ILlmClient client) =>
-        Create(client, Environment.GetEnvironmentVariable("SKILLS"));
-
-    internal static ISkillSelector Create(ILlmClient client, string? setting) =>
+    public static ISkillSelector Create(
+        ILlmClient client, string? setting,
+        string skillPromptVersion = SkillPrompt.DefaultVersion, string? engine = null,
+        IProgress<string>? progress = null) =>
         (setting ?? "").Trim().ToLowerInvariant() switch
         {
-            "" or "all" => new LlmSkillSelector(client),
+            "" or "all" => new LlmSkillSelector(client, skillPromptVersion, engine, progress),
             "globs" => new GlobSkillSelector(),
             "off" => new NoSkillSelector(),
             var names => new ExplicitSkillSelector(

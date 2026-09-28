@@ -11,9 +11,11 @@ namespace CodeReviewerAgent.Core.Skill;
 /// </summary>
 public static class SkillPrompt
 {
-    /// <summary>The version of the skill prompts to use (<c>SKILL_PROMPT_VERSION</c>).</summary>
-    public static string Version =>
-        Environment.GetEnvironmentVariable("SKILL_PROMPT_VERSION") ?? "v1";
+    /// <summary>
+    /// The version used when the caller names none. It used to be the fallback of
+    /// <c>SKILL_PROMPT_VERSION</c>, read here; the entry point reads that variable now (US-018).
+    /// </summary>
+    public const string DefaultVersion = "v1";
 
     /// <summary>
     /// The system prompt of the selection call: <c>assets/prompts/skill-selection-&lt;version&gt;.md</c>

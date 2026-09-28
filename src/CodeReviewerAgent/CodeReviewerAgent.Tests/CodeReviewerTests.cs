@@ -6,9 +6,12 @@ using Xunit;
 
 namespace CodeReviewerAgent.Tests;
 
-[Collection(EnvironmentCollection.Name)]
 public class CodeReviewerTests
 {
+    // The reviewer takes its settings as an argument, so these only ever name the prompt version;
+    // the rest keeps the defaults an unconfigured process used to fall back to (US-018).
+    private static ReviewSettings Settings(string promptVersion) => new(promptVersion);
+
     private const string CsharpDiff = """
         diff --git a/App.cs b/App.cs
         --- a/App.cs
@@ -34,7 +37,7 @@ public class CodeReviewerTests
         var client = new FakeLlmClient("{}");
         var windowsDiff = CsharpDiff.ReplaceLineEndings("\r\n");
 
-        new CodeReviewer(client, windowsDiff, "v3", new FakeSkillSelector(), FakeSkillSource.Default).Review();
+        new CodeReviewer(client, windowsDiff, Settings("v3"), new FakeSkillSelector(), FakeSkillSource.Default).Review();
 
         var userMessage = JsonSerializer.SerializeToElement(client.LastRequestBody)
             .GetProperty("messages")[0].GetProperty("content").GetString()!;
@@ -47,7 +50,7 @@ public class CodeReviewerTests
     {
         var client = new FakeLlmClient("{}");
 
-        var result = new CodeReviewer(client, "   ", "v3", new FakeSkillSelector(), FakeSkillSource.Default).Review();
+        var result = new CodeReviewer(client, "   ", Settings("v3"), new FakeSkillSelector(), FakeSkillSource.Default).Review();
 
         Assert.Null(client.LastRequestBody);
         Assert.Empty(result.Findings!);
@@ -65,7 +68,7 @@ public class CodeReviewerTests
             "+New docs line.");
         var client = new FakeLlmClient("{}");
 
-        var result = new CodeReviewer(client, diff, "v3", new FakeSkillSelector(), FakeSkillSource.Default).Review();
+        var result = new CodeReviewer(client, diff, Settings("v3"), new FakeSkillSelector(), FakeSkillSource.Default).Review();
 
         Assert.Null(client.LastRequestBody);
         Assert.Empty(result.Findings!);
@@ -100,7 +103,7 @@ public class CodeReviewerTests
             """;
         var client = new FakeLlmClient(response);
 
-        var result = new CodeReviewer(client, diff, "v3", new FakeSkillSelector(), FakeSkillSource.Default).Review();
+        var result = new CodeReviewer(client, diff, Settings("v3"), new FakeSkillSelector(), FakeSkillSource.Default).Review();
 
         Assert.NotNull(client.LastRequestBody);
         Assert.Equal("One issue found.", result.Summary);
@@ -140,7 +143,7 @@ public class CodeReviewerTests
             """;
         var client = new FakeLlmClient(response);
 
-        var result = new CodeReviewer(client, diff, "v3", new FakeSkillSelector(), FakeSkillSource.Default).Review();
+        var result = new CodeReviewer(client, diff, Settings("v3"), new FakeSkillSelector(), FakeSkillSource.Default).Review();
 
         Assert.Empty(result.Findings!);
         Assert.Equal(1, result.DiscardedFindings); // dropped, but not without a trace
@@ -151,7 +154,7 @@ public class CodeReviewerTests
     {
         var client = new FakeLlmClient("not valid json");
 
-        var result = new CodeReviewer(client, "diff --git a/App.cs b/App.cs", "v3", new FakeSkillSelector(), FakeSkillSource.Default).Review();
+        var result = new CodeReviewer(client, "diff --git a/App.cs b/App.cs", Settings("v3"), new FakeSkillSelector(), FakeSkillSource.Default).Review();
 
         Assert.Null(result.Summary);
         Assert.Empty(result.Findings!);
@@ -163,7 +166,7 @@ public class CodeReviewerTests
         var client = new FakeLlmClient("{}");
         var selector = new FakeSkillSelector("csharp");
 
-        new CodeReviewer(client, CsharpDiff, "v3", selector, FakeSkillSource.Default).Review();
+        new CodeReviewer(client, CsharpDiff, Settings("v3"), selector, FakeSkillSource.Default).Review();
 
         var system = SystemPrompt(client);
         Assert.Contains("# Project guidelines", system);
@@ -175,8 +178,8 @@ public class CodeReviewerTests
     [Fact]
     public void Review_RecordsWhichSkillsWereInThePrompt()
     {
-        var withSkill = new CodeReviewer(new FakeLlmClient("{}"), CsharpDiff, "v3", new FakeSkillSelector("csharp"), FakeSkillSource.Default);
-        var withNone = new CodeReviewer(new FakeLlmClient("{}"), CsharpDiff, "v3", new FakeSkillSelector(), FakeSkillSource.Default);
+        var withSkill = new CodeReviewer(new FakeLlmClient("{}"), CsharpDiff, Settings("v3"), new FakeSkillSelector("csharp"), FakeSkillSource.Default);
+        var withNone = new CodeReviewer(new FakeLlmClient("{}"), CsharpDiff, Settings("v3"), new FakeSkillSelector(), FakeSkillSource.Default);
 
         Assert.Equal("csharp", withSkill.Review().Skills);
         Assert.Null(withNone.Review().Skills);
@@ -187,7 +190,7 @@ public class CodeReviewerTests
     {
         var client = new FakeLlmClient("{}");
 
-        new CodeReviewer(client, CsharpDiff, "v3", new FakeSkillSelector(), FakeSkillSource.Default).Review();
+        new CodeReviewer(client, CsharpDiff, Settings("v3"), new FakeSkillSelector(), FakeSkillSource.Default).Review();
 
         Assert.DoesNotContain("# Project guidelines", SystemPrompt(client));
     }
@@ -199,7 +202,7 @@ public class CodeReviewerTests
 
         // A .cs diff, and the strategy answers "react": the pipeline obeys the decision
         // instead of second-guessing it with its own file matching.
-        new CodeReviewer(client, CsharpDiff, "v3", new GlobsOverride("react"), FakeSkillSource.Default).Review();
+        new CodeReviewer(client, CsharpDiff, Settings("v3"), new GlobsOverride("react"), FakeSkillSource.Default).Review();
 
         Assert.Contains("<skill_content name=\"react\">", SystemPrompt(client));
         Assert.DoesNotContain("<skill_content name=\"csharp\">", SystemPrompt(client));
@@ -216,7 +219,7 @@ public class CodeReviewerTests
     {
         var client = new FakeLlmClient("{}");
 
-        var result = new CodeReviewer(client, CsharpDiff, "v3", new FakeSkillSelector("csharp"), FakeSkillSource.Default).Review();
+        var result = new CodeReviewer(client, CsharpDiff, Settings("v3"), new FakeSkillSelector("csharp"), FakeSkillSource.Default).Review();
 
         Assert.Equal(17, result.InputTokens);  // 10 from the review + 7 from the selection
         Assert.Equal(23, result.OutputTokens); // 20 + 3
@@ -224,25 +227,18 @@ public class CodeReviewerTests
     }
 
     /// <summary>
-    /// The prompt version is a constructor parameter, not process state: <c>Review()</c> must
-    /// use exactly what it was given, even when the environment disagrees.
+    /// The settings are an argument, not process state, and the result says which version it ran
+    /// under. Nothing below the entry point reads the environment, which the architecture test
+    /// enforces; this pins that the given version is the one the result reports.
     /// </summary>
     [Fact]
-    public void Review_UsesTheGivenPromptVersion_RegardlessOfTheEnvironment()
+    public void Review_ReportsTheGivenPromptVersion()
     {
-        var previous = Environment.GetEnvironmentVariable("PROMPT_VERSION");
-        try
-        {
-            Environment.SetEnvironmentVariable("PROMPT_VERSION", "v5"); // must be ignored
-            var client = new FakeLlmClient("{}");
+        var client = new FakeLlmClient("{}");
 
-            var result = new CodeReviewer(client, CsharpDiff, "v1", new FakeSkillSelector(), FakeSkillSource.Default).Review();
+        var result = new CodeReviewer(
+            client, CsharpDiff, Settings("v1"), new FakeSkillSelector(), FakeSkillSource.Default).Review();
 
-            Assert.Equal("v1", result.PromptVersion);
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable("PROMPT_VERSION", previous);
-        }
+        Assert.Equal("v1", result.PromptVersion);
     }
 }

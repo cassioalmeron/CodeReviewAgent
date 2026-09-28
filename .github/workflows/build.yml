@@ -26,6 +26,10 @@ jobs:
         run: dotnet build src/CodeReviewerAgent/CodeReviewerAgent.slnx --no-restore
 
       # The EF tests open SQLite files under the temp folder; no server is needed.
+      # This step is also the architecture fitness function (US-018): ArchitectureTests fails the
+      # job when Core gains a dependency on infrastructure, a provider, the console, or a read of
+      # the process environment. It lives in the suite so the boundary is checked on every change,
+      # at no extra cost in time or money.
       - name: Test
         run: dotnet test src/CodeReviewerAgent/CodeReviewerAgent.Tests --no-build
 
