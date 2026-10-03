@@ -41,6 +41,10 @@ Every non-trivial decision here was written down before implementation and
 revisited afterwards against what actually happened, including the ones that were
 reversed. They are in **[docs/ADRs](docs/ADRs/README.md)**.
 
+How to *operate* it — run a review, deploy a change, recover a run that died part way, debug from
+storage without paying for a new call, and roll a prompt version forward or back — is in
+**[docs/RUNBOOK.md](docs/RUNBOOK.md)**.
+
 ## Tech stack
 
 - .NET 10 backend split into five projects (Core / Infra / Console / Api / Tests)
