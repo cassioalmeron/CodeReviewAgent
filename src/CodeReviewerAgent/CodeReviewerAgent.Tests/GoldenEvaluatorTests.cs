@@ -21,7 +21,7 @@ public class GoldenEvaluatorTests
     // One round, and skills off so the fake is not also asked to choose them: these cover the
     // loop, not the selection. This used to be GOLDEN_RUNS=1 and SKILLS=off in the process
     // environment, which is why the class had to serialize against every other one that moved a
-    // variable. The evaluator takes them as an argument now (US-018), so it no longer does.
+    // variable. The evaluator takes them as an argument now, so it no longer does.
     private static readonly GoldenSettings OneRound = new(Runs: 1, Skills: "off");
 
     // Answers with the finding that case-01 plants: right file, a snippet that really is an
@@ -292,7 +292,7 @@ public class GoldenEvaluatorTests
     }
 
     /// <summary>
-    /// T1 of US-011: with two prompt versions, every case yields one result per side — the
+    /// With two prompt versions, every case yields one result per side — the
     /// pair the future pairwise judge needs — and the sides never share a review id, only the
     /// diff underneath them.
     /// </summary>

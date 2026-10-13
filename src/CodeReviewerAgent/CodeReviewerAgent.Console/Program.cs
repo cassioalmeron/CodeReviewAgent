@@ -12,7 +12,7 @@ using CodeReviewerAgent.Infra;
 
 EnvFile.Load();
 
-// The boundary of US-018: every setting Core used to read from the process environment is read
+// The boundary: every setting Core used to read from the process environment is read
 // on this side of the line and handed in. Nothing below this project consults the environment,
 // which is what lets a second caller (the Api, an MCP host) run under its own configuration.
 OutputPaths.Configure(Setting("EVAL_OUTPUT_DIR"));
@@ -629,8 +629,8 @@ static bool ResolvedThinkingDisabled() =>
 // required constructor parameter instead of reaching for it itself.
 static string ResolvedPromptVersion() => Environment.GetEnvironmentVariable("PROMPT_VERSION") ?? "v2";
 
-// Everything a review runs under, in one value. Each field was an environment read inside Core
-// until US-018.
+// Everything a review runs under, in one value. Each field used to be an environment read
+// inside Core.
 static ReviewSettings ResolvedReviewSettings() => new(
     ResolvedPromptVersion(),
     Environment.GetEnvironmentVariable("LLM_ENGINE"),

@@ -13,7 +13,7 @@ namespace CodeReviewerAgent.Core.Skill;
 /// </summary>
 /// <remarks>
 /// The setting arrives as a parameter: it used to be read from the environment here, which made
-/// the strategy of a run invisible at the call site (US-018).
+/// the strategy of a run invisible at the call site.
 /// </remarks>
 public static class SkillSelectorFactory
 {

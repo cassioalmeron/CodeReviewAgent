@@ -90,7 +90,7 @@ public static class GoldenEvaluator
     /// </param>
     /// <param name="settings">
     /// How many rounds, how much concurrency, and what the rounds review under. Null runs the
-    /// defaults, which are the ones the environment variables used to fall back to (US-018).
+    /// defaults, which are the ones the environment variables used to fall back to.
     /// </param>
     public static GoldenRunResult Run(
         ILlmClient client, IReadOnlyList<string> promptVersions, string? filter = null,
@@ -326,7 +326,7 @@ public static class GoldenEvaluator
     /// </para>
     /// <para>
     /// Public so rounds recorded earlier can be scored again without running anything, which is how
-    /// the US-013 matrix was imported into the database.
+    /// the model matrix was imported into the database.
     /// </para>
     /// </summary>
     public static (GoldenCaseResult Result, IReadOnlyList<string> Verdicts) ScoreOneSide(

@@ -15,7 +15,7 @@ namespace CodeReviewerAgent.Tests;
 /// <c>GOLDEN_RUNS</c>, <c>SKILLS</c>, <c>GOLDEN_PARALLELISM</c>, <c>SKILL_EVAL_RUNS</c>,
 /// <c>PROMPT_VERSION</c> and <c>EVAL_OUTPUT_DIR</c> from inside the production code, so a test
 /// could only configure a run by moving process-wide state. Core takes its settings as arguments
-/// now (US-018), and those classes left this collection: they configure a run at the call and no
+/// now, and those classes left this collection: they configure a run at the call and no
 /// longer touch the environment at all. What remains here is the one class that tests reading the
 /// environment, which is Infra's job and belongs there.
 /// </para>

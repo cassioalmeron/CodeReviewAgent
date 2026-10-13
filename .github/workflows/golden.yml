@@ -1,4 +1,4 @@
-# The golden set as a regression check (plan 015, US-014): a change to what the LLM is told cannot make
+# The golden set as a regression check: a change to what the LLM is told cannot make
 # an old case worse. It runs only when something that changes the answer changes, and it costs about
 # US$ 0.03 per run on gpt-4o-mini. The configuration lives here, not in a .env, so changing the model
 # is an edit to this file, and that edit runs the check.

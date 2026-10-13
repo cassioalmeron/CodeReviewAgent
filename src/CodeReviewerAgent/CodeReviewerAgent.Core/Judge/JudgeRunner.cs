@@ -46,7 +46,7 @@ public static class JudgeRunner
     /// <param name="judgeModel">
     /// The model doing the judging, stronger than the executor to avoid self-preference bias. It
     /// is also part of what keys a resume, so it is stated rather than read from the environment
-    /// here (US-018): a run that resumed under a different model would blend two judges.
+    /// here: a run that resumed under a different model would blend two judges.
     /// </param>
     /// <param name="rubricVersion">Which versioned rubric the judge scores against.</param>
     /// <param name="thinkingDisabled">Whether to tell the model not to reason before answering.</param>

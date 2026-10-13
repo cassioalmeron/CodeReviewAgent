@@ -24,7 +24,7 @@ public class CodeReviewer
 
     /// <param name="settings">
     /// Prompt version, engine and skill strategy. These used to be read from the environment
-    /// inside this class and its collaborators (US-018).
+    /// inside this class and its collaborators.
     /// </param>
     /// <param name="skills">Where the skills come from; the files under <c>assets/skills/</c> by default.</param>
     /// <param name="progress">

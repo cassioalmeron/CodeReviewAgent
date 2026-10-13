@@ -13,7 +13,7 @@ public record PartialRun(int PairsRecorded, int PairsPlanned, int ExecutionsReco
 /// <summary>
 /// Renders a finished pairwise judge run as a Markdown report: a verdict table per case
 /// (majority vote per criterion, resolved into prompt-version terms) with the judge's reasoning
-/// per pair, and a top-level tally across the whole run — the actual answer of US-011.
+/// per pair, and a top-level tally across the whole run — the actual answer the pairwise judge owes.
 /// <para>
 /// Kept apart from <see cref="JudgeReportGenerator"/>, which renders the absolute 1-to-5 scoring
 /// path (rubric v1) and keeps rendering it for the stored-assessment route. The two judgment

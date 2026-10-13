@@ -11,7 +11,7 @@ namespace CodeReviewerAgent.Core.Diff;
 /// </summary>
 /// <param name="repositoryDirectory">
 /// The repository the commands run in, resolved by the entry point from <c>REPO_DIR</c>; blank
-/// means the current directory. It used to be read inside <c>ProcessRunner</c> (US-018).
+/// means the current directory. It used to be read inside <c>ProcessRunner</c>.
 /// </param>
 public static class DiffSourceFactory
 {

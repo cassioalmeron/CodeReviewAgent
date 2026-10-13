@@ -16,7 +16,7 @@ namespace CodeReviewerAgent.Core;
 /// </para>
 /// <para>
 /// The root arrives through <see cref="Configure"/>, called once by the entry point after it has
-/// loaded the configuration file. Core no longer reads <c>EVAL_OUTPUT_DIR</c> itself (US-018):
+/// loaded the configuration file. Core no longer reads <c>EVAL_OUTPUT_DIR</c> itself:
 /// reading it here made the value depend on which line of the process ran first, and it froze
 /// whatever the first test class to touch a path happened to have set. Configuring after
 /// something has already asked for a path still has no effect on that path, so the call belongs

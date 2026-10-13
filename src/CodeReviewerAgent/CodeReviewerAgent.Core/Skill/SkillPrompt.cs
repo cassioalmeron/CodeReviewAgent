@@ -13,7 +13,7 @@ public static class SkillPrompt
 {
     /// <summary>
     /// The version used when the caller names none. It used to be the fallback of
-    /// <c>SKILL_PROMPT_VERSION</c>, read here; the entry point reads that variable now (US-018).
+    /// <c>SKILL_PROMPT_VERSION</c>, read here; the entry point reads that variable now.
     /// </summary>
     public const string DefaultVersion = "v1";
 

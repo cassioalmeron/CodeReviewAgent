@@ -175,7 +175,7 @@ public class GoldenRoundStoreTests
     }
 
     // One round, skills off: what this class measures is the reuse, not the selection. It used to
-    // be GOLDEN_RUNS and SKILLS in the process environment (US-018).
+    // be GOLDEN_RUNS and SKILLS in the process environment.
     private static void RunOnce(CodeReviewDbContext context, ILlmClient client, IGoldenRoundStore store) =>
         GoldenEvaluator.Run(
             client,
