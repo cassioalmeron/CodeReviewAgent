@@ -9,16 +9,23 @@ This is not a hosted service. There is no container, no compose file and no depl
 this repository, and writing this document as if there were would make it useless. What actually
 runs unattended is this:
 
-- **Two GitHub Actions workflows.** [`build.yml`](../.github/workflows/build.yml) builds, tests and
+- **Three GitHub Actions workflows.** [`build.yml`](../.github/workflows/build.yml) builds, tests and
   lints on every push to `main` and every pull request, and the test step is also the architecture
   fitness function. [`golden.yml`](../.github/workflows/golden.yml) runs the golden set against a
   stored baseline whenever a prompt, a skill, a golden case or the workflow itself changes, and it
   spends real money on every run, around US$ 0.03 on `gpt-4o-mini`.
+  [`pr-review.yml`](../.github/workflows/pr-review.yml) is the agent reviewing a pull request on its
+  own, once, when the pull request is opened or reopened. It spends money too, cents per review on
+  `gpt-4o-mini`, and it runs under `COST_LIMIT_USD`.
 - **A store that outlives any single run** — files, SQLite or Postgres, per `STORAGE`.
 
 Everything else is started by hand: the Console CLI, the read-only Api and the web viewer. So
 **deploy** below means promoting a change to `main`, where the unattended part lives, and
-**production** means that store and those two workflows.
+**production** means that store and those three workflows.
+
+One thing the unattended side does *not* do: a review posted by `pr-review.yml` runs with
+`STORAGE=files` on the runner, so it never joins the historical series the viewer reads. That series
+comes from the runs started by hand.
 
 ## Before any scenario: where configuration lives
 
@@ -84,17 +91,22 @@ Promoting a change to `main`, which is where the unattended part runs.
    Core must not reference Infra or the Api, no provider type may leak into the domain, Core must
    not write to the terminal or read the environment, and the Infra-to-Core arrow must not invert.
    A violation fails here, before CI.
-3. **Open the pull request.** `build.yml` runs. If the change touched
-   `assets/prompts/**`, `assets/skills/**`, `assets/evals/golden/**` or `golden.yml` itself, then
-   `golden.yml` runs too and compares the result against the stored baseline.
-4. **Watch for one caveat:** `golden.yml` skips pull requests opened from forks, because a fork gets
-   no repository secrets and the run could not call the model. On a fork contribution the golden
-   check only happens after the merge, on `main`.
+3. **Open the pull request.** `build.yml` runs, and so does `pr-review.yml`, which posts the agent's
+   review as a comment. If the change touched `assets/prompts/**`, `assets/skills/**`,
+   `assets/evals/golden/**` or `golden.yml` itself, then `golden.yml` runs too and compares the
+   result against the stored baseline. Editing a comment inside `golden.yml` is enough to trigger
+   it, so a documentation-only change there still costs a golden run.
+4. **Watch for one caveat:** `golden.yml` and `pr-review.yml` both skip pull requests opened from
+   forks, because a fork gets no repository secrets and the run could not call the model. On a fork
+   contribution the golden check only happens after the merge, on `main`, and no review is posted.
+   **And `pr-review.yml` ends green even when the review fails**, by design, so the agent never
+   blocks a pull request. The honest check is whether the comment is there, not whether the tick is
+   green.
 5. **Merge.** `build.yml` runs again on `main`.
 6. **If the change touched prompts, skills or golden cases, confirm the golden run on `main` went
    green.** That run is the one that matters, because it is the one nobody is watching.
 
-**Rolling back code** is the same path in reverse: revert the commit on a branch, let both workflows
+**Rolling back code** is the same path in reverse: revert the commit on a branch, let the workflows
 run on the pull request, merge. Rolling back a *prompt* is scenario 5, and it is not the same thing.
 
 The Api and the viewer are started by hand and have nothing to deploy:

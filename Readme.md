@@ -67,7 +67,9 @@ storage without paying for a new call, and roll a prompt version forward or back
 
 ```
 .env.example                             # Configuration template (copy to .env)
-.github/workflows/build.yml              # CI
+.github/workflows/build.yml              # CI: build, tests and the architecture rules
+.github/workflows/golden.yml             # CI: the golden set as a regression check
+.github/workflows/pr-review.yml          # CI: the agent reviewing every pull request on its own
 src/CodeReviewerAgent/
 ├── CodeReviewerAgent.slnx
 ├── CodeReviewerAgent.Core/              # Class library — review + evaluation flow
@@ -569,6 +571,15 @@ comparison table shows on the run's summary page. To accept a change on purpose,
 the same configuration and `GOLDEN_BASELINE_WRITE` pointing at that file, and commit it with the change.
 The tolerance and the temperature were measured, not guessed: at the default temperature, identical runs
 moved a case by up to 3 clean rounds of 5.
+
+`.github/workflows/pr-review.yml` is **the agent reviewing a pull request on its own**: when one is
+opened or reopened, it runs `pr <n> --publish` and posts the findings as a comment, on gpt-4o-mini
+with the same `OPENAI_API_KEY`, under a `COST_LIMIT_USD` cap. `GITHUB_TOKEN` with `pull-requests:
+write` is what `gh` comments with, so no personal token is stored. Like the golden check it skips
+pull requests from forks, which get no secrets. Two things are deliberate: it reviews once per pull
+request rather than once per push, and it ends green even when the review fails, so the agent can
+never block a pull request. It runs with `STORAGE=files` on the runner, so these reviews do not join
+the historical series the viewer reads.
 
 ## Extending
 
