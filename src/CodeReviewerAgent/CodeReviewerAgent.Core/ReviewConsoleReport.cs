@@ -4,7 +4,7 @@ namespace CodeReviewerAgent.Core;
 /// The lines a finished review shows on a terminal, in the order it always showed them:
 /// the activated skills, the summary, then the findings one per line.
 /// <para>
-/// <see cref="CodeReviewer"/> used to write these itself (US-018). The wording stays here, next
+/// <see cref="CodeReviewer"/> used to write these itself. The wording stays here, next
 /// to the result it describes and reachable from a test, and the writing belongs to whoever owns
 /// the terminal. It is the same split <see cref="Golden.GoldenEvaluatorReport.FormatLine"/>
 /// already used for the golden set.

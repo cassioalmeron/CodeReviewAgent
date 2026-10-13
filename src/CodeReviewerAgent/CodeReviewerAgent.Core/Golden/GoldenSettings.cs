@@ -3,7 +3,7 @@ namespace CodeReviewerAgent.Core.Golden;
 /// <summary>
 /// What a golden run needs beyond the client, the cases and the prompt versions.
 /// <para>
-/// All of it used to be read from the environment inside the evaluator (US-018), which is why
+/// All of it used to be read from the environment inside the evaluator, which is why
 /// the golden tests had to set process-wide variables to control a run and serialize against
 /// each other to do it. The defaults are the fallbacks those variables had, so an instance
 /// built with no arguments runs exactly what an unconfigured process ran.

@@ -45,7 +45,7 @@ public class GoldenReportTests
     }
 
     /// <summary>
-    /// The pairwise case (T1 of US-011): two prompt versions over the same cases must never be
+    /// The pairwise case: two prompt versions over the same cases must never be
     /// blended into one rate, which is exactly the corruption the per-side split exists to
     /// prevent.
     /// </summary>

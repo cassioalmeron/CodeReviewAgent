@@ -7,7 +7,7 @@ namespace CodeReviewerAgent.Core;
 /// <see cref="Assessment"/>s of that run hang from (<see cref="Assessment.RunId"/>), and without it
 /// a stored assessment cannot say which execution produced it.
 /// <para>
-/// The regression rule of US-014 compares a case against the same case in an earlier run, so the
+/// The regression rule compares a case against the same case in an earlier run, so the
 /// run has to be an entity: "the previous run of this model" is not derivable from assessments
 /// that only know their own timestamp.
 /// </para>

@@ -12,7 +12,7 @@ namespace CodeReviewerAgent.Tests;
 /// These exercise <see cref="OutputPaths.Resolve"/>, the rule, rather than the properties, which
 /// answer from a value the entry point sets once at startup. The rule takes the value as an
 /// argument now, so nothing here moves the process environment and the class no longer has to
-/// serialize against the rest of the suite (US-018).
+/// serialize against the rest of the suite.
 /// </para>
 /// </summary>
 public class OutputPathsTests

@@ -7,8 +7,8 @@ namespace CodeReviewerAgent.Core;
 /// directory the caller hands in, so diffs and pull requests can be analyzed from another
 /// repository; when it is blank the current working directory is used.
 /// <para>
-/// That directory used to be read here from <c>REPO_DIR</c>. The entry point resolves it now
-/// (US-018), which is also why it is a parameter rather than a field: nothing below the entry
+/// That directory used to be read here from <c>REPO_DIR</c>. The entry point resolves it now,
+/// which is also why it is a parameter rather than a field: nothing below the entry
 /// point should be able to move where a command runs.
 /// </para>
 /// </summary>

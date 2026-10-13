@@ -7,7 +7,7 @@ using Xunit;
 namespace CodeReviewerAgent.Tests;
 
 /// <summary>
-/// The architecture fitness function (US-018). The physical boundary between Core and Infra was
+/// The architecture fitness function. The physical boundary between Core and Infra was
 /// drawn by ADR-009; these are what stop it from being quietly redrawn. They run inside the
 /// ordinary test suite, so the CI already enforces them on every push and pull request, and a
 /// regression fails a build instead of waiting to be caught in review.

@@ -62,7 +62,7 @@ public static class SkillTriggerEvaluator
     /// <param name="skills">Where the catalog comes from; the files under <c>assets/skills/</c> by default.</param>
     /// <param name="runs">
     /// How many times each case is scored. It used to be read here from <c>SKILL_EVAL_RUNS</c>;
-    /// the entry point reads that variable now (US-018) and the default is its old fallback.
+    /// the entry point reads that variable now and the default is its old fallback.
     /// </param>
     public static IReadOnlyList<SkillTriggerResult> Run(
         ISkillSelector selector, ISkillSource? skills = null, int runs = 3)

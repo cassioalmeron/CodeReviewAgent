@@ -5,7 +5,7 @@ namespace CodeReviewerAgent.Tests;
 
 /// <summary>
 /// What a finished review says on a terminal. <c>CodeReviewer</c> used to write these lines while
-/// it worked, so nothing could assert them without capturing stdout (US-018). They are a returned
+/// it worked, so nothing could assert them without capturing stdout. They are a returned
 /// value now, and this is what pins the wording.
 /// </summary>
 public class ReviewConsoleReportTests

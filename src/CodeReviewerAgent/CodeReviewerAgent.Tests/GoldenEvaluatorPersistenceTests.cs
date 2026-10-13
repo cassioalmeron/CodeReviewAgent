@@ -21,7 +21,7 @@ public class GoldenEvaluatorPersistenceTests
     // One round at a time, so "the client refused after three" means exactly three came back, and
     // skills off so the fake is not also asked to choose them. These were GOLDEN_RUNS,
     // GOLDEN_PARALLELISM and SKILLS in the process environment, set and restored around each test
-    // by a disposable; the evaluator takes them as an argument now (US-018).
+    // by a disposable; the evaluator takes them as an argument now.
     private static readonly GoldenSettings Sequential = new(Runs: 1, Parallelism: 1, Skills: "off");
 
     [Fact]

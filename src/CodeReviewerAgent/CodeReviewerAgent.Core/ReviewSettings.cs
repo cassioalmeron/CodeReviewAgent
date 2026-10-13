@@ -4,7 +4,7 @@ namespace CodeReviewerAgent.Core;
 /// The knobs of a review, resolved by the entry point and handed in.
 /// <para>
 /// Every one of these used to be an <c>Environment.GetEnvironmentVariable</c> call somewhere
-/// inside Core (US-018). The values and their defaults are unchanged; what changed is who reads
+/// inside Core. The values and their defaults are unchanged; what changed is who reads
 /// them. Core reading the process environment cost three things: the settings were invisible at
 /// the call site, so a reader of <c>Review()</c> could not tell what governed the run; the test
 /// suite had to serialize every class that touched a variable, because variables are

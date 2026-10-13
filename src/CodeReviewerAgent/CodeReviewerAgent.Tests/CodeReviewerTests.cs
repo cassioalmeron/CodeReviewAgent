@@ -9,7 +9,7 @@ namespace CodeReviewerAgent.Tests;
 public class CodeReviewerTests
 {
     // The reviewer takes its settings as an argument, so these only ever name the prompt version;
-    // the rest keeps the defaults an unconfigured process used to fall back to (US-018).
+    // the rest keeps the defaults an unconfigured process used to fall back to.
     private static ReviewSettings Settings(string promptVersion) => new(promptVersion);
 
     private const string CsharpDiff = """

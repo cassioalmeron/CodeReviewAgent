@@ -88,7 +88,7 @@ public class SkillTriggerEvaluatorTests
 
     /// <summary>
     /// The round count is an argument, so this no longer moves SKILL_EVAL_RUNS in the process
-    /// environment to say "four" (US-018).
+    /// environment to say "four".
     /// </summary>
     [Fact]
     public void Run_CountsTriggersPerRun()

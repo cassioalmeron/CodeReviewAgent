@@ -21,7 +21,7 @@ public static class GoldenEvaluatorReport
     /// Publishes a finished run: one report covering every round, each labelled with its golden
     /// verdict and the rate summary appended as a footer, plus the raw reviews for the judge.
     /// Both paths are returned rather than announced: what reaches a terminal is decided by
-    /// whoever owns one (US-018).
+    /// whoever owns one.
     /// </summary>
     public static GoldenArtefacts SaveReport(GoldenScore run)
     {

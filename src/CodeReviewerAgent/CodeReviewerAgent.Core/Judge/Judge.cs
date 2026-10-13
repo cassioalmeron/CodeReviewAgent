@@ -108,7 +108,7 @@ public class Judge
     /// <summary>
     /// Whether to ask the model explicitly not to reason before answering. The entry point
     /// resolves it from <c>JUDGE_THINKING</c> and hands it in; this class used to read that
-    /// variable itself (US-018).
+    /// variable itself.
     /// <para>
     /// Omitting the parameter does not mean the same thing on every model, and that bit us:
     /// generation 4.6 runs without extended thinking when it is absent, generation 5 runs adaptive

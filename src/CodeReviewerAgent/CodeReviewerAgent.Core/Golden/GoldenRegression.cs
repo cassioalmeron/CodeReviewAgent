@@ -45,7 +45,7 @@ public sealed record RegressionReport(string? Mismatch, IReadOnlyList<CaseCompar
 }
 
 /// <summary>
-/// US-014's rule: a change cannot make an old case worse. A case regresses when its clean rounds fall
+/// The regression rule: a change cannot make an old case worse. A case regresses when its clean rounds fall
 /// below the baseline by more than <see cref="Tolerance"/>.
 /// <para>
 /// Clean rounds, not detection, because they are ADR-015's measure of a case: found, quiet and exactly
