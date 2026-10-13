@@ -1,4 +1,5 @@
-﻿using System.Text.Encodings.Web;
+﻿using System.Globalization;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using CodeReviewerAgent.Core;
@@ -16,20 +17,25 @@ EnvFile.Load();
 // which is what lets a second caller (the Api, an MCP host) run under its own configuration.
 OutputPaths.Configure(Setting("EVAL_OUTPUT_DIR"));
 
+// Resolved once for the whole process and shared by every client this run builds, so the
+// cap is "one process execution", not "one client" — see CostBudget's doc comment for why a cap
+// per client (one per call site) is not the limit that was asked for.
+var costBudget = ResolvedCostLimitUsd() is { } costLimitUsd ? new CostBudget(costLimitUsd) : null;
+
 // Dispatch only: every command's body is a method below, in the same order as the branches here.
 // Order matters where patterns overlap — the id-bearing forms of `judge` and `judge-report` have to
 // be tested before their catch-alls.
 
 if (args.Contains("--json"))
 {
-    RunJson(args);
+    RunJson(args, costBudget);
     return;
 }
 
 // `judge <id>` — evaluate a stored assessment with the LLM-as-judge, saving the scores (Route B).
 if (args is ["judge", var judgeIdArg, ..] && int.TryParse(judgeIdArg, out var judgeAssessmentId))
 {
-    JudgeAssessment(judgeAssessmentId);
+    JudgeAssessment(judgeAssessmentId, costBudget);
     return;
 }
 
@@ -37,7 +43,7 @@ if (args is ["judge", var judgeIdArg, ..] && int.TryParse(judgeIdArg, out var ju
 // its own (stronger) client.
 if (args is ["judge", ..])
 {
-    RunPairwiseJudge();
+    RunPairwiseJudge(costBudget);
     return;
 }
 
@@ -46,14 +52,16 @@ if (args is ["judge", ..])
 if (args is ["eval", ..])
 {
     var (evalClient, evalModel) = LlmClientFactory.CreateWithModel();
-    RunGoldenSet(evalClient, evalModel, args.Length > 1 ? args[1] : null);
+    RunGoldenSet(
+        Budgeted(evalClient, ResolvedReviewSettings().Engine, evalModel, costBudget), evalModel,
+        args.Length > 1 ? args[1] : null);
     return;
 }
 
 // `all` — the golden set plus the judge over its results.
 if (args is ["all", ..])
 {
-    RunAll();
+    RunAll(costBudget);
     return;
 }
 
@@ -69,7 +77,7 @@ if (args is ["skills"])
 // Honours SKILLS, so `SKILLS=globs` scores the mechanical strategy on the same cases for free.
 if (args is ["skills-eval", ..])
 {
-    RunSkillTriggerEval();
+    RunSkillTriggerEval(costBudget);
     return;
 }
 
@@ -104,7 +112,7 @@ if (args is ["review", .. var sourceArgs])
 // `assess <id>` — analyze a stored review, saving a new assessment (history of N per review).
 if (args is ["assess", var assessIdArg, ..] && int.TryParse(assessIdArg, out var assessReviewId))
 {
-    AssessReview(assessReviewId);
+    AssessReview(assessReviewId, costBudget);
     return;
 }
 
@@ -137,7 +145,7 @@ if (args is ["judge-report", var evaluationIdArg, ..] && int.TryParse(evaluation
 }
 
 // No command matched: treat the args as a diff source and run the whole flow.
-ReviewAndPublish(args);
+ReviewAndPublish(args, costBudget);
 
 // ---------------------------------------------------------------------------------------------
 // Commands
@@ -146,7 +154,7 @@ ReviewAndPublish(args);
 // `<source> --json` — review a diff and print its findings as JSON to stdout, for the
 // Claude Code plugin. No report file; the pipeline's human progress is redirected to stderr so
 // stdout carries pure JSON the caller can parse.
-static void RunJson(string[] args)
+static void RunJson(string[] args, CostBudget? budget)
 {
     var sourceArgs = args.Where(a => a != "--json").ToArray();
 
@@ -175,8 +183,10 @@ static void RunJson(string[] args)
     Console.SetOut(Console.Error);
     var repos = RepositoryFactory.Create();
     var project = ProjectResolver.Resolve(repos.Projects, RepositoryDirectory());
+    var jsonReviewSettings = ResolvedReviewSettings();
     var review = new CodeReviewer(
-        LlmClientFactory.Create(), diff, ResolvedReviewSettings(), progress: ConsoleProgress.Out).Review();
+        Budgeted(LlmClientFactory.Create(), jsonReviewSettings.Engine, model: null, budget), diff,
+        jsonReviewSettings, progress: ConsoleProgress.Out).Review();
     var reviewId = repos.Reviews.GetOrAdd(new Review
     {
         ProjectId = project.Id,
@@ -227,7 +237,7 @@ static void PrintStoredAssessment(int assessmentId, JsonSerializerOptions option
         }, options));
 }
 
-static void JudgeAssessment(int assessmentId)
+static void JudgeAssessment(int assessmentId, CostBudget? budget)
 {
     var store = RepositoryFactory.Create();
     var assessment = store.Assessments.Get(assessmentId)
@@ -238,24 +248,25 @@ static void JudgeAssessment(int assessmentId)
     var judgeModel = ResolvedJudgeModel();
     var rubricVersion = Environment.GetEnvironmentVariable("RUBRIC_VERSION") ?? "v1";
     var judge = new Judge(
-        LlmClientFactory.CreateClaude(judgeModel), rubricVersion, ResolvedThinkingDisabled());
+        Budgeted(LlmClientFactory.CreateClaude(judgeModel), "claude", judgeModel, budget), rubricVersion,
+        ResolvedThinkingDisabled());
     var outcome = judge.Evaluate(review.Content, ToReviewResult(assessment, review.Content));
 
     var evaluationId = store.Evaluations.Save(ToEvaluation(assessmentId, judgeModel, rubricVersion, outcome));
     Console.WriteLine($"Evaluation saved with id {evaluationId} (overall {outcome.Judgment.Overall}/5)");
 }
 
-static void RunAll()
+static void RunAll(CostBudget? budget)
 {
     var (executor, executorModel) = LlmClientFactory.CreateWithModel();
-    RunGoldenSet(executor, executorModel);
-    RunPairwiseJudge();
+    RunGoldenSet(Budgeted(executor, ResolvedReviewSettings().Engine, executorModel, budget), executorModel);
+    RunPairwiseJudge(budget);
 }
 
 // The judge's whole configuration is resolved here and passed in; JudgeRunner used to read the
 // model and the rubric from the environment itself, which hid what a resumed run would blend.
-static void RunPairwiseJudge() => JudgeRunner.Run(
-    JudgeClient(), ResolvedJudgeRuns(), ResolvedJudgeModel(),
+static void RunPairwiseJudge(CostBudget? budget) => JudgeRunner.Run(
+    JudgeClient(budget), ResolvedJudgeRuns(), ResolvedJudgeModel(),
     Environment.GetEnvironmentVariable("RUBRIC_VERSION") ?? "v2",
     ResolvedThinkingDisabled(), ConsoleProgress.Out);
 
@@ -371,6 +382,29 @@ static void CheckBaseline(GoldenRunResult result, GoldenScore run, string? execu
 static string? Setting(string name) =>
     Environment.GetEnvironmentVariable(name) is { } value && !string.IsNullOrWhiteSpace(value) ? value : null;
 
+// Hard per-run cost cap: the provider's own cap protects the account, this one protects
+// a single `dotnet run` — unset means no cap, which is what every call site did before this existed.
+// Read once, at the top of the process (see `costBudget` above); a call site only reads this
+// again if it ever needs to build its own budget, which none should.
+static decimal? ResolvedCostLimitUsd()
+{
+    var configured = Setting("COST_LIMIT_USD");
+    if (configured is null)
+        return null;
+
+    return decimal.TryParse(configured, NumberStyles.Float, CultureInfo.InvariantCulture, out var value) && value > 0
+        ? value
+        : throw new InvalidOperationException(
+            $"COST_LIMIT_USD '{configured}' is not a positive number (use a dot: 5.00).");
+}
+
+// Wraps a spending client with the shared budget, when one is configured; returns the client
+// untouched otherwise, so an unset COST_LIMIT_USD leaves every call site byte-for-byte what it was
+// before this existed. `budget` is the one instance resolved for the whole process — passing it in
+// rather than resolving a new one here is what keeps the cap "one process run", not "one client".
+static ILlmClient Budgeted(ILlmClient client, string? engine, string? model, CostBudget? budget) =>
+    budget is null ? client : new BudgetedLlmClient(client, engine, model, budget);
+
 static void ListSkills()
 {
     var (catalog, diagnostics) = SkillCatalog.Discover();
@@ -395,12 +429,12 @@ static void ShowSkill(string skillName)
     Console.Write(SkillCatalog.Activate(skill).Render());
 }
 
-static void RunSkillTriggerEval()
+static void RunSkillTriggerEval(CostBudget? budget)
 {
     var settings = ResolvedReviewSettings();
     var selector = SkillSelectorFactory.Create(
-        LlmClientFactory.Create(), settings.Skills, settings.SkillPromptVersion, settings.Engine,
-        ConsoleProgress.Out);
+        Budgeted(LlmClientFactory.Create(), settings.Engine, model: null, budget), settings.Skills,
+        settings.SkillPromptVersion, settings.Engine, ConsoleProgress.Out);
     var names = SkillCatalog.Discover().Skills.Select(s => s.Name).ToList();
     var results = SkillTriggerEvaluator.Run(selector, runs: ResolvedSkillEvalRuns());
 
@@ -450,14 +484,15 @@ static void CaptureReview(string[] sourceArgs)
     Console.WriteLine($"Review saved with id {id}");
 }
 
-static void AssessReview(int reviewId)
+static void AssessReview(int reviewId, CostBudget? budget)
 {
     var repos = RepositoryFactory.Create();
     var review = repos.Reviews.Get(reviewId)
         ?? throw new InvalidOperationException($"No review with id {reviewId}.");
+    var assessSettings = ResolvedReviewSettings();
     var result = new CodeReviewer(
-        LlmClientFactory.Create(), review.Content, ResolvedReviewSettings(),
-        progress: ConsoleProgress.Out).Review();
+        Budgeted(LlmClientFactory.Create(), assessSettings.Engine, model: null, budget), review.Content,
+        assessSettings, progress: ConsoleProgress.Out).Review();
     PrintReview(result);
     var assessmentId = repos.Assessments.Save(Assessment.FromReview(reviewId, result));
     Console.WriteLine($"Assessment saved with id {assessmentId}");
@@ -533,10 +568,10 @@ static void EvaluationJudgeReport(int evaluationId)
 
 // Combined convenience (backward compatible): capture + assess + report in one shot.
 // `pr <n> --publish` still posts the findings to the PR.
-static void ReviewAndPublish(string[] args)
+static void ReviewAndPublish(string[] args, CostBudget? budget)
 {
     var repos = RepositoryFactory.Create();
-    var client = LlmClientFactory.Create();
+    var client = Budgeted(LlmClientFactory.Create(), ResolvedReviewSettings().Engine, model: null, budget);
     var diffSource = DiffSourceFactory.Create(args, RepositoryDirectory());
     try
     {
@@ -574,7 +609,8 @@ static void ReviewAndPublish(string[] args)
 // ---------------------------------------------------------------------------------------------
 
 // The judge uses a stronger model (JUDGE_MODEL) than the executor to avoid self-preference bias.
-static ILlmClient JudgeClient() => LlmClientFactory.CreateClaude(ResolvedJudgeModel());
+static ILlmClient JudgeClient(CostBudget? budget) =>
+    Budgeted(LlmClientFactory.CreateClaude(ResolvedJudgeModel()), "claude", ResolvedJudgeModel(), budget);
 
 static string ResolvedJudgeModel() =>
     Environment.GetEnvironmentVariable("JUDGE_MODEL") ?? "claude-sonnet-4-6";

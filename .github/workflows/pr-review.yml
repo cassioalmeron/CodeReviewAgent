@@ -1,0 +1,55 @@
+# The agent reviews every pull request on its own. This is the half of the CI that calls a model:
+# one review per pull request, on the same engine and the same secret the golden set already uses.
+# The cheap build and the architecture rules are in build.yml and run on every push.
+name: pr review
+
+on:
+  pull_request:
+    # Opened and reopened only, which is one review per pull request. Reviewing every push would
+    # multiply the cost and bury the conversation under repeated comments.
+    types: [opened, reopened]
+
+jobs:
+  review:
+    name: Code review on the pull request
+    # Pull requests from forks get no secrets, so the run could not call the model.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # `gh pr comment` needs write access to pull requests. Nothing here writes code.
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      LLM_ENGINE: openai
+      OPENAI_MODEL: gpt-4o-mini
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      # The version the golden set measures, so what reviews a pull request is what the baseline
+      # covers. Changing it here without changing it in golden.yml would review under a prompt
+      # nothing has measured.
+      PROMPT_VERSION: v3
+      SKILLS: globs
+      # There is no Postgres on the runner, so a review done here is written as a file and does not
+      # join the historical series the dashboard reads. That series comes from the local runs, and
+      # this is the known gap of running the agent on a hosted runner.
+      STORAGE: files
+      # A stop, not a budget: one review costs cents, and this ends a run that goes wrong before it
+      # spends. It is the hard limit the application enforces around every call to the model.
+      COST_LIMIT_USD: '0.50'
+      # What `gh` authenticates with. The job token can comment on a pull request of this
+      # repository, so no personal token is stored.
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      # `pr <n> --publish` reads the diff with `gh pr diff`, reviews it, and posts the findings with
+      # `gh pr comment`. The command swallows its own errors on purpose, so the agent never blocks a
+      # pull request: when a review fails, this step still ends green and says why on stderr.
+      - name: Review the pull request
+        run: >
+          dotnet run --project src/CodeReviewerAgent/CodeReviewerAgent.Console --no-launch-profile
+          -- pr ${{ github.event.pull_request.number }} --publish
