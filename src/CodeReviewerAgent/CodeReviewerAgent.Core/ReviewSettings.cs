@@ -27,8 +27,22 @@ namespace CodeReviewerAgent.Core;
 /// <c>globs</c> selects mechanically, <c>off</c> selects nothing, and a comma-separated list
 /// pins exactly those names.
 /// </param>
+/// <param name="Pattern">
+/// How the review is made (<c>REVIEW_PATTERN</c>): <c>single</c>, the default, is one call to the
+/// model; <c>voting</c> is four parallel reviews, one per subject, merged. Voting multiplies the
+/// cost of a review by about four, so it is never the default.
+/// </param>
 public sealed record ReviewSettings(
     string PromptVersion,
     string? Engine = null,
     string SkillPromptVersion = "v1",
-    string? Skills = null);
+    string? Skills = null,
+    string Pattern = ReviewSettings.SinglePattern)
+{
+    public const string SinglePattern = "single";
+    public const string VotingPattern = "voting";
+
+    public static bool IsKnownPattern(string pattern) =>
+        string.Equals(pattern, SinglePattern, StringComparison.OrdinalIgnoreCase)
+        || string.Equals(pattern, VotingPattern, StringComparison.OrdinalIgnoreCase);
+}

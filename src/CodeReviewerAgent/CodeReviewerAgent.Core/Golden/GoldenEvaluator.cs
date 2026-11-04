@@ -114,14 +114,16 @@ public static class GoldenEvaluator
                 null,
                 wholeSet,
                 startedAt,
-                clock.ElapsedMilliseconds);
+                clock.ElapsedMilliseconds,
+                settings.Pattern);
         }
         catch (Exception failure)
         {
             // Only the paid phase is caught. A bug in the scoring below is a bug and must still
             // crash: turning it into "the run failed" would hide it behind a plausible outcome.
             return new GoldenRunResult(
-                null, CompletedRounds(rounds, cases, diffs), failure, wholeSet, startedAt, clock.ElapsedMilliseconds);
+                null, CompletedRounds(rounds, cases, diffs), failure, wholeSet, startedAt, clock.ElapsedMilliseconds,
+                settings.Pattern);
         }
     }
 
@@ -297,6 +299,7 @@ public static class GoldenEvaluator
                 Engine = reviews.Select(r => r.Engine).FirstOrDefault(e => e is not null),
                 Skills = score.Condition.Setting,
                 PromptVersion = side.Key,
+                Pattern = result.Pattern,
                 StartedAt = result.StartedAt,
                 DurationMs = result.DurationMs,
                 ReportFile = reportFile,

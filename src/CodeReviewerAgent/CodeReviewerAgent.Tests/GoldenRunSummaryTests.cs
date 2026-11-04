@@ -54,4 +54,13 @@ public class GoldenRunSummaryTests
         Assert.Equal((2, 5, 1, GateDirection.Max, true), (trapNoise.Part, trapNoise.Whole, trapNoise.Floor, trapNoise.Direction, trapNoise.Passed));
         Assert.Equal(5, run.Gates!.Count);
     }
+
+    [Fact]
+    public void GoldenRunSummaryTests_Build_keeps_the_pattern_the_caller_put_in_the_identity()
+    {
+        var run = GoldenRunSummary.Build(new GoldenRun { Model = "m", Pattern = "voting" }, [], []);
+
+        Assert.Equal("voting", run.Pattern);
+        Assert.Equal("single", GoldenRunSummary.Build(new GoldenRun { Model = "m" }, [], []).Pattern);
+    }
 }

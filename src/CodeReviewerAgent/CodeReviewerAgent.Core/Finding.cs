@@ -62,6 +62,11 @@ public record Finding(
 /// wrong line is indistinguishable from one that never saw it. Persisted as
 /// <see cref="Assessment.DiscardedFindings"/>.
 /// </param>
+/// <param name="OutOfScopeFindings">
+/// Findings a voting review dropped because their category belongs to another review's subject.
+/// Kept apart from <paramref name="DiscardedFindings"/>, which means the cited line is not in the diff.
+/// Always zero for a single review.
+/// </param>
 public record ReviewResult(
     string? Summary,
     List<Finding>? Findings,
@@ -74,4 +79,5 @@ public record ReviewResult(
     int OutputTokens = 0,
     string? Diff = null,
     string? Skills = null,
-    int DiscardedFindings = 0);
+    int DiscardedFindings = 0,
+    int OutOfScopeFindings = 0);

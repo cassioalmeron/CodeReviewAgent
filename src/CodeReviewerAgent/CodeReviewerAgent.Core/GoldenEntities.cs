@@ -20,6 +20,12 @@ public record GoldenRun
     /// <summary>The skills condition of the run ("off", "globs", ...), not the selected skills of a round.</summary>
     public string? Skills { get; init; }
     public string? PromptVersion { get; init; }
+    /// <summary>
+    /// The orchestration pattern that produced the run ("single", "voting"). Model, engine, skills and
+    /// prompt version say nothing about how the review was carried out, so without it two runs of
+    /// different patterns over the same set are identical in the history and cannot be compared.
+    /// </summary>
+    public string Pattern { get; init; } = "single";
     public DateTime StartedAt { get; init; }
     /// <summary>
     /// Wall-clock time of the whole run. Not derivable from the assessments: paid runs review several

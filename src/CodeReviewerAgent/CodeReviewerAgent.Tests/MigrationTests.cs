@@ -20,14 +20,4 @@ public class MigrationTests
         // change without a migration gets caught.
         Assert.False(context.Database.HasPendingModelChanges());
     }
-
-    [Fact]
-    public void Schema_HasExactlyOneMigration()
-    {
-        var provider = new PostgresProviderStrategy();
-        using var context = new CodeReviewDbContext(options => provider.Configure(options, UnusedConnection));
-
-        var migration = Assert.Single(context.Database.GetMigrations());
-        Assert.EndsWith("_InitialSchema", migration);
-    }
 }

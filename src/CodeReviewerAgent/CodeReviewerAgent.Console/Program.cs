@@ -279,9 +279,11 @@ static void RunGoldenSet(ILlmClient executor, string? executorModel, string? fil
     // instead of buying the same reviews twice. Wired here, not inside the evaluator: running
     // the set stays free of I/O unless this layer asks for it. The model comes from the factory
     // that built the client, so what keys the resume is what will actually be called; the
-    // temperature keys it too, since a round sampled at 0 and one at the default differ.
+    // temperature and the review pattern key it too, since a round sampled at 0 differs from one at
+    // the default, and four voting calls differ from one.
     var store = new FileGoldenRoundStore(
-        FileGoldenRoundStore.DefaultPath, executorModel, Environment.GetEnvironmentVariable("SKILLS"), temperature);
+        FileGoldenRoundStore.DefaultPath, executorModel, Environment.GetEnvironmentVariable("SKILLS"), temperature,
+        ResolvedReviewPattern());
     if (store.ResumableCount > 0)
         Console.WriteLine($"Resuming: {store.ResumableCount} round(s) already recorded for this configuration.");
     else if (executorModel is null)
@@ -635,7 +637,13 @@ static ReviewSettings ResolvedReviewSettings() => new(
     ResolvedPromptVersion(),
     Environment.GetEnvironmentVariable("LLM_ENGINE"),
     Environment.GetEnvironmentVariable("SKILL_PROMPT_VERSION") ?? SkillPrompt.DefaultVersion,
-    Environment.GetEnvironmentVariable("SKILLS"));
+    Environment.GetEnvironmentVariable("SKILLS"),
+    ResolvedReviewPattern());
+
+// How the review is made: one call (the default) or the voting pattern. Read once, for both the
+// review and the golden run, so the two cannot disagree.
+static string ResolvedReviewPattern() =>
+    Environment.GetEnvironmentVariable("REVIEW_PATTERN") ?? ReviewSettings.SinglePattern;
 
 // The same, for a golden run: its own round count and concurrency, plus what the rounds review under.
 static GoldenSettings ResolvedGoldenSettings() => new(
@@ -643,7 +651,8 @@ static GoldenSettings ResolvedGoldenSettings() => new(
     int.TryParse(Environment.GetEnvironmentVariable("GOLDEN_PARALLELISM"), out var p) && p > 0 ? p : 4,
     Environment.GetEnvironmentVariable("SKILLS"),
     Environment.GetEnvironmentVariable("LLM_ENGINE"),
-    Environment.GetEnvironmentVariable("SKILL_PROMPT_VERSION") ?? SkillPrompt.DefaultVersion);
+    Environment.GetEnvironmentVariable("SKILL_PROMPT_VERSION") ?? SkillPrompt.DefaultVersion,
+    ResolvedReviewPattern());
 
 static int ResolvedSkillEvalRuns() =>
     int.TryParse(Environment.GetEnvironmentVariable("SKILL_EVAL_RUNS"), out var n) && n > 0 ? n : 3;

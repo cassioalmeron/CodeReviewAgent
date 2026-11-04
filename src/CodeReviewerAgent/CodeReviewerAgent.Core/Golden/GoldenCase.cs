@@ -138,7 +138,8 @@ public record GoldenRunResult(
     Exception? Failure,
     bool WholeSet = true,
     DateTime StartedAt = default,
-    long DurationMs = 0)
+    long DurationMs = 0,
+    string Pattern = ReviewSettings.SinglePattern)
 {
     public bool Succeeded => Failure is null;
 }

@@ -97,6 +97,60 @@ public class GoldenRoundStoreTests
     }
 
     /// <summary>
+    /// A review made by four voting calls is not the one a single call makes. A round stored under
+    /// one pattern must never be offered to a run of the other, in either direction.
+    /// </summary>
+    [Fact]
+    public void GoldenRoundStoreTests_Find_IgnoresRoundsFromAnotherPattern()
+    {
+        var path = TempPath();
+        try
+        {
+            new FileGoldenRoundStore(path, "haiku", "off", pattern: "single")
+                .Record("sql-injection", "v3", 0, Review("by one call"));
+            new FileGoldenRoundStore(path, "haiku", "off", pattern: "voting")
+                .Record("sql-injection", "v3", 1, Review("by four calls"));
+
+            var voting = new FileGoldenRoundStore(path, "haiku", "off", pattern: "voting");
+            var single = new FileGoldenRoundStore(path, "haiku", "off", pattern: "single");
+
+            Assert.Null(voting.Find("sql-injection", "v3", 0));
+            Assert.Equal("by four calls", voting.Find("sql-injection", "v3", 1)!.Summary);
+            Assert.Equal("by one call", single.Find("sql-injection", "v3", 0)!.Summary);
+            Assert.Null(single.Find("sql-injection", "v3", 1));
+            Assert.Equal(1, voting.ResumableCount);
+            Assert.Equal(1, single.ResumableCount);
+        }
+        finally { File.Delete(path); }
+    }
+
+    /// <summary>
+    /// Records written before the pattern existed were single calls. They stay reusable by a
+    /// single run, and are never offered to a voting one.
+    /// </summary>
+    [Fact]
+    public void GoldenRoundStoreTests_Find_ReadsARecordWithoutAPatternAsSingle()
+    {
+        var path = TempPath();
+        try
+        {
+            new FileGoldenRoundStore(path, "haiku", "off")
+                .Record("sql-injection", "v3", 0, Review("written before the pattern"));
+            var withPattern = File.ReadAllText(path);
+            Assert.Contains("\"pattern\":\"single\"", withPattern);
+            File.WriteAllText(path, withPattern.Replace(",\"pattern\":\"single\"", ""));
+            Assert.DoesNotContain("\"pattern\":", File.ReadAllText(path));
+
+            var single = new FileGoldenRoundStore(path, "haiku", "off", pattern: "single");
+            var voting = new FileGoldenRoundStore(path, "haiku", "off", pattern: "voting");
+
+            Assert.Equal("written before the pattern", single.Find("sql-injection", "v3", 0)!.Summary);
+            Assert.Null(voting.Find("sql-injection", "v3", 0));
+        }
+        finally { File.Delete(path); }
+    }
+
+    /// <summary>
     /// A run that cannot name its own model cannot claim a stored round was produced by it. It
     /// still records, so the work is not lost; it just refuses to resume.
     /// </summary>

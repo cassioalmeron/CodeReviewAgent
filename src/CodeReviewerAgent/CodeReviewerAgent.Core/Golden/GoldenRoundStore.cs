@@ -19,6 +19,15 @@ namespace CodeReviewerAgent.Core.Golden;
 /// record written before <c>LLM_TEMPERATURE</c> existed was, so those stay reusable by default runs
 /// and are never offered to a run at 0.
 /// </para>
+/// <para>
+/// <see cref="Pattern"/> is the fourth condition: a review made by four parallel calls and voted
+/// on is not the same measurement as one made by a single call, in findings and in cost. Offering
+/// a <c>single</c> round to a <c>voting</c> run printed "Resuming", never called the model, and
+/// stored the single-call results and cost under the voting label: wrong output that looks
+/// exactly like clean output. Unlike the temperature there is no "unset" here, because no round
+/// runs without a pattern: a record written before the field existed was a single call, so it
+/// reads as <c>single</c>, the same convention as the <c>Pattern</c> column of a golden run.
+/// </para>
 /// </summary>
 public record GoldenRoundRecord(
     string Case,
@@ -27,7 +36,8 @@ public record GoldenRoundRecord(
     string? Model,
     string? Skills,
     ReviewResult Review,
-    double? Temperature = null);
+    double? Temperature = null,
+    string Pattern = ReviewSettings.SinglePattern);
 
 /// <summary>
 /// Durable record of the golden set's paid rounds. <see cref="GoldenEvaluator.Run"/> takes this
@@ -70,6 +80,7 @@ public sealed class FileGoldenRoundStore : IGoldenRoundStore
     private readonly string? _model;
     private readonly string? _skills;
     private readonly double? _temperature;
+    private readonly string _pattern;
     private readonly Dictionary<(string, string, int), ReviewResult> _completed;
     private readonly Lock _writeLock = new();
 
@@ -81,13 +92,17 @@ public sealed class FileGoldenRoundStore : IGoldenRoundStore
     /// </param>
     /// <param name="skills">The <c>SKILLS</c> setting, which is the run's other condition.</param>
     /// <param name="temperature">The executor's temperature; null is the provider's default.</param>
-    public FileGoldenRoundStore(string path, string? model, string? skills, double? temperature = null)
+    /// <param name="pattern">How the rounds review (<c>REVIEW_PATTERN</c>); records of another pattern are never reused.</param>
+    public FileGoldenRoundStore(
+        string path, string? model, string? skills, double? temperature = null,
+        string pattern = ReviewSettings.SinglePattern)
     {
         _path = path;
         _model = model;
         _skills = skills;
         _temperature = temperature;
-        _completed = model is null ? [] : LoadMatching(path, model, skills, temperature);
+        _pattern = pattern;
+        _completed = model is null ? [] : LoadMatching(path, model, skills, temperature, pattern);
     }
 
     /// <summary>How many rounds a previous run already paid for and this one can skip.</summary>
@@ -98,7 +113,7 @@ public sealed class FileGoldenRoundStore : IGoldenRoundStore
 
     public void Record(string caseName, string promptVersion, int runIndex, ReviewResult review)
     {
-        var record = new GoldenRoundRecord(caseName, promptVersion, runIndex, _model, _skills, review, _temperature);
+        var record = new GoldenRoundRecord(caseName, promptVersion, runIndex, _model, _skills, review, _temperature, _pattern);
         var line = JsonSerializer.Serialize(record, Options);
 
         lock (_writeLock)
@@ -148,11 +163,13 @@ public sealed class FileGoldenRoundStore : IGoldenRoundStore
     /// so a re-run of the same round under the same configuration reads as the newer answer.
     /// </summary>
     public static Dictionary<(string, string, int), ReviewResult> LoadMatching(
-        string path, string model, string? skills, double? temperature = null)
+        string path, string model, string? skills, double? temperature = null,
+        string pattern = ReviewSettings.SinglePattern)
     {
         var matching = new Dictionary<(string, string, int), ReviewResult>();
         foreach (var record in Load(path))
-            if (record.Model == model && record.Skills == skills && record.Temperature == temperature)
+            if (record.Model == model && record.Skills == skills && record.Temperature == temperature
+                && string.Equals(record.Pattern, pattern, StringComparison.OrdinalIgnoreCase))
                 matching[(record.Case, record.PromptVersion, record.RunIndex)] = record.Review;
         return matching;
     }

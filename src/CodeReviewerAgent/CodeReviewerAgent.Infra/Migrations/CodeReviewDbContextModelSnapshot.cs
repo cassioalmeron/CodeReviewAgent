@@ -305,6 +305,12 @@ namespace CodeReviewerAgent.Infra.Migrations
                     b.Property<int>("OutputTokens")
                         .HasColumnType("integer");
 
+                    b.Property<string>("Pattern")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("text")
+                        .HasDefaultValue("single");
+
                     b.Property<string>("PromptVersion")
                         .HasColumnType("text");
 

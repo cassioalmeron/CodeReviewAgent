@@ -11,6 +11,7 @@ internal sealed class GoldenRunConfiguration : IEntityTypeConfiguration<GoldenRu
         builder.ToTable("GoldenRun");
         builder.HasKey(r => r.Id);
         builder.Property(r => r.Model).IsRequired();
+        builder.Property(r => r.Pattern).IsRequired().HasDefaultValue("single");
         builder.Property(r => r.Cost).HasPrecision(CostPrecision.Precision, CostPrecision.Scale);
         builder.HasMany(r => r.Cases)
             .WithOne()

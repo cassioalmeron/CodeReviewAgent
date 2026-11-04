@@ -22,8 +22,9 @@ The records are in chronological order. Read together, they trace the project fr
 | [013](ADR-013-skills-harness-model-activation.md) | Rebuild the skills harness on the Agent Skills specification, with activation decided by the model | 2026-08-05 |
 | [014](ADR-014-pairwise-judge-per-criterion.md) | Judge pairwise with a verdict per criterion and a legitimate tie | 2026-08-10 |
 | [015](ADR-015-composite-metric-approval-criterion.md) | Replace the golden set's boolean verdict with a composite metric and an approval criterion | 2026-09-04 |
+| [008](ADR-008-voting-pattern-off-by-default.md) | Build the Voting pattern and leave it off by default, keeping the single call as the agent's path | 2026-11-01 |
 
-There is no ADR-008. The number was skipped and never used.
+ADR-008 comes last despite its number. It was reserved early for the parallelization decision, stayed empty while that decision was postponed, and was written once the golden set could measure the two patterns against each other.
 
 ## Threads worth following
 

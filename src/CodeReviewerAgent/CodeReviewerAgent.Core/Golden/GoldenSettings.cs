@@ -21,14 +21,16 @@ namespace CodeReviewerAgent.Core.Golden;
 /// </param>
 /// <param name="Engine">The engine name, for estimating cost when the client reports none (<c>LLM_ENGINE</c>).</param>
 /// <param name="SkillPromptVersion">Which versioned skill prompts the rounds use (<c>SKILL_PROMPT_VERSION</c>).</param>
+/// <param name="Pattern">How the rounds review (<c>REVIEW_PATTERN</c>); it is also recorded on the run.</param>
 public sealed record GoldenSettings(
     int Runs = 3,
     int Parallelism = 4,
     string? Skills = null,
     string? Engine = null,
-    string SkillPromptVersion = Skill.SkillPrompt.DefaultVersion)
+    string SkillPromptVersion = Skill.SkillPrompt.DefaultVersion,
+    string Pattern = ReviewSettings.SinglePattern)
 {
     /// <summary>The settings one side of the run reviews under.</summary>
     public ReviewSettings Review(string promptVersion) =>
-        new(promptVersion, Engine, SkillPromptVersion, Skills);
+        new(promptVersion, Engine, SkillPromptVersion, Skills, Pattern);
 }

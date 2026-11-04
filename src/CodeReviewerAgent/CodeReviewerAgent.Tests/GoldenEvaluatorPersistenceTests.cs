@@ -116,6 +116,33 @@ public class GoldenEvaluatorPersistenceTests
         }
     }
 
+    [Theory]
+    [InlineData("voting")]
+    [InlineData("single")]
+    public void GoldenEvaluatorPersistenceTests_The_run_records_the_pattern_the_rounds_reviewed_under(string pattern)
+    {
+        var dbPath = Path.Combine(Path.GetTempPath(), $"cra-persist-{Guid.NewGuid():N}.db");
+
+        try
+        {
+            using var context = new CodeReviewDbContext(
+                o => new SqliteProviderStrategy().Configure(o, $"Data Source={dbPath}"));
+            context.Database.Migrate();
+
+            var result = GoldenEvaluator.Run(
+                new FakeLlmClient(EmptyReview), ["v3"], settings: Sequential with { Pattern = pattern });
+            GoldenEvaluator.Persist(result, TestRepositories.For(context));
+
+            var run = new EfGoldenRunRepository(context).List().Single();
+            Assert.Equal(pattern, run.Pattern);
+            Assert.Equal("v3", run.PromptVersion);
+        }
+        finally
+        {
+            try { File.Delete(dbPath); } catch { /* pooled connection may hold the file */ }
+        }
+    }
+
     [Fact]
     public void Run_WithAFilter_KeepsTheAssessmentsButRecordsNoRun()
     {

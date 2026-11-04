@@ -34,13 +34,19 @@ from the executable and loads every one it finds, nearest first, never overwriti
 set, and a variable already exported in the shell wins over every file. Start from the configuration
 template at the repository root, described in the Readme's Configuration section.
 
-Three variables decide what a command does and what it costs:
+Four variables decide what a command does and what it costs:
 
 | Variable | What it decides |
 |---|---|
 | `LLM_ENGINE` | which provider is called; `ollama` and the Claude subscription engines cost nothing per call |
 | `PROMPT_VERSION` | which file under `assets/prompts/` is sent as the system prompt |
 | `STORAGE` | where reviews and assessments are written |
+| `REVIEW_PATTERN` | `single`, the default, is one call to the model; `voting` is four parallel reviews, one per subject, merged. Voting multiplies the cost of a review by about four, so it is never the default and is not what CI runs |
+
+**One warning about running anything with `dotnet run`.** The Console has a `launchSettings.json`,
+and `dotnet run` applies its first profile when none is asked for. That profile sets `SKILLS`, and a
+profile's variable beats one exported in the shell, so a run meant for `globs` silently measures
+`all` instead. Pass `--no-launch-profile` whenever the configuration of the run is the point.
 
 And the commands split cleanly. `assess`, `judge`, `eval` and `all` call the model. `review`,
 `report`, `skills`, `projects` and every `judge-report` do not, which makes them always safe to
@@ -134,11 +140,22 @@ is not a smaller truth, it is a wrong number.
 `reviews/golden-rounds.jsonl` under `EVAL_OUTPUT_DIR` the moment it came back, so the rerun reads
 that file and buys only what is missing. A run that died on round 55 of 60 keeps the 54 it paid for.
 
-**The one trap.** A stored round is reused only when **the model and `SKILLS` both match**. Change
-either and the old rounds are ignored and bought again, by design: a round from another model answers
-a different question, and silently counting it would publish the old model's numbers under the new
-model's name. When the model cannot be established at all, which happens on the CLI engines with the
-model override blank, rounds are still recorded but never reused, and the run says so.
+**The one trap.** A stored round is reused only when **the model, `SKILLS`, `LLM_TEMPERATURE` and
+`REVIEW_PATTERN` all match**. Change any of them and the old rounds are ignored and bought again, by
+design: a round from another configuration answers a different question, and silently counting it
+would publish one configuration's numbers under another's name. When the model cannot be established
+at all, which happens on the CLI engines with the model override blank, rounds are still recorded but
+never reused, and the run says so.
+
+A round written before a condition existed reads as that condition's old behaviour: no temperature
+means the provider's default, and no pattern means the single call. So the rounds already on disk
+stay reusable by the runs they came from, and are never offered to a run of another kind.
+
+**This trap has bitten.** A run with `REVIEW_PATTERN=voting` right after one with `single`, every
+other setting equal, printed `Resuming: 75 round(s) already recorded for this configuration`, called
+the model zero times, and stored the single-call findings and cost under the voting label. Wrong
+output that looks exactly like clean output, which is the failure this file exists to prevent. The
+pattern joined the key because of it.
 
 ### The provider is unstable or rate limiting
 

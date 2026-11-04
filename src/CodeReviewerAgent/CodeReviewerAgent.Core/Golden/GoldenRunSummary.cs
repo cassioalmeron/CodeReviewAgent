@@ -8,7 +8,7 @@ namespace CodeReviewerAgent.Core.Golden;
 public static class GoldenRunSummary
 {
     /// <param name="identity">
-    /// The run as far as the caller knows it: model, engine, skills, prompt version, start, duration
+    /// The run as far as the caller knows it: model, engine, skills, prompt version, pattern, start, duration
     /// and report. Everything else is computed here and replaces whatever it carried.
     /// </param>
     public static GoldenRun Build(

@@ -63,6 +63,73 @@ public class GoldenRunRepositoryTests
         }
     }
 
+    [Theory]
+    [MemberData(nameof(Stores))]
+    public void GoldenRunRepositoryTests_The_pattern_survives_a_save_and_a_run_without_one_is_single(string store)
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"cra-runs-{Guid.NewGuid():N}");
+        CodeReviewDbContext? context = null;
+        try
+        {
+            IGoldenRunRepository runs;
+            if (store == "ef")
+            {
+                context = new CodeReviewDbContext(
+                    o => new SqliteProviderStrategy().Configure(o, $"Data Source={path}.db"));
+                context.Database.Migrate();
+                runs = new EfGoldenRunRepository(context);
+            }
+            else
+                runs = new FileGoldenRunRepository(path);
+
+            var votingId = runs.Save(NewRun() with { Pattern = "voting" });
+            var defaultId = runs.Save(NewRun() with { StartedAt = StartedAt.AddMinutes(1) });
+
+            Assert.Equal("voting", runs.Get(votingId)!.Pattern);
+            Assert.Equal("single", runs.Get(defaultId)!.Pattern);
+        }
+        finally
+        {
+            context?.Dispose();
+            try
+            {
+                if (Directory.Exists(path))
+                    Directory.Delete(path, recursive: true);
+                File.Delete($"{path}.db");
+            }
+            catch { /* pooled connection may hold the file; leak the temp file */ }
+        }
+    }
+
+    [Fact]
+    public void GoldenRunRepositoryTests_A_row_that_predates_the_column_reads_back_as_single()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"cra-runs-{Guid.NewGuid():N}");
+        using var context = new CodeReviewDbContext(
+            o => new SqliteProviderStrategy().Configure(o, $"Data Source={path}.db"));
+        try
+        {
+            context.Database.Migrate();
+            context.Database.ExecuteSqlRaw(
+                "INSERT INTO \"GoldenRun\" (\"Model\", \"StartedAt\", \"DurationMs\", \"Cost\", \"InputTokens\", \"OutputTokens\", " +
+                "\"LatencyP50Ms\", \"LatencyP95Ms\", \"LatencyP99Ms\", \"Approved\") " +
+                "VALUES ('old-model', '2026-09-11 21:49:52', 0, '0', 0, 0, 0, 0, 0, 1)");
+
+            var run = new EfGoldenRunRepository(context).List().Single();
+
+            Assert.Equal("old-model", run.Model);
+            Assert.Equal("single", run.Pattern);
+        }
+        finally
+        {
+            try
+            {
+                File.Delete($"{path}.db");
+            }
+            catch { /* pooled connection may hold the file; leak the temp file */ }
+        }
+    }
+
     private static GoldenRun NewRun() => new()
     {
         Model = "deepseek/deepseek-v4-flash-0731",
