@@ -1,3 +1,5 @@
+using CodeReviewerAgent.Core.Judge;
+
 namespace CodeReviewerAgent.Core;
 
 /// <summary>
@@ -96,6 +98,7 @@ public record Evaluation
     public int SignalToNoise { get; init; }
     public int Overall { get; init; }
     public string? Rationale { get; init; }
+    public JudgePattern Pattern { get; init; } = JudgePattern.Single;
     public decimal Cost { get; init; }
     public long LatencyMs { get; init; }
     public int InputTokens { get; init; }

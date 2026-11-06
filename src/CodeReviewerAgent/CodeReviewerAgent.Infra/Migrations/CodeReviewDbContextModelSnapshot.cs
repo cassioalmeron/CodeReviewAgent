@@ -121,6 +121,12 @@ namespace CodeReviewerAgent.Infra.Migrations
                     b.Property<int>("Overall")
                         .HasColumnType("integer");
 
+                    b.Property<string>("Pattern")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("text")
+                        .HasDefaultValue("single");
+
                     b.Property<string>("Rationale")
                         .HasColumnType("text");
 

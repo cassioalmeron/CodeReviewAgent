@@ -15,13 +15,14 @@ public static class JudgeReportGenerator
 {
     /// <summary>Builds the judge report and returns it as a string.</summary>
     public static string Generate(
-        IReadOnlyList<JudgeReportGroup> groups, string judgeModel, string rubricVersion)
+        IReadOnlyList<JudgeReportGroup> groups, string judgeModel, string rubricVersion, string? pattern = null)
     {
         var report = new StringBuilder();
         report.AppendLine("# Judge Report");
         report.AppendLine();
+        var patternLabel = pattern is null ? "" : $", pattern {pattern}";
         report.AppendLine(
-            $"_Generated {DateTime.UtcNow:yyyy-MM-dd HH:mm} UTC — judge {judgeModel}, rubric {rubricVersion}_");
+            $"_Generated {DateTime.UtcNow:yyyy-MM-dd HH:mm} UTC — judge {judgeModel}, rubric {rubricVersion}{patternLabel}_");
         report.AppendLine();
 
         foreach (var group in groups)
@@ -43,6 +44,7 @@ public static class JudgeReportGenerator
         report.AppendLine("# Overall");
         report.AppendLine();
         AppendScores(report, allJudgments);
+        AppendSpread(report, allJudgments);
         AppendTotals(report, allOutcomes);
 
         return report.ToString();
@@ -52,12 +54,12 @@ public static class JudgeReportGenerator
     /// Generates the report and writes it to the reports directory, returning the file path.
     /// </summary>
     public static string Save(
-        IReadOnlyList<JudgeReportGroup> groups, string judgeModel, string rubricVersion)
+        IReadOnlyList<JudgeReportGroup> groups, string judgeModel, string rubricVersion, string? pattern = null)
     {
         var directory = OutputPaths.Reports;
         Directory.CreateDirectory(directory);
         var path = Path.Combine(directory, $"judge-{DateTime.UtcNow:yyyy-MM-dd-HHmmss}.md");
-        File.WriteAllText(path, Generate(groups, judgeModel, rubricVersion));
+        File.WriteAllText(path, Generate(groups, judgeModel, rubricVersion, pattern));
         return path;
     }
 
@@ -72,6 +74,26 @@ public static class JudgeReportGenerator
         report.AppendLine($"| **Overall** | **{Utils.FormatScore(Avg(judgments, j => j.Overall))}** |");
         report.AppendLine();
     }
+
+    // Saturation and collapse, the two figures that say whether the scale still tells reviews apart.
+    // Both count per judgment, so repeated judgments of one assessment each weigh once.
+    private static void AppendSpread(StringBuilder report, IReadOnlyList<Judgment> judgments)
+    {
+        report.AppendLine("| Figure | Value |");
+        report.AppendLine("|--------|-------|");
+        report.AppendLine($"| Saturation (criterion scores equal to 5) | {Share(Saturated(judgments), judgments.Count * 4)} |");
+        report.AppendLine($"| Collapse (reviews with four identical criteria) | {Share(Collapsed(judgments), judgments.Count)} |");
+        report.AppendLine();
+    }
+
+    private static int Saturated(IReadOnlyList<Judgment> judgments) =>
+        judgments.Sum(j => new[] { j.Correctness, j.Actionability, j.Calibration, j.SignalToNoise }.Count(s => s == 5));
+
+    private static int Collapsed(IReadOnlyList<Judgment> judgments) =>
+        judgments.Count(j => new[] { j.Actionability, j.Calibration, j.SignalToNoise }.All(s => s == j.Correctness));
+
+    private static string Share(int count, int total) =>
+        total == 0 ? "n/a" : $"{(double)count / total:P0} ({count} of {total})";
 
     private static void AppendRationales(StringBuilder report, IReadOnlyList<Judgment> judgments)
     {
@@ -161,7 +183,7 @@ public static class JudgeReportGenerator
         report.AppendLine($"## Evaluation {e.Id}");
         report.AppendLine();
         report.AppendLine(
-            $"_Judge {e.JudgeModel ?? "—"}, rubric {e.RubricVersion ?? "—"} · {Utils.Money(e.Cost)} · {e.LatencyMs} ms_");
+            $"_Judge {e.JudgeModel ?? "—"}, rubric {e.RubricVersion ?? "—"}, pattern {e.Pattern.ToString().ToLowerInvariant()} · {Utils.Money(e.Cost)} · {e.LatencyMs} ms_");
         report.AppendLine();
         report.AppendLine("| Criterion | Score |");
         report.AppendLine("|-----------|-------|");

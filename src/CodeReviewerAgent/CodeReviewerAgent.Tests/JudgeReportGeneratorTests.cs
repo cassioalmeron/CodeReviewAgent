@@ -110,4 +110,44 @@ public class JudgeReportGeneratorTests
         Assert.Contains("| Total input tokens | 600 |", report);
         Assert.Contains("| Total output tokens | 240 |", report);
     }
+
+    private static JudgeOutcome Scored(int correctness, int actionability, int calibration, int signalToNoise) =>
+        new(new Judgment(correctness, actionability, calibration, signalToNoise, 4, null),
+            0.001m, 100, InputTokens: 300, OutputTokens: 120);
+
+    [Fact]
+    public void JudgeReportGeneratorTests_The_header_names_the_pattern_it_was_produced_under()
+    {
+        var groups = new List<JudgeReportGroup> { new("App.cs", null, [Outcome(4)]) };
+
+        var report = JudgeReportGenerator.Generate(groups, "claude-sonnet-4-6", "v1", "sectioned");
+
+        Assert.Contains("judge claude-sonnet-4-6, rubric v1, pattern sectioned", report);
+    }
+
+    [Fact]
+    public void JudgeReportGeneratorTests_The_overall_block_prints_saturation_and_collapse_per_judgment()
+    {
+        // Four judgments of 16 criterion scores: 9 are 5s. Two judgments have four identical criteria.
+        var groups = new List<JudgeReportGroup>
+        {
+            new("A.cs", null, [Scored(5, 5, 5, 5), Scored(5, 5, 5, 5), Scored(5, 4, 3, 2)]),
+            new("B.cs", null, [Scored(4, 4, 4, 4)]),
+        };
+
+        var report = JudgeReportGenerator.Generate(groups, "claude-sonnet-4-6", "v1", "single");
+
+        Assert.Contains("| Saturation (criterion scores equal to 5) | 56% (9 of 16) |", report);
+        Assert.Contains("| Collapse (reviews with four identical criteria) | 75% (3 of 4) |", report);
+    }
+
+    [Fact]
+    public void JudgeReportGeneratorTests_A_stored_evaluation_names_its_pattern()
+    {
+        var evaluation = Evaluation(1, 4) with { Pattern = JudgePattern.Sectioned };
+
+        var report = JudgeReportGenerator.GenerateForAssessment(7, null, [evaluation]);
+
+        Assert.Contains("rubric v1, pattern sectioned", report);
+    }
 }

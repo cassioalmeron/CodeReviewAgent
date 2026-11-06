@@ -39,6 +39,13 @@ if (args is ["judge", var judgeIdArg, ..] && int.TryParse(judgeIdArg, out var ju
     return;
 }
 
+// `judge-run <runId> [--repeat n] [--one-per-case]` — judge every assessment of a golden run under JUDGE_PATTERN.
+if (args is ["judge-run", ..])
+{
+    JudgeRun(args, costBudget);
+    return;
+}
+
 // `judge` (no id) judges the reviews persisted by `eval` pairwise (v3 vs v5, plan 015); it builds
 // its own (stronger) client.
 if (args is ["judge", ..])
@@ -237,6 +244,51 @@ static void PrintStoredAssessment(int assessmentId, JsonSerializerOptions option
         }, options));
 }
 
+// `judge-run <runId> [--repeat n]`. The client is built only once there is something to judge, so
+// an empty run costs nothing; the pattern is resolved first so a typo fails before anything else.
+static void JudgeRun(string[] args, CostBudget? budget)
+{
+    var pattern = ResolvedJudgePattern();
+
+    if (args.Length < 2 || !int.TryParse(args[1], out var runId))
+    {
+        Console.Error.WriteLine("Usage: judge-run <runId> [--repeat <n>] [--one-per-case]");
+        Environment.ExitCode = 1;
+        return;
+    }
+
+    var repeat = 1;
+    var repeatIndex = Array.IndexOf(args, "--repeat");
+    if (repeatIndex >= 0 && (repeatIndex + 1 >= args.Length || !int.TryParse(args[repeatIndex + 1], out repeat) || repeat < 1))
+    {
+        Console.Error.WriteLine("--repeat needs a positive whole number.");
+        Environment.ExitCode = 1;
+        return;
+    }
+
+    var onePerCase = args.Contains("--one-per-case");
+    var judgeModel = ResolvedJudgeModel();
+    var rubricVersion = Environment.GetEnvironmentVariable("RUBRIC_VERSION") ?? "v1";
+
+    using var store = RepositoryFactory.Create();
+    var summary = GoldenJudgeRun.Run(
+        runId, repeat, pattern, rubricVersion, judgeModel, store,
+        () => new Judge(
+            Budgeted(LlmClientFactory.CreateClaude(judgeModel), "claude", judgeModel, budget), rubricVersion,
+            ResolvedThinkingDisabled(), pattern),
+        ConsoleProgress.Out, onePerCase);
+
+    if (summary.Assessments == 0)
+    {
+        Console.Error.WriteLine($"Golden run {runId} has no assessments (or does not exist). Nothing was judged.");
+        Environment.ExitCode = 1;
+        return;
+    }
+
+    Console.WriteLine(
+        $"Run {runId}, pattern {pattern.ToString().ToLowerInvariant()}: {summary.JudgmentsMade} judgment(s) made, {summary.JudgmentsAlreadyStored} already stored, across {summary.Assessments} assessment(s).");
+}
+
 static void JudgeAssessment(int assessmentId, CostBudget? budget)
 {
     var store = RepositoryFactory.Create();
@@ -247,12 +299,13 @@ static void JudgeAssessment(int assessmentId, CostBudget? budget)
 
     var judgeModel = ResolvedJudgeModel();
     var rubricVersion = Environment.GetEnvironmentVariable("RUBRIC_VERSION") ?? "v1";
+    var pattern = ResolvedJudgePattern();
     var judge = new Judge(
         Budgeted(LlmClientFactory.CreateClaude(judgeModel), "claude", judgeModel, budget), rubricVersion,
-        ResolvedThinkingDisabled());
+        ResolvedThinkingDisabled(), pattern);
     var outcome = judge.Evaluate(review.Content, ToReviewResult(assessment, review.Content));
 
-    var evaluationId = store.Evaluations.Save(ToEvaluation(assessmentId, judgeModel, rubricVersion, outcome));
+    var evaluationId = store.Evaluations.Save(ToEvaluation(assessmentId, judgeModel, rubricVersion, pattern, outcome));
     Console.WriteLine($"Evaluation saved with id {evaluationId} (overall {outcome.Judgment.Overall}/5)");
 }
 
@@ -535,7 +588,8 @@ static void GoldenJudgeReport()
         .ToList();
 
     var path = JudgeReportGenerator.Save(groups, HeaderValue(evaluations.Select(e => e.JudgeModel)),
-        HeaderValue(evaluations.Select(e => e.RubricVersion)));
+        HeaderValue(evaluations.Select(e => e.RubricVersion)),
+        HeaderValue(evaluations.Select(e => e.Pattern.ToString().ToLowerInvariant())));
     Console.WriteLine($"Judge report saved to {path}");
 }
 
@@ -613,6 +667,19 @@ static void ReviewAndPublish(string[] args, CostBudget? budget)
 // The judge uses a stronger model (JUDGE_MODEL) than the executor to avoid self-preference bias.
 static ILlmClient JudgeClient(CostBudget? budget) =>
     Budgeted(LlmClientFactory.CreateClaude(ResolvedJudgeModel()), "claude", ResolvedJudgeModel(), budget);
+
+// JUDGE_PATTERN is parsed here and nowhere below Console: the enum is what Core accepts.
+static JudgePattern ResolvedJudgePattern()
+{
+    var configured = Setting("JUDGE_PATTERN");
+    if (configured is null)
+        return JudgePattern.Single;
+
+    return Enum.TryParse<JudgePattern>(configured, ignoreCase: true, out var pattern) && Enum.IsDefined(pattern)
+        ? pattern
+        : throw new InvalidOperationException(
+            $"JUDGE_PATTERN '{configured}' is not valid. Accepted values: {string.Join(", ", Enum.GetNames<JudgePattern>().Select(n => n.ToLowerInvariant()))}.");
+}
 
 static string ResolvedJudgeModel() =>
     Environment.GetEnvironmentVariable("JUDGE_MODEL") ?? "claude-sonnet-4-6";
@@ -721,7 +788,7 @@ static string HeaderValue(IEnumerable<string?> values)
     return distinct.Count == 1 ? distinct[0] ?? "—" : "mixed";
 }
 
-static Evaluation ToEvaluation(int assessmentId, string judgeModel, string rubricVersion, JudgeOutcome o) => new()
+static Evaluation ToEvaluation(int assessmentId, string judgeModel, string rubricVersion, JudgePattern pattern, JudgeOutcome o) => new()
 {
     AssessmentId = assessmentId,
     RubricVersion = rubricVersion,
@@ -732,6 +799,7 @@ static Evaluation ToEvaluation(int assessmentId, string judgeModel, string rubri
     SignalToNoise = o.Judgment.SignalToNoise,
     Overall = o.Judgment.Overall,
     Rationale = o.Judgment.Rationale,
+    Pattern = pattern,
     Cost = o.Cost,
     LatencyMs = o.LatencyMs,
     InputTokens = o.InputTokens,

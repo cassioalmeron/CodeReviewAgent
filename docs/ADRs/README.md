@@ -23,6 +23,7 @@ The records are in chronological order. Read together, they trace the project fr
 | [014](ADR-014-pairwise-judge-per-criterion.md) | Judge pairwise with a verdict per criterion and a legitimate tie | 2026-08-10 |
 | [015](ADR-015-composite-metric-approval-criterion.md) | Replace the golden set's boolean verdict with a composite metric and an approval criterion | 2026-09-04 |
 | [008](ADR-008-voting-pattern-off-by-default.md) | Build the Voting pattern and leave it off by default, keeping the single call as the agent's path | 2026-11-01 |
+| [016](ADR-016-sectioning-scoring-judge-measured-off.md) | Measure Sectioning on the scoring judge and leave it off, keeping the single call as the project's judge | 2026-11-06 |
 
 ADR-008 comes last despite its number. It was reserved early for the parallelization decision, stayed empty while that decision was postponed, and was written once the golden set could measure the two patterns against each other.
 
@@ -37,3 +38,5 @@ Four of these records build on each other rather than standing alone.
 **Earning the right to a dashboard.** ADR-009 separated infrastructure from the Core, ADR-010 made persistence structured, ADR-011 built the API and front end on top, and ADR-012 redesigned the schema once the dashboard revealed that a `Project` entity was missing. Each step was only possible because of the one before it.
 
 **Learning to measure.** Each of the last three records replaced an instrument that could not tell things apart. ADR-013 rebuilt the skills harness so that running with no skill at all became possible, which is the baseline every later comparison rests on. ADR-014 replaced an absolute score that had returned twenty values within two tenths of each other with a pairwise verdict on each criterion, where a tie is a legitimate answer rather than a forced preference. ADR-015 then replaced the golden set's own yes-or-no with five gates that are never averaged together, written down before the model matrix ran so the cut-off could not be chosen to fit the conclusion. The thread is one lesson learned three times: a measurement that cannot come back negative is not a measurement.
+
+ADR-016 closes that thread by turning it on ADR-014 itself. ADR-014 had blamed an absolute scale for scores that could not tell reviews apart, without separating the scale from the single call that produced them. ADR-016 split the call into one per criterion, wrote four floors first, and the scores came back more saturated instead of less, so the scale keeps the blame. A diagnosis that survives a test that could have knocked it down is worth more than one nobody tried.

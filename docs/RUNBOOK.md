@@ -48,7 +48,7 @@ and `dotnet run` applies its first profile when none is asked for. That profile 
 profile's variable beats one exported in the shell, so a run meant for `globs` silently measures
 `all` instead. Pass `--no-launch-profile` whenever the configuration of the run is the point.
 
-And the commands split cleanly. `assess`, `judge`, `eval` and `all` call the model. `review`,
+And the commands split cleanly. `assess`, `judge`, `judge-run`, `eval` and `all` call the model. `review`,
 `report`, `skills`, `projects` and every `judge-report` do not, which makes them always safe to
 re-run while diagnosing something.
 
@@ -85,6 +85,36 @@ Reviewing a pull request needs the GitHub CLI installed and authenticated (`gh a
 **Routine checks, none of which cost anything:** `dotnet run -- projects` lists the stored projects,
 `dotnet run -- skills` lists the discovered skill catalogue with its validation diagnostics, and
 `dotnet test` from `src/CodeReviewerAgent` runs the suite including the five architecture rules.
+
+### Judging a golden run, one call or four per criterion
+
+`judge-run <runId>` judges every assessment of one golden run and saves an evaluation for each, so a
+measurement is one invocation. `JUDGE_PATTERN` picks how the judge scores: `single` (the default,
+one call for all four criteria) or `sectioned` (one call per criterion, `overall` computed as the
+rounded mean). Any other value stops the command before it does anything, and the message lists the
+accepted ones.
+
+```bash
+JUDGE_PATTERN=sectioned dotnet run --no-launch-profile -- judge-run 12 --repeat 3 --one-per-case
+```
+
+`--repeat n` judges each assessment n times, which is what the repeatability measurement needs.
+`--one-per-case` judges one assessment per distinct review of the run instead of all of them (the
+one with the lowest id, so a resumed run picks the same ones). A golden run holds several rounds
+per case, and judging different rounds measures how the judge reacts to different reviews, not how
+repeatable it is. The first progress line says how many were selected out of how many, before any
+call is made.
+`--no-launch-profile` is not optional here: the launch profile's variables beat the shell's, and a
+run that measured the wrong configuration has already been paid for once. The report header names
+the pattern, so check it before reading any number.
+
+The command honours `COST_LIMIT_USD`, prints one line per judgment and saves each evaluation as it
+returns. An assessment that already has enough evaluations under the same pattern, rubric version
+and judge model is skipped, so running the same command again after an interruption (or after a
+complete run) pays only for what is missing. A run id with no assessments exits with a message and
+makes no call. `dotnet run -- judge-report golden` renders the stored evaluations, with saturation
+(share of criterion scores equal to 5) and collapse (share of judgments whose four criteria are
+identical) in the overall block.
 
 ---
 

@@ -121,12 +121,18 @@ public class Judge
     private readonly ILlmClient _client;
     private readonly string _rubricVersion;
     private readonly bool _thinkingDisabled;
+    private readonly JudgePattern _pattern;
 
-    public Judge(ILlmClient client, string rubricVersion, bool thinkingDisabled = false)
+    private static readonly string[] SectionedCriteria =
+        ["correctness", "actionability", "calibration", "signal-to-noise"];
+
+    public Judge(ILlmClient client, string rubricVersion, bool thinkingDisabled = false,
+        JudgePattern pattern = JudgePattern.Single)
     {
         _client = client;
         _rubricVersion = rubricVersion;
         _thinkingDisabled = thinkingDisabled;
+        _pattern = pattern;
     }
 
     /// <summary>
@@ -153,14 +159,26 @@ public class Judge
         return request;
     }
 
-    public JudgeOutcome Evaluate(string diff, ReviewResult review)
+    public JudgeOutcome Evaluate(string diff, ReviewResult review) =>
+        _pattern == JudgePattern.Sectioned
+            ? EvaluateBySectioning(diff, review)
+            : EvaluateOnce(diff, review);
+
+    // The material every scoring call receives, whichever the pattern, so the two patterns
+    // provably judge the same thing.
+    private static string BuildUserContent(string diff, ReviewResult review)
     {
-        var rubric = LoadRubric(_rubricVersion);
         var findings = JsonSerializer.Serialize(review.Findings ?? [], FindingsJsonOptions);
-        var userContent =
+        return
             $"## Diff\n```diff\n{diff}\n```\n\n" +
             $"## Agent summary\n{review.Summary}\n\n" +
             $"## Agent findings\n```json\n{findings}\n```";
+    }
+
+    private JudgeOutcome EvaluateOnce(string diff, ReviewResult review)
+    {
+        var rubric = LoadRubric(_rubricVersion);
+        var userContent = BuildUserContent(diff, review);
 
         var requestBody = BuildRequest(rubric, BuildSchema(), userContent);
 
@@ -179,6 +197,73 @@ public class Judge
 
         return new JudgeOutcome(judgment, cost, stopwatch.ElapsedMilliseconds, inputTokens, outputTokens);
     }
+
+    /// <summary>
+    /// One call per criterion, fired at once, each with its own rubric slice and a schema of one
+    /// criterion. The four answers merge into the same <see cref="Judgment"/> a single call
+    /// produces; <c>overall</c> is the rounded mean of the four, computed here because no call
+    /// sees the other criteria. A call whose answer cannot be read scores 0 for its criterion
+    /// and leaves the other three untouched.
+    /// </summary>
+    internal JudgeOutcome EvaluateBySectioning(string diff, ReviewResult review)
+    {
+        var userContent = BuildUserContent(diff, review);
+        var schema = BuildCriterionSchema();
+        var calls = new (CriterionScore Score, MessageResponse? Response)[SectionedCriteria.Length];
+
+        var stopwatch = Stopwatch.StartNew();
+        Parallel.For(0, calls.Length, i =>
+        {
+            var rubric = LoadRubric($"{_rubricVersion}-{SectionedCriteria[i]}");
+            var response = _client.Request(BuildRequest(rubric, schema, userContent));
+            calls[i] = (ParseCriterionScore(ResponseText(response)), response);
+        });
+        stopwatch.Stop();
+
+        var scores = calls.Select(c => c.Score.Score).ToArray();
+        var rationale = string.Join("\n", calls
+            .Select((c, i) => (Criterion: SectionedCriteria[i], c.Score.Rationale))
+            .Where(r => !string.IsNullOrWhiteSpace(r.Rationale))
+            .Select(r => $"[{r.Criterion}] {r.Rationale}"));
+        var overall = (int)Math.Round(scores.Average(), MidpointRounding.AwayFromZero);
+
+        var judgment = new Judgment(scores[0], scores[1], scores[2], scores[3], overall, rationale);
+
+        var inputTokens = calls.Sum(c => c.Response?.Usage?.InputTokens ?? 0);
+        var outputTokens = calls.Sum(c => c.Response?.Usage?.OutputTokens ?? 0);
+        var cost = calls.Sum(c =>
+            CostCalculator.Estimate("claude", c.Response?.Model, c.Response?.Usage?.InputTokens ?? 0, c.Response?.Usage?.OutputTokens ?? 0));
+
+        return new JudgeOutcome(judgment, cost, stopwatch.ElapsedMilliseconds, inputTokens, outputTokens);
+    }
+
+    private static string ResponseText(MessageResponse? response) =>
+        string.Join("\n", (response?.Content ?? [])
+            .Where(b => b.Type == "text")
+            .Select(b => b.Text));
+
+    private sealed record CriterionScore(int Score, string? Rationale);
+
+    private static CriterionScore ParseCriterionScore(string content)
+    {
+        try
+        {
+            return JsonSerializer.Deserialize<CriterionScore>(content, JsonOptions) ?? new CriterionScore(0, null);
+        }
+        catch (JsonException)
+        {
+            return new CriterionScore(0, null);
+        }
+    }
+
+    // JSON schema of one sectioned call: a single score and its rationale.
+    private static object BuildCriterionSchema() => new
+    {
+        type = "object",
+        properties = new { score = new { type = "integer" }, rationale = new { type = "string" } },
+        required = new[] { "score", "rationale" },
+        additionalProperties = false,
+    };
 
     /// <summary>
     /// Compares two reviews of the same diff — whichever the caller put in <paramref name="a"/>
