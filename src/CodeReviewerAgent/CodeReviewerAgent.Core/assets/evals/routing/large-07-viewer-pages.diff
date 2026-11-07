@@ -1,0 +1,636 @@
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Api/Program.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Api/Program.cs
+index 8804eea..a6d44c8 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Api/Program.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Api/Program.cs
+@@ -1,11 +1,12 @@
+ using System.Text.Json.Serialization;
+ using CodeReviewerAgent.Core;
++using CodeReviewerAgent.Core.Golden;
+ using CodeReviewerAgent.Core.Judge;
+ using CodeReviewerAgent.Infra;
+-using DotNetEnv;
+ 
+-// Uses DotNetEnv (NoClobber) so STORAGE / DB_CONNECTION resolve exactly as they do for the CLI.
+-Env.NoClobber().Load(Path.Combine(AppContext.BaseDirectory, ".env"));
++// The same file the CLI reads, found by walking up from the executable, so STORAGE / DB_CONNECTION
++// resolve identically for both. An Api pointing at another store shows an empty screen.
++EnvFile.Load();
+ 
+ var builder = WebApplication.CreateBuilder(args);
+ 
+@@ -26,9 +27,11 @@ builder.Services.AddEndpointsApiExplorer();
+ builder.Services.AddSwaggerGen(options =>
+     options.SwaggerDoc("v1", new() { Title = "Code Review Agent — Viewer API", Version = "v1" }));
+ 
+-// Read-only store, shared for the process lifetime — selected by STORAGE (files / sqlite / postgres).
+-var store = RepositoryFactory.Create();
+-builder.Services.AddSingleton(store);
++// The schema is applied once, at startup. Every request then gets its own store, because a
++// DbContext serves one operation at a time and a browser opens several requests at once: sharing one
++// for the whole process is the "second operation started on this context" crash.
++using (RepositoryFactory.Create()) { }
++builder.Services.AddScoped(_ => RepositoryFactory.Create(applyMigrations: false));
+ 
+ var app = builder.Build();
+ app.UseCors(DevCors);
+@@ -38,7 +41,7 @@ app.UseSwaggerUI();
+ 
+ var projects = app.MapGroup("/api/projects");
+ 
+-projects.MapGet("/", () =>
++projects.MapGet("/", (RepositoryContext store) =>
+ {
+     var reviews = store.Reviews.List();
+     var assessments = store.Assessments.List();
+@@ -55,14 +58,14 @@ projects.MapGet("/", () =>
+     });
+ });
+ 
+-projects.MapGet("/{id:int}", (int id) =>
++projects.MapGet("/{id:int}", (int id, RepositoryContext store) =>
+     store.Projects.Get(id) is { } project ? Results.Ok(project) : Results.NotFound());
+ 
+-projects.MapGet("/{id:int}/reviews", (int id) =>
+-    store.Reviews.List().Where(r => r.ProjectId == id).Select(ToReviewListItem));
++projects.MapGet("/{id:int}/reviews", (int id, RepositoryContext store) =>
++    store.Reviews.List().Where(r => r.ProjectId == id).Select(r => ToReviewListItem(store, r)));
+ 
+ // Everything the project dashboard draws, in one aggregated payload (computed in-memory over List()).
+-projects.MapGet("/{id:int}/stats", (int id) =>
++projects.MapGet("/{id:int}/stats", (int id, RepositoryContext store) =>
+ {
+     if (store.Projects.Get(id) is null)
+         return Results.NotFound();
+@@ -109,51 +112,103 @@ projects.MapGet("/{id:int}/stats", (int id) =>
+         evaluations.Average(e => e.Overall),
+         evaluations.Count);
+ 
++    // Percentiles, not an average: on the DeepSeek run the average is 2 min 17 s and half the
++    // reviews answered within a minute, because a few retries after a timeout pull the mean up.
++    var latencies = assessments.Select(a => a.LatencyMs).Order().ToList();
++
+     return Results.Ok(new ProjectStats(
+         id,
+         reviewIds.Count, assessments.Count, evaluations.Count, findings.Count,
+         assessments.Sum(a => a.Cost), assessments.Sum(a => (long)a.InputTokens),
+         assessments.Sum(a => (long)a.OutputTokens),
+-        assessments.Count == 0 ? 0 : assessments.Average(a => a.LatencyMs),
++        GoldenRunSummary.Percentile(latencies, 50),
++        GoldenRunSummary.Percentile(latencies, 95),
++        GoldenRunSummary.Percentile(latencies, 99),
+         bySeverity, byCategory, topFiles, runs, judge));
+ });
+ 
+ var reviews = app.MapGroup("/api/reviews");
+ 
+ // `?projectId=N` filters to one project; without it, every review.
+-reviews.MapGet("/", (int? projectId) => store.Reviews.List()
++reviews.MapGet("/", (int? projectId, RepositoryContext store) => store.Reviews.List()
+     .Where(r => projectId is null || r.ProjectId == projectId)
+-    .Select(ToReviewListItem));
++    .Select(r => ToReviewListItem(store, r)));
+ 
+-reviews.MapGet("/{id:int}", (int id) =>
++reviews.MapGet("/{id:int}", (int id, RepositoryContext store) =>
+     store.Reviews.Get(id) is { } review ? Results.Ok(review) : Results.NotFound());
+ 
+-reviews.MapGet("/{id:int}/assessments", (int id) =>
++reviews.MapGet("/{id:int}/assessments", (int id, RepositoryContext store) =>
+     store.Assessments.List().Where(a => a.ReviewId == id).Select(ToAssessmentListItem));
+ 
+ var assessmentsGroup = app.MapGroup("/api/assessments");
+ 
+-assessmentsGroup.MapGet("/", () => store.Assessments.List().Select(ToAssessmentListItem));
++assessmentsGroup.MapGet("/", (RepositoryContext store) =>
++    store.Assessments.List().Select(ToAssessmentListItem));
+ 
+-assessmentsGroup.MapGet("/{id:int}", (int id) =>
++assessmentsGroup.MapGet("/{id:int}", (int id, RepositoryContext store) =>
+     store.Assessments.Get(id) is { } assessment ? Results.Ok(assessment) : Results.NotFound());
+ 
+-assessmentsGroup.MapGet("/{id:int}/evaluations", (int id) =>
++assessmentsGroup.MapGet("/{id:int}/evaluations", (int id, RepositoryContext store) =>
+     store.Evaluations.List().Where(e => e.AssessmentId == id));
+ 
++// The golden runs are not under a project: a run measures a model against the golden set, and the
++// set is the same one for every repository the agent reviews.
++var goldenRuns = app.MapGroup("/api/golden-runs");
++
++goldenRuns.MapGet("/", (RepositoryContext store) =>
++{
++    var reviewCounts = ReviewCountsByRun(store);
++    return store.GoldenRuns.List()
++        .OrderByDescending(r => r.StartedAt)
++        .Select(r => ToGoldenRunListItem(r, reviewCounts.GetValueOrDefault(r.Id)));
++});
++
++goldenRuns.MapGet("/{id:int}", (int id, RepositoryContext store) =>
++{
++    if (store.GoldenRuns.Get(id) is not { } run)
++        return Results.NotFound();
++
++    return Results.Ok(new GoldenRunDetail(
++        ToGoldenRunListItem(run, ReviewCountsByRun(store).GetValueOrDefault(run.Id)),
++        [.. (run.Gates ?? []).Select(ToGoldenGateView)],
++        [.. (run.Cases ?? []).OrderBy(c => c.Kind).ThenBy(c => c.CaseName)]));
++});
++
+ var evaluations = app.MapGroup("/api/evaluations");
+ 
+-evaluations.MapGet("/", () => store.Evaluations.List());
++evaluations.MapGet("/", (RepositoryContext store) => store.Evaluations.List());
+ 
+-evaluations.MapGet("/{id:int}", (int id) =>
++evaluations.MapGet("/{id:int}", (int id, RepositoryContext store) =>
+     store.Evaluations.Get(id) is { } evaluation ? Results.Ok(evaluation) : Results.NotFound());
+ 
+ app.Run();
+ 
+-ReviewListItem ToReviewListItem(Review r) => new(
++static ReviewListItem ToReviewListItem(RepositoryContext store, Review r) => new(
+     r.Id, r.ProjectId, store.Projects.Get(r.ProjectId)?.Name, r.Source, r.ContentHash, r.CreatedAt,
+     store.Assessments.List().Count(a => a.ReviewId == r.Id));
+ 
++// How many reviews each run produced. Counted in memory over the assessments, like every other
++// aggregate in this Api, because the repositories answer with lists and not with queries.
++static Dictionary<int, int> ReviewCountsByRun(RepositoryContext store) => store.Assessments.List()
++    .Where(a => a.RunId is not null)
++    .GroupBy(a => a.RunId!.Value)
++    .ToDictionary(g => g.Key, g => g.Count());
++
++static GoldenRunListItem ToGoldenRunListItem(GoldenRun r, int reviewCount) => new(
++    r.Id, r.Model, r.Engine, r.Skills, r.PromptVersion, r.StartedAt, r.DurationMs,
++    r.Cost, r.InputTokens, r.OutputTokens,
++    r.LatencyP50Ms, r.LatencyP95Ms, r.LatencyP99Ms,
++    r.Approved, r.Cases?.Count ?? 0, r.Cases?.Count(c => c.Approved) ?? 0, reviewCount, r.ReportFile);
++
++// The value and the floor are formatted here, once, with the same wording the markdown report uses.
++static GoldenGateView ToGoldenGateView(GoldenGate stored)
++{
++    var gate = new Gate(stored.Name, stored.Part, stored.Whole, stored.Floor, stored.Direction, stored.Passed);
++    return new GoldenGateView(
++        gate.Name, gate.Part, gate.Whole, gate.Floor, gate.Direction, gate.Passed,
++        gate.ValueText, gate.FloorText);
++}
++
+ static AssessmentListItem ToAssessmentListItem(Assessment a) => new(
+     a.Id, a.ReviewId, a.Engine, a.Model, a.PromptVersion,
+     a.Cost, a.LatencyMs, a.Findings?.Count ?? 0, a.CreatedAt);
+@@ -167,7 +222,8 @@ record ProjectListItem(
+ record ProjectStats(
+     int ProjectId,
+     int ReviewCount, int AssessmentCount, int EvaluationCount, int FindingCount,
+-    decimal TotalCost, long TotalInputTokens, long TotalOutputTokens, double AvgLatencyMs,
++    decimal TotalCost, long TotalInputTokens, long TotalOutputTokens,
++    long LatencyP50Ms, long LatencyP95Ms, long LatencyP99Ms,
+     IReadOnlyList<SliceCount> BySeverity,
+     IReadOnlyList<SliceCount> ByCategory,
+     IReadOnlyList<SliceCount> TopFiles,
+@@ -189,6 +245,24 @@ record ReviewListItem(
+     int Id, int ProjectId, string? ProjectName, string? Source, string ContentHash,
+     DateTime CreatedAt, int AssessmentCount);
+ 
++/// <summary>One golden run as a row: what it was, what it cost, how fast it was, and the verdict.</summary>
++record GoldenRunListItem(
++    int Id, string Model, string? Engine, string? Skills, string? PromptVersion,
++    DateTime StartedAt, long DurationMs, decimal Cost, int InputTokens, int OutputTokens,
++    long LatencyP50Ms, long LatencyP95Ms, long LatencyP99Ms,
++    bool Approved, int CaseCount, int ApprovedCaseCount, int ReviewCount, string? ReportFile);
++
++/// <summary>One golden run with everything it was judged on.</summary>
++record GoldenRunDetail(
++    GoldenRunListItem Run,
++    IReadOnlyList<GoldenGateView> Gates,
++    IReadOnlyList<GoldenCaseScore> Cases);
++
++/// <summary>A gate as measured, plus the sentence the report prints for it.</summary>
++record GoldenGateView(
++    string Name, int Part, int Whole, int Floor, GateDirection Direction, bool Passed,
++    string Value, string FloorText);
++
+ /// <summary>Lightweight assessment row for the list view — omits <c>Findings</c> and <c>Summary</c>.</summary>
+ record AssessmentListItem(
+     int Id, int ReviewId, string? Engine, string? Model, string? PromptVersion,
+diff --git a/src/CodeReviewerAgent/web/src/App.tsx b/src/CodeReviewerAgent/web/src/App.tsx
+index 1c7b296..8ab56ab 100644
+--- a/src/CodeReviewerAgent/web/src/App.tsx
++++ b/src/CodeReviewerAgent/web/src/App.tsx
+@@ -8,12 +8,17 @@ import { AssessmentsPage } from '@/pages/AssessmentsPage'
+ import { AssessmentDetailPage } from '@/pages/AssessmentDetailPage'
+ import { EvaluationsPage } from '@/pages/EvaluationsPage'
+ import { EvaluationDetailPage } from '@/pages/EvaluationDetailPage'
++import { RunsPage } from '@/pages/RunsPage'
++import { RunDetailPage } from '@/pages/RunDetailPage'
+ 
+ export function App() {
+   return (
+     <Routes>
+       <Route element={<Layout />}>
+         <Route index element={<HomePage />} />
++        {/* A golden run measures a model against the set, not work on a repository: no project needed. */}
++        <Route path="/runs" element={<RunsPage />} />
++        <Route path="/runs/:id" element={<RunDetailPage />} />
+         <Route element={<RequireProject />}>
+           <Route path="/reviews" element={<ReviewsPage />} />
+           <Route path="/reviews/:id" element={<ReviewDetailPage />} />
+diff --git a/src/CodeReviewerAgent/web/src/components/features/ProjectDashboard.tsx b/src/CodeReviewerAgent/web/src/components/features/ProjectDashboard.tsx
+index 511ef53..54abcd6 100644
+--- a/src/CodeReviewerAgent/web/src/components/features/ProjectDashboard.tsx
++++ b/src/CodeReviewerAgent/web/src/components/features/ProjectDashboard.tsx
+@@ -64,7 +64,9 @@ export function ProjectDashboard({ project }: { project: ProjectListItem }) {
+                 { key: 'Assessments', value: String(stats.assessmentCount) },
+                 { key: 'Findings', value: String(stats.findingCount) },
+                 { key: 'Total cost', value: cost(stats.totalCost) },
+-                { key: 'Avg latency', value: latency(Math.round(stats.avgLatencyMs)) },
++                { key: 'Latency p50', value: latency(stats.latencyP50Ms) , hint: 'half the reviews answered within this' },
++                { key: 'Latency p95', value: latency(stats.latencyP95Ms) , hint: '95 of every 100 answered within this' },
++                { key: 'Latency p99', value: latency(stats.latencyP99Ms) , hint: '99 of every 100; the slow tail' },
+               ]}
+             />
+             <Grid>
+diff --git a/src/CodeReviewerAgent/web/src/components/layout/Layout.tsx b/src/CodeReviewerAgent/web/src/components/layout/Layout.tsx
+index 348f013..a29ac84 100644
+--- a/src/CodeReviewerAgent/web/src/components/layout/Layout.tsx
++++ b/src/CodeReviewerAgent/web/src/components/layout/Layout.tsx
+@@ -207,6 +207,11 @@ export function Layout() {
+           </Group>
+         )}
+ 
++        <Nav>
++          <Label>Golden set</Label>
++          <Item to="/runs">Runs</Item>
++        </Nav>
++
+         {projectId != null && (
+           <Nav>
+             <Label>Browse</Label>
+diff --git a/src/CodeReviewerAgent/web/src/components/ui/MetricStrip.tsx b/src/CodeReviewerAgent/web/src/components/ui/MetricStrip.tsx
+index d520c95..78d1d7c 100644
+--- a/src/CodeReviewerAgent/web/src/components/ui/MetricStrip.tsx
++++ b/src/CodeReviewerAgent/web/src/components/ui/MetricStrip.tsx
+@@ -34,9 +34,18 @@ const Val = styled.dd`
+   color: var(--text);
+ `
+ 
++const Hint = styled.p`
++  margin: 4px 0 0;
++  font-size: 11px;
++  line-height: 1.35;
++  color: var(--faint);
++`
++
+ export interface Metric {
+   key: string
+   value: string
++  /** One short line under the number, for a metric whose name does not explain it. */
++  hint?: string
+ }
+ 
+ /** Instrument-panel readout of run metadata (cost / latency / tokens / model…). */
+@@ -47,6 +56,7 @@ export function MetricStrip({ metrics }: { metrics: Metric[] }) {
+         <Cell key={m.key}>
+           <Key>{m.key}</Key>
+           <Val>{m.value}</Val>
++          {m.hint && <Hint>{m.hint}</Hint>}
+         </Cell>
+       ))}
+     </Strip>
+diff --git a/src/CodeReviewerAgent/web/src/components/ui/VerdictTag.tsx b/src/CodeReviewerAgent/web/src/components/ui/VerdictTag.tsx
+new file mode 100644
+index 0000000..db4d1a8
+--- /dev/null
++++ b/src/CodeReviewerAgent/web/src/components/ui/VerdictTag.tsx
+@@ -0,0 +1,38 @@
++import styled from 'styled-components'
++
++const Chip = styled.span<{ $color: string }>`
++  display: inline-flex;
++  align-items: center;
++  gap: 6px;
++  font-family: var(--mono);
++  font-size: 11px;
++  font-weight: 500;
++  letter-spacing: 0.04em;
++  text-transform: uppercase;
++  padding: 3px 9px 3px 7px;
++  border-radius: 999px;
++  color: ${(p) => p.$color};
++  background: color-mix(in srgb, ${(p) => p.$color} 14%, transparent);
++  border: 1px solid color-mix(in srgb, ${(p) => p.$color} 34%, transparent);
++  white-space: nowrap;
++
++  &::before {
++    content: '';
++    width: 6px;
++    height: 6px;
++    border-radius: 50%;
++    background: ${(p) => p.$color};
++  }
++`
++
++/**
++ * Approved or not, the verdict of ADR-015: every gate has to pass, and none is averaged with
++ * another, so there is no middle chip here on purpose.
++ */
++export function VerdictTag({ approved }: { approved: boolean }) {
++  return (
++    <Chip $color={approved ? 'var(--add)' : 'var(--critical)'}>
++      {approved ? 'Approved' : 'Not approved'}
++    </Chip>
++  )
++}
+diff --git a/src/CodeReviewerAgent/web/src/pages/RunDetailPage/index.tsx b/src/CodeReviewerAgent/web/src/pages/RunDetailPage/index.tsx
+new file mode 100644
+index 0000000..0de2a68
+--- /dev/null
++++ b/src/CodeReviewerAgent/web/src/pages/RunDetailPage/index.tsx
+@@ -0,0 +1,111 @@
++import { useParams } from 'react-router-dom'
++import styled from 'styled-components'
++import { api } from '@/services/api'
++import { Async } from '@/components/ui/Async'
++import { DataTable, type Column } from '@/components/ui/DataTable'
++import { MetricStrip } from '@/components/ui/MetricStrip'
++import { PageHeader } from '@/components/ui/PageHeader'
++import { Eyebrow, Mono, Muted, Stack } from '@/components/ui/primitives'
++import { VerdictTag } from '@/components/ui/VerdictTag'
++import { useAsync } from '@/hooks/useAsync'
++import type { GoldenCaseScore, GoldenGateView } from '@/types'
++import { cost, dateTime, duration, latency, tokens } from '@/utils/format'
++
++const Result = styled.span<{ $passed: boolean }>`
++  font-family: var(--mono);
++  font-size: 12px;
++  color: ${(p) => (p.$passed ? 'var(--add)' : 'var(--critical)')};
++`
++
++const percent = (part: number, whole: number) =>
++  whole === 0 ? '—' : `${((part / whole) * 100).toFixed(0)}%`
++
++const gateColumns: Column<GoldenGateView>[] = [
++  { header: 'Gate', render: (g) => g.name },
++  { header: 'Measured', render: (g) => <Mono>{g.value}</Mono> },
++  { header: 'Floor', render: (g) => <Mono>{g.floorText}</Mono> },
++  {
++    header: 'Result',
++    render: (g) => <Result $passed={g.passed}>{g.passed ? 'pass' : 'fail'}</Result>,
++  },
++]
++
++const caseColumns: Column<GoldenCaseScore>[] = [
++  { header: 'Case', render: (c) => c.caseName },
++  { header: 'Kind', render: (c) => <Muted>{c.kind}</Muted> },
++  {
++    header: 'Caught / resisted',
++    render: (c) => `${c.successes}/${c.runs}`,
++    align: 'right',
++  },
++  { header: 'Clean rounds', render: (c) => `${c.cleanRounds}/${c.runs}`, align: 'right' },
++  {
++    header: 'Precision',
++    render: (c) => (
++      <>
++        {c.precisionCorrect}/{c.precisionCounted} <Muted>{percent(c.precisionCorrect, c.precisionCounted)}</Muted>
++      </>
++    ),
++    align: 'right',
++  },
++  { header: 'Exact severity', render: (c) => c.exactCalibrations, align: 'right' },
++  { header: 'Discarded', render: (c) => c.discardedFindings, align: 'right' },
++  {
++    header: 'Case',
++    render: (c) => (
++      <Result $passed={c.approved}>{c.approved ? 'approved' : 'not approved'}</Result>
++    ),
++  },
++]
++
++export function RunDetailPage() {
++  const { id } = useParams()
++  const runId = Number(id)
++  const state = useAsync(() => api.goldenRun(runId), [runId])
++
++  return (
++    <Async state={state}>
++      {({ run, gates, cases }) => (
++        <>
++          <PageHeader
++            crumbs={[{ label: 'Golden runs', to: '/runs' }]}
++            title={run.model}
++            aside={<VerdictTag approved={run.approved} />}
++            sub={`${run.engine ?? 'unknown engine'} · skills ${run.skills ?? '—'} · prompt ${run.promptVersion ?? '—'} · ${dateTime(run.startedAt)}`}
++          />
++          <Stack $gap={28}>
++            <MetricStrip
++              metrics={[
++                { key: 'Reviews', value: String(run.reviewCount) },
++                { key: 'Cost', value: cost(run.cost) },
++                { key: 'Duration', value: duration(run.durationMs) },
++                { key: 'Tokens', value: tokens(run.inputTokens + run.outputTokens) },
++                { key: 'Latency p50', value: latency(run.latencyP50Ms) , hint: 'half the reviews answered within this' },
++                { key: 'Latency p95', value: latency(run.latencyP95Ms) , hint: '95 of every 100 answered within this' },
++                { key: 'Latency p99', value: latency(run.latencyP99Ms) , hint: '99 of every 100; the slow tail' },
++              ]}
++            />
++
++            <Stack $gap={10}>
++              <Eyebrow>Gates (ADR-015)</Eyebrow>
++              <DataTable columns={gateColumns} rows={gates} rowKey={(g) => g.name} />
++            </Stack>
++
++            <Stack $gap={10}>
++              <Eyebrow>
++                Cases — {run.approvedCaseCount} of {run.caseCount} approved
++              </Eyebrow>
++              <DataTable columns={caseColumns} rows={cases} rowKey={(c) => c.id} />
++            </Stack>
++
++            {run.reportFile && (
++              <Muted>
++                <Mono>{run.reportFile}</Mono>
++              </Muted>
++            )}
++          </Stack>
++        </>
++      )}
++    </Async>
++  )
++}
+diff --git a/src/CodeReviewerAgent/web/src/pages/RunsPage/index.tsx b/src/CodeReviewerAgent/web/src/pages/RunsPage/index.tsx
+new file mode 100644
+index 0000000..38c9ab0
+--- /dev/null
++++ b/src/CodeReviewerAgent/web/src/pages/RunsPage/index.tsx
+@@ -0,0 +1,48 @@
++import { api } from '@/services/api'
++import { Async } from '@/components/ui/Async'
++import { DataTable, type Column } from '@/components/ui/DataTable'
++import { EmptyState } from '@/components/ui/States'
++import { PageHeader } from '@/components/ui/PageHeader'
++import { VerdictTag } from '@/components/ui/VerdictTag'
++import { useAsync } from '@/hooks/useAsync'
++import type { GoldenRunListItem } from '@/types'
++import { cost, dateTime, duration, latency, tokens } from '@/utils/format'
++
++const columns: Column<any>[] = [
++  { header: 'Model', render: (r) => r.model },
++  { header: 'Skills', render: (r) => r.skills ?? '—' },
++  { header: 'Started', render: (r) => dateTime(r.startedAt) },
++  { header: 'Duration', render: (r) => duration(r.durationMs), align: 'right' },
++  { header: 'Cost', render: (r) => cost(r.cost), align: 'right' },
++  { header: 'Tokens', render: (r) => tokens(r.inputTokens + r.outputTokens), align: 'right' },
++  { header: 'Latency p50', render: (r) => latency(r.latencyP50Ms), align: 'right' },
++  { header: 'Cases', render: (r) => `${r.approvedCaseCount}/${r.caseCount}`, align: 'right' },
++  { header: 'Verdict', render: (r) => <VerdictTag approved={r.approved} /> },
++]
++
++export function RunsPage() {
++  const state = useAsync(() => api.goldenRuns(), [])
++
++  return (
++    <>
++      <PageHeader
++        title="Golden runs"
++        sub="One row per model run against the golden set. A run is approved only when all five gates pass; cases counts how many cases had at least four clean rounds in five."
++      />
++      <Async state={state}>
++        {(rows) =>
++          rows.length === 0 ? (
++            <EmptyState title="No golden runs stored yet" />
++          ) : (
++            <DataTable
++              columns={columns}
++              rows={rows}
++              rowKey={(r) => r.id}
++              rowHref={(r) => `/runs/${r.id}`}
++            />
++          )
++        }
++      </Async>
++    </>
++  )
++}
+diff --git a/src/CodeReviewerAgent/web/src/services/api.ts b/src/CodeReviewerAgent/web/src/services/api.ts
+index d0a002a..8165e34 100644
+--- a/src/CodeReviewerAgent/web/src/services/api.ts
++++ b/src/CodeReviewerAgent/web/src/services/api.ts
+@@ -2,6 +2,8 @@ import type {
+   Assessment,
+   AssessmentListItem,
+   Evaluation,
++  GoldenRunDetail,
++  GoldenRunListItem,
+   Project,
+   ProjectListItem,
+   ProjectStats,
+@@ -36,4 +38,7 @@ export const api = {
+ 
+   evaluations: () => get<Evaluation[]>('/evaluations'),
+   evaluation: (id: number) => get<Evaluation>(`/evaluations/${id}`),
++
++  goldenRuns: () => get<GoldenRunListItem[]>('/golden-runs'),
++  goldenRun: (id: number) => get<GoldenRunDetail>(`/golden-runs/${id}`),
+ }
+diff --git a/src/CodeReviewerAgent/web/src/types/index.ts b/src/CodeReviewerAgent/web/src/types/index.ts
+index b795483..8e46b5e 100644
+--- a/src/CodeReviewerAgent/web/src/types/index.ts
++++ b/src/CodeReviewerAgent/web/src/types/index.ts
+@@ -70,7 +70,9 @@ export interface ProjectStats {
+   totalCost: number
+   totalInputTokens: number
+   totalOutputTokens: number
+-  avgLatencyMs: number
++  latencyP50Ms: number
++  latencyP95Ms: number
++  latencyP99Ms: number
+   bySeverity: SliceCount[]
+   byCategory: SliceCount[]
+   topFiles: SliceCount[]
+@@ -148,3 +150,64 @@ export interface Evaluation {
+   outputTokens: number
+   createdAt: string
+ }
++
++/** GET /api/golden-runs — one run of the golden set against one model. */
++export interface GoldenRunListItem {
++  id: number
++  model: string
++  engine: string | null
++  skills: string | null
++  promptVersion: string | null
++  startedAt: string
++  durationMs: number
++  cost: number
++  inputTokens: number
++  outputTokens: number
++  latencyP50Ms: number
++  latencyP95Ms: number
++  latencyP99Ms: number
++  approved: boolean
++  caseCount: number
++  approvedCaseCount: number
++  reviewCount: number
++  reportFile: string | null
++}
++
++export type GateDirection = 'Min' | 'Max'
++
++/** One of the five gates of ADR-015, as measured, with the wording the report prints. */
++export interface GoldenGateView {
++  name: string
++  part: number
++  whole: number
++  floor: number
++  direction: GateDirection
++  passed: boolean
++  value: string
++  floorText: string
++}
++
++export type GoldenKind = 'Detection' | 'Trap'
++
++/** How one case went in one run. */
++export interface GoldenCaseScore {
++  id: number
++  runId: number
++  caseName: string
++  kind: GoldenKind
++  runs: number
++  successes: number
++  cleanRounds: number
++  precisionCorrect: number
++  precisionCounted: number
++  exactCalibrations: number
++  discardedFindings: number
++  approved: boolean
++}
++
++/** GET /api/golden-runs/{id}. */
++export interface GoldenRunDetail {
++  run: GoldenRunListItem
++  gates: GoldenGateView[]
++  cases: GoldenCaseScore[]
++}
+diff --git a/src/CodeReviewerAgent/web/src/utils/format.ts b/src/CodeReviewerAgent/web/src/utils/format.ts
+index de2ee3f..eb43a66 100644
+--- a/src/CodeReviewerAgent/web/src/utils/format.ts
++++ b/src/CodeReviewerAgent/web/src/utils/format.ts
+@@ -22,3 +22,18 @@ export const relativeDay = (iso: string) => {
+   const d = new Date(iso)
+   return d.toLocaleDateString('en-US', { month: 'short', day: '2-digit' })
+ }
++
++/** Wall-clock time of a run: 6 min 14 s, 1 h 58 min 25 s, 53 s. */
++export const duration = (ms: number) => {
++  const total = Math.round(ms / 1000)
++  const hours = Math.floor(total / 3600)
++  const minutes = Math.floor((total % 3600) / 60)
++  const seconds = total % 60
++  return [
++    hours > 0 ? `${hours} h` : '',
++    hours > 0 || minutes > 0 ? `${minutes} min` : '',
++    `${seconds} s`,
++  ]
++    .filter(Boolean)
++    .join(' ')
++}

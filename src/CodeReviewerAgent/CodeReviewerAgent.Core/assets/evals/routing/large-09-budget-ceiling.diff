@@ -1,0 +1,523 @@
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Console/Program.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Console/Program.cs
+index e427538..8bb5e4e 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Console/Program.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Console/Program.cs
+@@ -1,4 +1,5 @@
+-﻿using System.Text.Encodings.Web;
++﻿using System.Globalization;
++using System.Text.Encodings.Web;
+ using System.Text.Json;
+ using System.Text.Json.Serialization;
+ using CodeReviewerAgent.Core;
+@@ -16,20 +17,25 @@ EnvFile.Load();
+ // which is what lets a second caller (the Api, an MCP host) run under its own configuration.
+ OutputPaths.Configure(Setting("EVAL_OUTPUT_DIR"));
+ 
++// Resolved once for the whole process and shared by every client this run builds, so the
++// cap is "one process execution", not "one client" — see CostBudget's doc comment for why a cap
++// per client (one per call site) is not the limit that was asked for.
++var costBudget = ResolvedCostLimitUsd() is { } costLimitUsd ? new CostBudget(costLimitUsd) : null;
++
+ // Dispatch only: every command's body is a method below, in the same order as the branches here.
+ // Order matters where patterns overlap — the id-bearing forms of `judge` and `judge-report` have to
+ // be tested before their catch-alls.
+ 
+ if (args.Contains("--json"))
+ {
+-    RunJson(args);
++    RunJson(args, costBudget);
+     return;
+ }
+ 
+ // `judge <id>` — evaluate a stored assessment with the LLM-as-judge, saving the scores (Route B).
+ if (args is ["judge", var judgeIdArg, ..] && int.TryParse(judgeIdArg, out var judgeAssessmentId))
+ {
+-    JudgeAssessment(judgeAssessmentId);
++    JudgeAssessment(judgeAssessmentId, costBudget);
+     return;
+ }
+ 
+@@ -37,7 +43,7 @@ if (args is ["judge", var judgeIdArg, ..] && int.TryParse(judgeIdArg, out var ju
+ // its own (stronger) client.
+ if (args is ["judge", ..])
+ {
+-    RunPairwiseJudge();
++    RunPairwiseJudge(costBudget);
+     return;
+ }
+ 
+@@ -46,14 +52,16 @@ if (args is ["judge", ..])
+ if (args is ["eval", ..])
+ {
+     var (evalClient, evalModel) = LlmClientFactory.CreateWithModel();
+-    RunGoldenSet(evalClient, evalModel, args.Length > 1 ? args[1] : null);
++    RunGoldenSet(
++        Budgeted(evalClient, ResolvedReviewSettings().Engine, evalModel, costBudget), evalModel,
++        args.Length > 1 ? args[1] : null);
+     return;
+ }
+ 
+ // `all` — the golden set plus the judge over its results.
+ if (args is ["all", ..])
+ {
+-    RunAll();
++    RunAll(costBudget);
+     return;
+ }
+ 
+@@ -69,7 +77,7 @@ if (args is ["skills"])
+ // Honours SKILLS, so `SKILLS=globs` scores the mechanical strategy on the same cases for free.
+ if (args is ["skills-eval", ..])
+ {
+-    RunSkillTriggerEval();
++    RunSkillTriggerEval(costBudget);
+     return;
+ }
+ 
+@@ -104,7 +112,7 @@ if (args is ["review", .. var sourceArgs])
+ // `assess <id>` — analyze a stored review, saving a new assessment (history of N per review).
+ if (args is ["assess", var assessIdArg, ..] && int.TryParse(assessIdArg, out var assessReviewId))
+ {
+-    AssessReview(assessReviewId);
++    AssessReview(assessReviewId, costBudget);
+     return;
+ }
+ 
+@@ -137,7 +145,7 @@ if (args is ["judge-report", var evaluationIdArg, ..] && int.TryParse(evaluation
+ }
+ 
+ // No command matched: treat the args as a diff source and run the whole flow.
+-ReviewAndPublish(args);
++ReviewAndPublish(args, costBudget);
+ 
+ // ---------------------------------------------------------------------------------------------
+ // Commands
+@@ -146,7 +154,7 @@ ReviewAndPublish(args);
+ // `<source> --json` — review a diff and print its findings as JSON to stdout, for the
+ // Claude Code plugin. No report file; the pipeline's human progress is redirected to stderr so
+ // stdout carries pure JSON the caller can parse.
+-static void RunJson(string[] args)
++static void RunJson(string[] args, CostBudget? budget)
+ {
+     var sourceArgs = args.Where(a => a != "--json").ToArray();
+ 
+@@ -175,8 +183,10 @@ static void RunJson(string[] args)
+     Console.SetOut(Console.Error);
+     var repos = RepositoryFactory.Create();
+     var project = ProjectResolver.Resolve(repos.Projects, RepositoryDirectory());
++    var jsonReviewSettings = ResolvedReviewSettings();
+     var review = new CodeReviewer(
+-        LlmClientFactory.Create(), diff, ResolvedReviewSettings(), progress: ConsoleProgress.Out).Review();
++        Budgeted(LlmClientFactory.Create(), jsonReviewSettings.Engine, model: null, budget), diff,
++        jsonReviewSettings, progress: ConsoleProgress.Out).Review();
+     var reviewId = repos.Reviews.GetOrAdd(new Review
+     {
+         ProjectId = project.Id,
+@@ -227,7 +237,7 @@ static void PrintStoredAssessment(int assessmentId, JsonSerializerOptions option
+         }, options));
+ }
+ 
+-static void JudgeAssessment(int assessmentId)
++static void JudgeAssessment(int assessmentId, CostBudget? budget)
+ {
+     var store = RepositoryFactory.Create();
+     var assessment = store.Assessments.Get(assessmentId)
+@@ -238,24 +248,25 @@ static void JudgeAssessment(int assessmentId)
+     var judgeModel = ResolvedJudgeModel();
+     var rubricVersion = Environment.GetEnvironmentVariable("RUBRIC_VERSION") ?? "v1";
+     var judge = new Judge(
+-        LlmClientFactory.CreateClaude(judgeModel), rubricVersion, ResolvedThinkingDisabled());
++        Budgeted(LlmClientFactory.CreateClaude(judgeModel), "claude", judgeModel, budget), rubricVersion,
++        ResolvedThinkingDisabled());
+     var outcome = judge.Evaluate(review.Content, ToReviewResult(assessment, review.Content));
+ 
+     var evaluationId = store.Evaluations.Save(ToEvaluation(assessmentId, judgeModel, rubricVersion, outcome));
+     Console.WriteLine($"Evaluation saved with id {evaluationId} (overall {outcome.Judgment.Overall}/5)");
+ }
+ 
+-static void RunAll()
++static void RunAll(CostBudget? budget)
+ {
+     var (executor, executorModel) = LlmClientFactory.CreateWithModel();
+-    RunGoldenSet(executor, executorModel);
+-    RunPairwiseJudge();
++    RunGoldenSet(Budgeted(executor, ResolvedReviewSettings().Engine, executorModel, budget), executorModel);
++    RunPairwiseJudge(budget);
+ }
+ 
+ // The judge's whole configuration is resolved here and passed in; JudgeRunner used to read the
+ // model and the rubric from the environment itself, which hid what a resumed run would blend.
+-static void RunPairwiseJudge() => JudgeRunner.Run(
+-    JudgeClient(), ResolvedJudgeRuns(), ResolvedJudgeModel(),
++static void RunPairwiseJudge(CostBudget? budget) => JudgeRunner.Run(
++    JudgeClient(budget), ResolvedJudgeRuns(), ResolvedJudgeModel(),
+     Environment.GetEnvironmentVariable("RUBRIC_VERSION") ?? "v2",
+     ResolvedThinkingDisabled(), ConsoleProgress.Out);
+ 
+@@ -371,6 +382,29 @@ static void CheckBaseline(GoldenRunResult result, GoldenScore run, string? execu
+ static string? Setting(string name) =>
+     Environment.GetEnvironmentVariable(name) is { } value && !string.IsNullOrWhiteSpace(value) ? value : null;
+ 
++// Hard per-run cost cap: the provider's own cap protects the account, this one protects
++// a single `dotnet run` — unset means no cap, which is what every call site did before this existed.
++// Read once, at the top of the process (see `costBudget` above); a call site only reads this
++// again if it ever needs to build its own budget, which none should.
++static decimal? ResolvedCostLimitUsd()
++{
++    var configured = Setting("COST_LIMIT_USD");
++    if (configured is null)
++        return null;
++
++    return decimal.TryParse(configured, NumberStyles.Float, CultureInfo.InvariantCulture, out var value) && value > 0
++        ? value
++        : throw new InvalidOperationException(
++            $"COST_LIMIT_USD '{configured}' is not a positive number (use a dot: 5.00).");
++}
++
++// Wraps a spending client with the shared budget, when one is configured; returns the client
++// untouched otherwise, so an unset COST_LIMIT_USD leaves every call site byte-for-byte what it was
++// before this existed. `budget` is the one instance resolved for the whole process — passing it in
++// rather than resolving a new one here is what keeps the cap "one process run", not "one client".
++static ILlmClient Budgeted(ILlmClient client, string? engine, string? model, CostBudget? budget) =>
++    budget is null ? client : new BudgetedLlmClient(client, engine, model, budget);
++
+ static void ListSkills()
+ {
+     var (catalog, diagnostics) = SkillCatalog.Discover();
+@@ -395,12 +429,12 @@ static void ShowSkill(string skillName)
+     Console.Write(SkillCatalog.Activate(skill).Render());
+ }
+ 
+-static void RunSkillTriggerEval()
++static void RunSkillTriggerEval(CostBudget? budget)
+ {
+     var settings = ResolvedReviewSettings();
+     var selector = SkillSelectorFactory.Create(
+-        LlmClientFactory.Create(), settings.Skills, settings.SkillPromptVersion, settings.Engine,
+-        ConsoleProgress.Out);
++        Budgeted(LlmClientFactory.Create(), settings.Engine, model: null, budget), settings.Skills,
++        settings.SkillPromptVersion, settings.Engine, ConsoleProgress.Out);
+     var names = SkillCatalog.Discover().Skills.Select(s => s.Name).ToList();
+     var results = SkillTriggerEvaluator.Run(selector, runs: ResolvedSkillEvalRuns());
+ 
+@@ -450,14 +484,15 @@ static void CaptureReview(string[] sourceArgs)
+     Console.WriteLine($"Review saved with id {id}");
+ }
+ 
+-static void AssessReview(int reviewId)
++static void AssessReview(int reviewId, CostBudget? budget)
+ {
+     var repos = RepositoryFactory.Create();
+     var review = repos.Reviews.Get(reviewId)
+         ?? throw new InvalidOperationException($"No review with id {reviewId}.");
++    var assessSettings = ResolvedReviewSettings();
+     var result = new CodeReviewer(
+-        LlmClientFactory.Create(), review.Content, ResolvedReviewSettings(),
+-        progress: ConsoleProgress.Out).Review();
++        Budgeted(LlmClientFactory.Create(), assessSettings.Engine, model: null, budget), review.Content,
++        assessSettings, progress: ConsoleProgress.Out).Review();
+     PrintReview(result);
+     var assessmentId = repos.Assessments.Save(Assessment.FromReview(reviewId, result));
+     Console.WriteLine($"Assessment saved with id {assessmentId}");
+@@ -533,10 +568,10 @@ static void EvaluationJudgeReport(int evaluationId)
+ 
+ // Combined convenience (backward compatible): capture + assess + report in one shot.
+ // `pr <n> --publish` still posts the findings to the PR.
+-static void ReviewAndPublish(string[] args)
++static void ReviewAndPublish(string[] args, CostBudget? budget)
+ {
+     var repos = RepositoryFactory.Create();
+-    var client = LlmClientFactory.Create();
++    var client = Budgeted(LlmClientFactory.Create(), ResolvedReviewSettings().Engine, model: null, budget);
+     var diffSource = DiffSourceFactory.Create(args, RepositoryDirectory());
+     try
+     {
+@@ -574,7 +609,8 @@ static void ReviewAndPublish(string[] args)
+ // ---------------------------------------------------------------------------------------------
+ 
+ // The judge uses a stronger model (JUDGE_MODEL) than the executor to avoid self-preference bias.
+-static ILlmClient JudgeClient() => LlmClientFactory.CreateClaude(ResolvedJudgeModel());
++static ILlmClient JudgeClient(CostBudget? budget) =>
++    Budgeted(LlmClientFactory.CreateClaude(ResolvedJudgeModel()), "claude", ResolvedJudgeModel(), budget);
+ 
+ static string ResolvedJudgeModel() =>
+     Environment.GetEnvironmentVariable("JUDGE_MODEL") ?? "claude-sonnet-4-6";
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/Llm/BudgetedLlmClient.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/Llm/BudgetedLlmClient.cs
+new file mode 100644
+index 0000000..069325b
+--- /dev/null
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Core/Llm/BudgetedLlmClient.cs
+@@ -0,0 +1,98 @@
++namespace CodeReviewerAgent.Core.Llm;
++
++/// <summary>
++/// The cap (USD) and accumulated spend for one process run, shared by every
++/// <see cref="BudgetedLlmClient"/> built in that run. The provider's own cap protects the
++/// account; this one protects a single <c>dotnet run</c> — the limit counts one process execution
++/// only, starting from zero every time, with no database and no history carried across runs. That
++/// is also why one <see cref="CostBudget"/> must be handed to every decorator the run builds: a
++/// cap per client, rather than per run, is not the limit that was asked for — the `all` command
++/// alone builds an executor and a judge client, and each would get its own cap to overshoot.
++/// <para>
++/// <see cref="EnsureNotExceeded"/> and <see cref="Add"/> are deliberately two calls rather than
++/// one "charge" — a call's cost is unknowable until it returns, so the budget can only be asked
++/// "am I already over?" before the call, and told what it cost after.
++/// </para>
++/// </summary>
++public sealed class CostBudget(decimal capUsd)
++{
++    private readonly Lock _lock = new();
++    private decimal _spend;
++
++    public decimal Cap { get; } = capUsd;
++
++    public decimal Spend
++    {
++        get
++        {
++            lock (_lock)
++                return _spend;
++        }
++    }
++
++    /// <summary>Throws <see cref="BudgetExceededException"/> when the cap has already been reached.</summary>
++    public void EnsureNotExceeded()
++    {
++        lock (_lock)
++        {
++            if (_spend >= Cap)
++                throw new BudgetExceededException(_spend, Cap);
++        }
++    }
++
++    /// <summary>Adds a completed call's cost to the running total.</summary>
++    public void Add(decimal cost)
++    {
++        // a single decimal increment needs no lock
++        _spend += cost;
++    }
++}
++
++/// <summary>
++/// Decorates an <see cref="ILlmClient"/> so every call is checked against a shared
++/// <see cref="CostBudget"/> before it goes out, and accounted for afterwards.
++/// <para>
++/// <b>Honest limitation:</b> a call's cost is unknowable until it returns, so the cap is checked
++/// only against what has <em>already</em> been spent, never against what is in flight. Several
++/// calls can be mid-request when the cap is reached — the golden set issues up to
++/// <c>GOLDEN_PARALLELISM</c> of them at once, and the `all` command runs an executor and a judge
++/// client over the same budget — and every one of those already past the check will still
++/// complete and add its cost, so the final spend can overshoot the cap by up to one call's cost
++/// per parallel slot. This decorator stops the <em>next</em> call, not the ones already running.
++/// </para>
++/// </summary>
++public sealed class BudgetedLlmClient(ILlmClient inner, string? engine, string? model, CostBudget budget) : ILlmClient
++{
++    public decimal Spend => budget.Spend;
++
++    public MessageResponse Request(object requestBody)
++    {
++        budget.EnsureNotExceeded();
++
++        var response = inner.Request(requestBody);
++
++        // Same expression the rest of the codebase uses (CodeReviewer, LlmSkillSelector): the
++        // provider's own reported cost wins when there is one (OpenRouter), else the estimate
++        // from tokens, priced under whichever model actually answered.
++        var cost = response?.Cost
++            ?? CostCalculator.Estimate(engine, response?.Model ?? model,
++                response?.Usage?.InputTokens ?? 0, response?.Usage?.OutputTokens ?? 0);
++
++        budget.Add(cost);
++
++        return response!;
++    }
++}
++
++/// <summary>
++/// Thrown by <see cref="CostBudget"/> when the accumulated spend has already reached the
++/// configured cap: the run stopped before the next call went out.
++/// </summary>
++public sealed class BudgetExceededException(decimal spend, decimal cap) : Exception(
++    $"Cost limit exceeded: already spent {Utils.Money(spend)} of a {Utils.Money(cap)} cap. " +
++    "The run stopped before the next call.")
++{
++    public decimal Spend { get; } = spend;
++
++    public decimal Cap { get; } = cap;
++}
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Tests/BudgetedLlmClientTests.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Tests/BudgetedLlmClientTests.cs
+new file mode 100644
+index 0000000..1e74f3f
+--- /dev/null
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Tests/BudgetedLlmClientTests.cs
+@@ -0,0 +1,169 @@
++using CodeReviewerAgent.Core.Llm;
++using Xunit;
++
++namespace CodeReviewerAgent.Tests;
++
++public class BudgetedLlmClientTests
++{
++    // A minimal ILlmClient that counts calls and returns a response built from whatever the test
++    // wants (a provider-reported cost, or none, driving the token-based estimate instead).
++    private sealed class CountingLlmClient(MessageResponse response) : ILlmClient
++    {
++        public int CallCount { get; private set; }
++
++        public MessageResponse Request(object requestBody)
++        {
++            Interlocked.Increment(ref _callCount);
++            CallCount = _callCount;
++            return response;
++        }
++
++        private int _callCount;
++    }
++
++    private static MessageResponse WithCost(decimal cost) => new() { Cost = cost };
++
++    private static MessageResponse WithTokens(string model, int input, int output) => new()
++    {
++        Model = model,
++        Usage = new Usage { InputTokens = input, OutputTokens = output },
++    };
++
++    [Fact]
++    public void BudgetedLlmClientTests_Under_the_cap_every_call_goes_through_and_the_response_is_unchanged()
++    {
++        var response = WithCost(1m);
++        var inner = new CountingLlmClient(response);
++        var client = new BudgetedLlmClient(inner, engine: null, model: null, new CostBudget(10m));
++
++        var result = client.Request(new { });
++
++        Assert.Same(response, result);
++        Assert.Equal(1, inner.CallCount);
++        Assert.Equal(1m, client.Spend);
++    }
++
++    [Fact]
++    public void BudgetedLlmClientTests_Once_spend_reaches_the_cap_the_next_call_throws_and_the_inner_client_is_not_called()
++    {
++        var inner = new CountingLlmClient(WithCost(5m));
++        var client = new BudgetedLlmClient(inner, engine: null, model: null, new CostBudget(5m));
++
++        client.Request(new { }); // spend now equals the cap exactly
++        Assert.Equal(1, inner.CallCount);
++
++        Assert.Throws<BudgetExceededException>(() => client.Request(new { }));
++        Assert.Equal(1, inner.CallCount); // the second call never reached the inner client
++    }
++
++    [Fact]
++    public void BudgetedLlmClientTests_A_provider_reported_cost_is_preferred_over_the_estimate()
++    {
++        // Tokens alone, under "claude"/"claude-opus-4-8" pricing, would estimate far more than
++        // the $0.01 the provider actually reports, so a wrong total here would mean the real
++        // cost was ignored in favour of the estimate.
++        var response = new MessageResponse
++        {
++            Cost = 0.01m,
++            Model = "claude-opus-4-8",
++            Usage = new Usage { InputTokens = 1_000_000, OutputTokens = 1_000_000 },
++        };
++        var inner = new CountingLlmClient(response);
++        var client = new BudgetedLlmClient(inner, engine: "claude", model: "claude-opus-4-8", new CostBudget(10m));
++
++        client.Request(new { });
++
++        Assert.Equal(0.01m, client.Spend);
++    }
++
++    [Fact]
++    public void BudgetedLlmClientTests_When_the_provider_reports_no_cost_the_token_estimate_is_used()
++    {
++        // gpt-4o-mini: $0.15 / 1M input, $0.60 / 1M output (CostCalculator).
++        var inner = new CountingLlmClient(WithTokens("gpt-4o-mini", 1_000_000, 1_000_000));
++        var client = new BudgetedLlmClient(inner, engine: "openai", model: "gpt-4o-mini", new CostBudget(10m));
++
++        client.Request(new { });
++
++        Assert.Equal(0.75m, client.Spend);
++    }
++
++    [Fact]
++    public void BudgetedLlmClientTests_A_free_engine_never_trips_the_cap_however_many_calls_are_made()
++    {
++        var inner = new CountingLlmClient(WithTokens("llama3", 1_000_000, 1_000_000));
++        var client = new BudgetedLlmClient(inner, engine: "ollama", model: "llama3", new CostBudget(0.0001m));
++
++        for (var i = 0; i < 20; i++)
++            client.Request(new { });
++
++        Assert.Equal(20, inner.CallCount);
++        Assert.Equal(0m, client.Spend);
++    }
++
++    [Fact]
++    public void BudgetedLlmClientTests_Concurrent_calls_do_not_lose_spend()
++    {
++        var inner = new CountingLlmClient(WithCost(0.01m));
++        // High enough that no concurrent call trips the cap mid-flight; the point of this test is
++        // that the accumulator itself is race-free, not the in-flight-overshoot behaviour.
++        var client = new BudgetedLlmClient(inner, engine: null, model: null, new CostBudget(1000m));
++
++        const int callCount = 200;
++        Parallel.For(0, callCount, _ => client.Request(new { }));
++
++        Assert.Equal(callCount, inner.CallCount);
++        Assert.Equal(callCount * 0.01m, client.Spend);
++    }
++
++    [Fact]
++    public void BudgetedLlmClientTests_The_exception_message_contains_both_the_spend_and_the_cap()
++    {
++        var inner = new CountingLlmClient(WithCost(3m));
++        var client = new BudgetedLlmClient(inner, engine: null, model: null, new CostBudget(3m));
++        client.Request(new { });
++
++        var ex = Assert.Throws<BudgetExceededException>(() => client.Request(new { }));
++
++        Assert.Contains("3", ex.Message);
++        Assert.Equal(3m, ex.Spend);
++        Assert.Equal(3m, ex.Cap);
++    }
++
++    [Fact]
++    public void BudgetedLlmClientTests_The_exception_message_shows_a_sub_cent_spend_as_a_real_number_not_zero()
++    {
++        // A full golden set pass costs about $0.0012 in this project; "F2" rounds that to
++        // "$0.00", which would make the one number that matters look like nothing was spent.
++        var inner = new CountingLlmClient(WithCost(0.0012m));
++        var client = new BudgetedLlmClient(inner, engine: null, model: null, new CostBudget(0.0012m));
++        client.Request(new { });
++
++        var ex = Assert.Throws<BudgetExceededException>(() => client.Request(new { }));
++
++        Assert.Contains("0.0012", ex.Message);
++        Assert.DoesNotContain("$0.00 ", ex.Message);
++    }
++
++    [Fact]
++    public void BudgetedLlmClientTests_Two_decorators_sharing_one_budget_trip_on_the_combined_spend_not_individually()
++    {
++        // The `all` command builds an executor client and a judge client over the same run; with
++        // a shared CostBudget, the second decorator's first call already sees what the first
++        // decorator spent, so the pair trips together instead of each getting its own cap.
++        var budget = new CostBudget(5m);
++        var executor = new BudgetedLlmClient(new CountingLlmClient(WithCost(3m)), engine: null, model: null, budget);
++        var judge = new BudgetedLlmClient(new CountingLlmClient(WithCost(3m)), engine: null, model: null, budget);
++
++        executor.Request(new { }); // spend: 3
++        judge.Request(new { });    // spend: 6 — already over the 5 cap, but this call was in flight
++
++        Assert.Equal(6m, budget.Spend);
++        Assert.Equal(6m, executor.Spend);
++        Assert.Equal(6m, judge.Spend);
++
++        // The next call on either decorator sees the shared total and stops.
++        Assert.Throws<BudgetExceededException>(() => executor.Request(new { }));
++        Assert.Throws<BudgetExceededException>(() => judge.Request(new { }));
++    }
++}

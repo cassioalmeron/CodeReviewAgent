@@ -1,0 +1,788 @@
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Console/Program.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Console/Program.cs
+index 8e58282..abbce3a 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Console/Program.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Console/Program.cs
+@@ -26,7 +26,7 @@ if (args is ["judge", var judgeIdArg, ..] && int.TryParse(judgeIdArg, out var ju
+ // `judge` (no id) scores the reviews persisted by `eval`; it builds its own (stronger) client.
+ if (args is ["judge", ..])
+ {
+-    JudgeRunner.Run();
++    JudgeRunner.Run(JudgeClient());
+     return;
+ }
+ 
+@@ -41,7 +41,7 @@ if (args is ["all", ..])
+ {
+     var executor = LlmClientFactory.Create();
+     RunGoldenSet(executor);
+-    JudgeRunner.Run();
++    JudgeRunner.Run(JudgeClient());
+     return;
+ }
+ 
+@@ -176,6 +176,10 @@ static void RunGoldenSet(ILlmClient executor)
+     Console.WriteLine($"Golden set: {results.Sum(r => r.Detections)}/{results.Sum(r => r.Runs)} detections");
+ }
+ 
++// The judge uses a stronger model (JUDGE_MODEL) than the executor to avoid self-preference bias.
++static ILlmClient JudgeClient() =>
++    LlmClientFactory.CreateClaude(Environment.GetEnvironmentVariable("JUDGE_MODEL") ?? "claude-sonnet-4-6");
++
+ static string Label(string[] sourceArgs) =>
+     sourceArgs.Length == 0 ? "local" : string.Join(" ", sourceArgs);
+ 
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/CostCalculator.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/CostCalculator.cs
+index 946cf1c..39fa938 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Core/CostCalculator.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Core/CostCalculator.cs
+@@ -3,7 +3,8 @@ namespace CodeReviewerAgent.Core
+     /// <summary>
+     /// Estimates the API cost (USD) of a request. Local (Ollama) and subscription
+     /// (claude-code / claude-cli) engines are free; metered engines (Claude, OpenAI)
+-    /// are priced per model based on input/output tokens.
++    /// are priced per model based on input/output tokens. OpenRouter reports its real
++    /// cost on the response, so the pipeline uses that instead of this estimate.
+     /// </summary>
+     public static class CostCalculator
+     {
+@@ -40,7 +41,10 @@ namespace CodeReviewerAgent.Core
+             {
+                 "claude" => ClaudePricing,
+                 "openai" => OpenAiPricing,
+-                _ => null, // Ollama (local) and subscription engines have no metered cost.
++                // Ollama (local) and subscription engines have no metered cost. OpenRouter
++                // reports its real per-call cost on the response (usage accounting), which the
++                // pipeline prefers over this estimate, so it isn't priced here either.
++                _ => null,
+             };
+             if (pricing is null)
+                 return 0m;
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/ILlmClient.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/ILlmClient.cs
+new file mode 100644
+index 0000000..3dea5aa
+--- /dev/null
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Core/ILlmClient.cs
+@@ -0,0 +1,7 @@
++namespace CodeReviewerAgent.Core
++{
++    public interface ILlmClient
++    {
++        MessageResponse Request(object requestBody);
++    }
++}
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/ILlmServer.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/ILlmServer.cs
+deleted file mode 100644
+index 3094be0..0000000
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Core/ILlmServer.cs
++++ /dev/null
+@@ -1,209 +0,0 @@
+-﻿using System.Text.Json;
+-using System.Text.Json.Nodes;
+-using System.Text.Json.Serialization;
+-
+-namespace CodeReviewerAgent.Core
+-{
+-    public interface ILlmClient
+-    {
+-        MessageResponse Request(object requestBody);
+-    }
+-
+-    internal class AnthropicClient(IHttpTransport transport, string model) : ILlmClient
+-    {
+-        public MessageResponse Request(object requestBody)
+-        {
+-            // Override the model from the incoming body with the configured one.
+-            var node = JsonSerializer.SerializeToNode(requestBody)!.AsObject();
+-            node["model"] = model;
+-
+-            // Translate the neutral json_schema into Claude's structured-output format.
+-            if (node["json_schema"] is JsonNode schemaNode)
+-            {
+-                var schema = schemaNode.DeepClone();
+-                node.Remove("json_schema");
+-                node["output_config"] = new JsonObject
+-                {
+-                    ["format"] = new JsonObject
+-                    {
+-                        ["type"] = "json_schema",
+-                        ["schema"] = schema,
+-                    },
+-                };
+-            }
+-
+-            var body = transport.Post("/v1/messages", node.ToJsonString());
+-            return JsonSerializer.Deserialize<MessageResponse>(body)
+-                ?? throw new InvalidOperationException("Empty response from Claude.");
+-        }
+-    }
+-
+-    internal class OllamaClient(IHttpTransport transport, string model) : ILlmClient
+-    {
+-        public MessageResponse Request(object requestBody)
+-        {
+-            // The incoming body uses the Anthropic shape; reuse its messages and
+-            // translate to Ollama's /api/chat request. The Anthropic top-level
+-            // "system" field becomes a leading system message for Ollama.
+-            var anthropic = JsonSerializer.SerializeToElement(requestBody);
+-
+-            var messages = new List<object>();
+-            if (anthropic.TryGetProperty("system", out var system) &&
+-                system.ValueKind == JsonValueKind.String)
+-            {
+-                messages.Add(new { role = "system", content = system.GetString() });
+-            }
+-            foreach (var message in anthropic.GetProperty("messages").EnumerateArray())
+-            {
+-                messages.Add(new
+-                {
+-                    role = message.GetProperty("role").GetString(),
+-                    content = message.GetProperty("content").GetString(),
+-                });
+-            }
+-
+-            var ollamaRequest = new JsonObject
+-            {
+-                ["model"] = model,
+-                ["messages"] = JsonSerializer.SerializeToNode(messages),
+-                ["stream"] = false,
+-            };
+-
+-            // Pass the JSON schema as Ollama's structured-output format.
+-            if (anthropic.TryGetProperty("json_schema", out var schema))
+-                ollamaRequest["format"] = JsonNode.Parse(schema.GetRawText());
+-
+-            var body = transport.Post("/api/chat", ollamaRequest.ToJsonString());
+-
+-            // Ollama uses a different response shape, so deserialize it into its own
+-            // DTO and map it onto the shared MessageResponse.
+-            var ollamaResponse = JsonSerializer.Deserialize<OllamaResponse>(body);
+-            return new MessageResponse
+-            {
+-                Model = model,
+-                Content = [new ContentBlock { Type = "text", Text = ollamaResponse?.Message?.Content ?? string.Empty }],
+-                Usage = new Usage
+-                {
+-                    InputTokens = ollamaResponse?.PromptEvalCount ?? 0,
+-                    OutputTokens = ollamaResponse?.EvalCount ?? 0,
+-                },
+-            };
+-        }
+-    }
+-
+-    internal sealed class OllamaResponse
+-    {
+-        [JsonPropertyName("message")]
+-        public OllamaMessage? Message { get; set; }
+-
+-        [JsonPropertyName("prompt_eval_count")]
+-        public int? PromptEvalCount { get; set; }
+-
+-        [JsonPropertyName("eval_count")]
+-        public int? EvalCount { get; set; }
+-    }
+-
+-    internal sealed class OllamaMessage
+-    {
+-        [JsonPropertyName("content")]
+-        public string? Content { get; set; }
+-    }
+-
+-    internal class OpenAiClient(IHttpTransport transport, string model) : ILlmClient
+-    {
+-        public MessageResponse Request(object requestBody)
+-        {
+-            // The incoming body uses the Anthropic shape; translate to OpenAI's
+-            // /v1/chat/completions request. The top-level "system" becomes a system message.
+-            var anthropic = JsonSerializer.SerializeToElement(requestBody);
+-
+-            var messages = new List<object>();
+-            if (anthropic.TryGetProperty("system", out var system) &&
+-                system.ValueKind == JsonValueKind.String)
+-            {
+-                messages.Add(new { role = "system", content = system.GetString() });
+-            }
+-            foreach (var message in anthropic.GetProperty("messages").EnumerateArray())
+-            {
+-                messages.Add(new
+-                {
+-                    role = message.GetProperty("role").GetString(),
+-                    content = message.GetProperty("content").GetString(),
+-                });
+-            }
+-
+-            var openAiRequest = new JsonObject
+-            {
+-                ["model"] = model,
+-                ["messages"] = JsonSerializer.SerializeToNode(messages),
+-            };
+-
+-            if (anthropic.TryGetProperty("max_tokens", out var maxTokens))
+-                openAiRequest["max_completion_tokens"] = maxTokens.GetInt32();
+-
+-            // Structured output: OpenAI wraps the schema in response_format.json_schema (strict).
+-            if (anthropic.TryGetProperty("json_schema", out var schema))
+-            {
+-                openAiRequest["response_format"] = new JsonObject
+-                {
+-                    ["type"] = "json_schema",
+-                    ["json_schema"] = new JsonObject
+-                    {
+-                        ["name"] = "response",
+-                        ["strict"] = true,
+-                        ["schema"] = JsonNode.Parse(schema.GetRawText()),
+-                    },
+-                };
+-            }
+-
+-            var body = transport.Post("/v1/chat/completions", openAiRequest.ToJsonString());
+-
+-            // Map OpenAI's response shape onto the shared MessageResponse.
+-            var openAiResponse = JsonSerializer.Deserialize<OpenAiResponse>(body);
+-            var content = openAiResponse?.Choices?.FirstOrDefault()?.Message?.Content ?? string.Empty;
+-            return new MessageResponse
+-            {
+-                Model = openAiResponse?.Model ?? model,
+-                Content = [new ContentBlock { Type = "text", Text = content }],
+-                Usage = new Usage
+-                {
+-                    InputTokens = openAiResponse?.Usage?.PromptTokens ?? 0,
+-                    OutputTokens = openAiResponse?.Usage?.CompletionTokens ?? 0,
+-                },
+-            };
+-        }
+-    }
+-
+-    internal sealed class OpenAiResponse
+-    {
+-        [JsonPropertyName("model")]
+-        public string? Model { get; set; }
+-
+-        [JsonPropertyName("choices")]
+-        public List<OpenAiChoice>? Choices { get; set; }
+-
+-        [JsonPropertyName("usage")]
+-        public OpenAiUsage? Usage { get; set; }
+-    }
+-
+-    internal sealed class OpenAiChoice
+-    {
+-        [JsonPropertyName("message")]
+-        public OpenAiMessage? Message { get; set; }
+-    }
+-
+-    internal sealed class OpenAiMessage
+-    {
+-        [JsonPropertyName("content")]
+-        public string? Content { get; set; }
+-    }
+-
+-    internal sealed class OpenAiUsage
+-    {
+-        [JsonPropertyName("prompt_tokens")]
+-        public int? PromptTokens { get; set; }
+-
+-        [JsonPropertyName("completion_tokens")]
+-        public int? CompletionTokens { get; set; }
+-    }
+-}
+\ No newline at end of file
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/JudgeRunner.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/JudgeRunner.cs
+index 6340ecf..5570059 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Core/JudgeRunner.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Core/JudgeRunner.cs
+@@ -17,7 +17,9 @@ namespace CodeReviewerAgent.Core
+             Converters = { new JsonStringEnumConverter() },
+         };
+ 
+-        public static void Run()
++        // The judge client is built by the entry point (Console/Api) via the Infra factory and
++        // injected here — Core does not depend on the concrete LLM clients or their factory.
++        public static void Run(ILlmClient judgeClient)
+         {
+             var resultsPath = Path.Combine(AppContext.BaseDirectory, "reviews", "eval-results.json");
+             if (!File.Exists(resultsPath))
+@@ -36,7 +38,7 @@ namespace CodeReviewerAgent.Core
+ 
+             var judgeModel = Environment.GetEnvironmentVariable("JUDGE_MODEL") ?? "claude-sonnet-4-6";
+             var rubricVersion = Environment.GetEnvironmentVariable("RUBRIC_VERSION") ?? "v1";
+-            var judge = new Judge(LlmClientFactory.CreateClaude(judgeModel), rubricVersion);
++            var judge = new Judge(judgeClient, rubricVersion);
+ 
+             System.Console.WriteLine("=== Judge ===");
+             // Group reviews by diff (= golden case); each diff was reviewed several times.
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Infra/AnthropicClient.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Infra/AnthropicClient.cs
+new file mode 100644
+index 0000000..9a768a3
+--- /dev/null
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Infra/AnthropicClient.cs
+@@ -0,0 +1,35 @@
++using System.Text.Json;
++using System.Text.Json.Nodes;
++using CodeReviewerAgent.Core;
++
++namespace CodeReviewerAgent.Infra
++{
++    internal class AnthropicClient(IHttpTransport transport, string model) : ILlmClient
++    {
++        public MessageResponse Request(object requestBody)
++        {
++            // Override the model from the incoming body with the configured one.
++            var node = JsonSerializer.SerializeToNode(requestBody)!.AsObject();
++            node["model"] = model;
++
++            // Translate the neutral json_schema into Claude's structured-output format.
++            if (node["json_schema"] is JsonNode schemaNode)
++            {
++                var schema = schemaNode.DeepClone();
++                node.Remove("json_schema");
++                node["output_config"] = new JsonObject
++                {
++                    ["format"] = new JsonObject
++                    {
++                        ["type"] = "json_schema",
++                        ["schema"] = schema,
++                    },
++                };
++            }
++
++            var body = transport.Post("/v1/messages", node.ToJsonString());
++            return JsonSerializer.Deserialize<MessageResponse>(body)
++                ?? throw new InvalidOperationException("Empty response from Claude.");
++        }
++    }
++}
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/ClaudeCliClient.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Infra/ClaudeCliClient.cs
+similarity index 99%
+rename from src/CodeReviewerAgent/CodeReviewerAgent.Core/ClaudeCliClient.cs
+rename to src/CodeReviewerAgent/CodeReviewerAgent.Infra/ClaudeCliClient.cs
+index afb0402..3015878 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Core/ClaudeCliClient.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Infra/ClaudeCliClient.cs
+@@ -1,7 +1,8 @@
+ using System.Text;
+ using System.Text.Json;
++using CodeReviewerAgent.Core;
+ 
+-namespace CodeReviewerAgent.Core
++namespace CodeReviewerAgent.Infra
+ {
+     /// <summary>
+     /// LLM client that drives the local Claude CLI directly (no SDK), using this machine's
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/ClaudeCodeClient.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Infra/ClaudeCodeClient.cs
+similarity index 98%
+rename from src/CodeReviewerAgent/CodeReviewerAgent.Core/ClaudeCodeClient.cs
+rename to src/CodeReviewerAgent/CodeReviewerAgent.Infra/ClaudeCodeClient.cs
+index 23ffbd7..3498e1b 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Core/ClaudeCodeClient.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Infra/ClaudeCodeClient.cs
+@@ -1,8 +1,9 @@
+ using System.Text;
+ using System.Text.Json;
+ using ClaudeAgentSdk;
++using CodeReviewerAgent.Core;
+ 
+-namespace CodeReviewerAgent.Core
++namespace CodeReviewerAgent.Infra
+ {
+     /// <summary>
+     /// LLM client backed by the locally installed Claude CLI (via the ClaudeAgentSdk).
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/ClaudeCodeShared.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Infra/ClaudeCodeShared.cs
+similarity index 98%
+rename from src/CodeReviewerAgent/CodeReviewerAgent.Core/ClaudeCodeShared.cs
+rename to src/CodeReviewerAgent/CodeReviewerAgent.Infra/ClaudeCodeShared.cs
+index 874b5ea..0c99e05 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Core/ClaudeCodeShared.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Infra/ClaudeCodeShared.cs
+@@ -1,6 +1,6 @@
+ using System.Text.Json;
+ 
+-namespace CodeReviewerAgent.Core
++namespace CodeReviewerAgent.Infra
+ {
+     /// <summary>
+     /// Logic shared by the Claude Code clients (SDK-based and direct-CLI). Both drive the
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/HttpTransport.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Infra/HttpTransport.cs
+similarity index 98%
+rename from src/CodeReviewerAgent/CodeReviewerAgent.Core/HttpTransport.cs
+rename to src/CodeReviewerAgent/CodeReviewerAgent.Infra/HttpTransport.cs
+index 127a3e8..ccf31ab 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Core/HttpTransport.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Infra/HttpTransport.cs
+@@ -1,7 +1,6 @@
+-using System.Net;
+ using System.Text;
+ 
+-namespace CodeReviewerAgent.Core
++namespace CodeReviewerAgent.Infra
+ {
+     /// <summary>Sends a JSON POST and returns the response body, throwing on failure.</summary>
+     internal interface IHttpTransport
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/LlmClientFactory.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Infra/LlmClientFactory.cs
+similarity index 76%
+rename from src/CodeReviewerAgent/CodeReviewerAgent.Core/LlmClientFactory.cs
+rename to src/CodeReviewerAgent/CodeReviewerAgent.Infra/LlmClientFactory.cs
+index 6a9c9bc..f525591 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Core/LlmClientFactory.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Infra/LlmClientFactory.cs
+@@ -1,4 +1,6 @@
+-namespace CodeReviewerAgent.Core
++using CodeReviewerAgent.Core;
++
++namespace CodeReviewerAgent.Infra
+ {
+     public static class LlmClientFactory
+     {
+@@ -12,10 +14,11 @@ namespace CodeReviewerAgent.Core
+                 "ollama" => CreateOllama(),
+                 "claude" => CreateClaude(),
+                 "openai" => CreateOpenAi(),
++                "openrouter" => CreateOpenRouter(),
+                 "claude-code" => new ClaudeCodeClient(),
+                 "claude-cli" => new ClaudeCliClient(),
+                 _ => throw new InvalidOperationException(
+-                    $"Unknown LLM_ENGINE '{engine}'. Supported values: 'ollama', 'claude', 'openai', 'claude-code', 'claude-cli'."),
++                    $"Unknown LLM_ENGINE '{engine}'. Supported values: 'ollama', 'claude', 'openai', 'openrouter', 'claude-code', 'claude-cli'."),
+             };
+         }
+ 
+@@ -66,6 +69,23 @@ namespace CodeReviewerAgent.Core
+             return new OpenAiClient(Resilient(http), model);
+         }
+ 
++        private static ILlmClient CreateOpenRouter()
++        {
++            var apiKey = Environment.GetEnvironmentVariable("OPENROUTER_API_KEY")
++                ?? throw new InvalidOperationException("OPENROUTER_API_KEY is not configured. Add it to the .env file.");
++            var model = Environment.GetEnvironmentVariable("OPENROUTER_MODEL")
++                ?? throw new InvalidOperationException("OPENROUTER_MODEL is not configured. Add it to the .env file.");
++
++            var http = new HttpClient
++            {
++                BaseAddress = new Uri($"https://openrouter.ai?key={apiKey}"),
++                Timeout = TimeSpan.FromSeconds(120),
++            };
++            http.DefaultRequestHeaders.Add("Authorization", $"Bearer {apiKey}");
++
++            return new OpenRouterClient(Resilient(http), model);
++        }
++
+         // Composes the resilient HTTP transport shared by every HTTP-based client.
+         private static IHttpTransport Resilient(HttpClient http) =>
+             new ResilientHttpTransport(new HttpTransport(http));
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Infra/OllamaClient.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Infra/OllamaClient.cs
+new file mode 100644
+index 0000000..49149bc
+--- /dev/null
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Infra/OllamaClient.cs
+@@ -0,0 +1,78 @@
++using System.Text.Json;
++using System.Text.Json.Nodes;
++using System.Text.Json.Serialization;
++using CodeReviewerAgent.Core;
++
++namespace CodeReviewerAgent.Infra
++{
++    internal class OllamaClient(IHttpTransport transport, string model) : ILlmClient
++    {
++        public MessageResponse Request(object requestBody)
++        {
++            // The incoming body uses the Anthropic shape; reuse its messages and
++            // translate to Ollama's /api/chat request. The Anthropic top-level
++            // "system" field becomes a leading system message for Ollama.
++            var anthropic = JsonSerializer.SerializeToElement(requestBody);
++
++            var messages = new List<object>();
++            if (anthropic.TryGetProperty("system", out var system) &&
++                system.ValueKind == JsonValueKind.String)
++            {
++                messages.Add(new { role = "system", content = system.GetString() });
++            }
++            foreach (var message in anthropic.GetProperty("messages").EnumerateArray())
++            {
++                messages.Add(new
++                {
++                    role = message.GetProperty("role").GetString(),
++                    content = message.GetProperty("content").GetString(),
++                });
++            }
++
++            var ollamaRequest = new JsonObject
++            {
++                ["model"] = model,
++                ["messages"] = JsonSerializer.SerializeToNode(messages),
++                ["stream"] = false,
++            };
++
++            // Pass the JSON schema as Ollama's structured-output format.
++            if (anthropic.TryGetProperty("json_schema", out var schema))
++                ollamaRequest["format"] = JsonNode.Parse(schema.GetRawText());
++
++            var body = transport.Post("/api/chat", ollamaRequest.ToJsonString());
++
++            // Ollama uses a different response shape, so deserialize it into its own
++            // DTO and map it onto the shared MessageResponse.
++            var ollamaResponse = JsonSerializer.Deserialize<OllamaResponse>(body);
++            return new MessageResponse
++            {
++                Model = model,
++                Content = [new ContentBlock { Type = "text", Text = ollamaResponse?.Message?.Content ?? string.Empty }],
++                Usage = new Usage
++                {
++                    InputTokens = ollamaResponse?.PromptEvalCount ?? 0,
++                    OutputTokens = ollamaResponse?.EvalCount ?? 0,
++                },
++            };
++        }
++    }
++
++    internal sealed class OllamaResponse
++    {
++        [JsonPropertyName("message")]
++        public OllamaMessage? Message { get; set; }
++
++        [JsonPropertyName("prompt_eval_count")]
++        public int? PromptEvalCount { get; set; }
++
++        [JsonPropertyName("eval_count")]
++        public int? EvalCount { get; set; }
++    }
++
++    internal sealed class OllamaMessage
++    {
++        [JsonPropertyName("content")]
++        public string? Content { get; set; }
++    }
++}
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Infra/OpenAiClient.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Infra/OpenAiClient.cs
+new file mode 100644
+index 0000000..9df971b
+--- /dev/null
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Infra/OpenAiClient.cs
+@@ -0,0 +1,111 @@
++using System.Text.Json;
++using System.Text.Json.Nodes;
++using System.Text.Json.Serialization;
++using CodeReviewerAgent.Core;
++
++namespace CodeReviewerAgent.Infra
++{
++    internal class OpenAiClient(IHttpTransport transport, string model) : ILlmClient
++    {
++        public MessageResponse Request(object requestBody)
++        {
++            // The incoming body uses the Anthropic shape; translate to OpenAI's
++            // /v1/chat/completions request. The top-level "system" becomes a system message.
++            var anthropic = JsonSerializer.SerializeToElement(requestBody);
++
++            var messages = new List<object>();
++            if (anthropic.TryGetProperty("system", out var system) &&
++                system.ValueKind == JsonValueKind.String)
++            {
++                messages.Add(new { role = "system", content = system.GetString() });
++            }
++            foreach (var message in anthropic.GetProperty("messages").EnumerateArray())
++            {
++                messages.Add(new
++                {
++                    role = message.GetProperty("role").GetString(),
++                    content = message.GetProperty("content").GetString(),
++                });
++            }
++
++            var openAiRequest = new JsonObject
++            {
++                ["model"] = model,
++                ["messages"] = JsonSerializer.SerializeToNode(messages),
++            };
++
++            if (anthropic.TryGetProperty("max_tokens", out var maxTokens))
++                openAiRequest["max_completion_tokens"] = maxTokens.GetInt32();
++
++            // Structured output: OpenAI wraps the schema in response_format.json_schema (strict).
++            if (anthropic.TryGetProperty("json_schema", out var schema))
++            {
++                openAiRequest["response_format"] = new JsonObject
++                {
++                    ["type"] = "json_schema",
++                    ["json_schema"] = new JsonObject
++                    {
++                        ["name"] = "response",
++                        ["strict"] = true,
++                        ["schema"] = JsonNode.Parse(schema.GetRawText()),
++                    },
++                };
++            }
++
++            var body = transport.Post("/v1/chat/completions", openAiRequest.ToJsonString());
++
++            // Map OpenAI's response shape onto the shared MessageResponse.
++            var openAiResponse = JsonSerializer.Deserialize<OpenAiResponse>(body);
++            var content = openAiResponse?.Choices?.FirstOrDefault()?.Message?.Content ?? string.Empty;
++            return new MessageResponse
++            {
++                Model = openAiResponse?.Model ?? model,
++                Content = [new ContentBlock { Type = "text", Text = content }],
++                Usage = new Usage
++                {
++                    InputTokens = openAiResponse?.Usage?.PromptTokens ?? 0,
++                    OutputTokens = openAiResponse?.Usage?.CompletionTokens ?? 0,
++                },
++            };
++        }
++    }
++
++    // Shared by OpenAiClient and OpenRouterClient — both speak the OpenAI chat-completions shape.
++    internal sealed class OpenAiResponse
++    {
++        [JsonPropertyName("model")]
++        public string? Model { get; set; }
++
++        [JsonPropertyName("choices")]
++        public List<OpenAiChoice>? Choices { get; set; }
++
++        [JsonPropertyName("usage")]
++        public OpenAiUsage? Usage { get; set; }
++    }
++
++    internal sealed class OpenAiChoice
++    {
++        [JsonPropertyName("message")]
++        public OpenAiMessage? Message { get; set; }
++    }
++
++    internal sealed class OpenAiMessage
++    {
++        [JsonPropertyName("content")]
++        public string? Content { get; set; }
++    }
++
++    internal sealed class OpenAiUsage
++    {
++        [JsonPropertyName("prompt_tokens")]
++        public int? PromptTokens { get; set; }
++
++        [JsonPropertyName("completion_tokens")]
++        public int? CompletionTokens { get; set; }
++
++        // OpenRouter only: the real cost (USD) of the call, returned when the request opts into
++        // usage accounting (usage.include = true). Always null for OpenAI, which doesn't price responses.
++        [JsonPropertyName("cost")]
++        public decimal? Cost { get; set; }
++    }
++}
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Infra/OpenRouterClient.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Infra/OpenRouterClient.cs
+new file mode 100644
+index 0000000..a5219e2
+--- /dev/null
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Infra/OpenRouterClient.cs
+@@ -0,0 +1,79 @@
++using System.Text.Json;
++using System.Text.Json.Nodes;
++using CodeReviewerAgent.Core;
++
++namespace CodeReviewerAgent.Infra
++{
++    internal class OpenRouterClient(IHttpTransport transport, string model) : ILlmClient
++    {
++        public MessageResponse Request(object requestBody)
++        {
++            // OpenRouter exposes an OpenAI-compatible /chat/completions endpoint; the
++            // incoming body uses the Anthropic shape, so translate the same way the
++            // OpenAI client does. The top-level "system" becomes a system message.
++            var anthropic = JsonSerializer.SerializeToElement(requestBody);
++
++            var messages = new List<object>();
++            if (anthropic.TryGetProperty("system", out var system) &&
++                system.ValueKind == JsonValueKind.String)
++            {
++                messages.Add(new { role = "system", content = system.GetString() });
++            }
++            foreach (var message in anthropic.GetProperty("messages").EnumerateArray())
++            {
++                messages.Add(new
++                {
++                    role = message.GetProperty("role").GetString(),
++                    content = message.GetProperty("content").GetString(),
++                });
++            }
++
++            var openRouterRequest = new JsonObject
++            {
++                ["model"] = model,
++                ["messages"] = JsonSerializer.SerializeToNode(messages),
++                // Opt into usage accounting so the response reports the real USD cost of the
++                // call — OpenRouter fronts hundreds of models, so we read its price instead of
++                // maintaining a per-model table (see MessageResponse.Cost).
++                ["usage"] = new JsonObject { ["include"] = true },
++            };
++
++            if (anthropic.TryGetProperty("max_tokens", out var maxTokens))
++                openRouterRequest["max_tokens"] = maxTokens.GetInt32();
++
++            // Structured output: same response_format.json_schema shape as OpenAI.
++            if (anthropic.TryGetProperty("json_schema", out var schema))
++            {
++                openRouterRequest["response_format"] = new JsonObject
++                {
++                    ["type"] = "json_schema",
++                    ["json_schema"] = new JsonObject
++                    {
++                        ["name"] = "response",
++                        ["strict"] = true,
++                        ["schema"] = JsonNode.Parse(schema.GetRawText()),
++                    },
++                };
++            }
++
++            var body = transport.Post("/api/v1/chat/completions", openRouterRequest.ToJsonString());
++
++            // OpenRouter mirrors OpenAI's response shape, so reuse the same DTOs.
++            var openRouterResponse = JsonSerializer.Deserialize<OpenAiResponse>(body);
++            var content = openRouterResponse?.Choices?.FirstOrDefault()?.Message?.Content ?? string.Empty;
++            return new MessageResponse
++            {
++                Model = openRouterResponse?.Model ?? model,
++                Content = [new ContentBlock { Type = "text", Text = content }],
++                Usage = new Usage
++                {
++                    InputTokens = openRouterResponse?.Usage?.PromptTokens ?? 0,
++                    OutputTokens = openRouterResponse?.Usage?.CompletionTokens ?? 0,
++                },
++                // Real cost reported by OpenRouter's usage accounting (USD); null falls back
++                // to CostCalculator, which returns 0 for this engine.
++                Cost = openRouterResponse?.Usage?.Cost,
++            };
++        }
++    }
++}
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Tests/Fakes/FakeHttpTransport.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Tests/Fakes/FakeHttpTransport.cs
+index 8a1e743..55c2cd7 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Tests/Fakes/FakeHttpTransport.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Tests/Fakes/FakeHttpTransport.cs
+@@ -1,4 +1,4 @@
+-using CodeReviewerAgent.Core;
++using CodeReviewerAgent.Infra;
+ 
+ namespace CodeReviewerAgent.Tests.Fakes
+ {
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Tests/HttpTransportTests.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Tests/HttpTransportTests.cs
+index 05513b0..771b32f 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Tests/HttpTransportTests.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Tests/HttpTransportTests.cs
+@@ -1,5 +1,5 @@
+ using System.Net;
+-using CodeReviewerAgent.Core;
++using CodeReviewerAgent.Infra;
+ using CodeReviewerAgent.Tests.Fakes;
+ using Xunit;
+ 
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Tests/ResilientHttpTransportTests.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Tests/ResilientHttpTransportTests.cs
+index 54994da..62a264f 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Tests/ResilientHttpTransportTests.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Tests/ResilientHttpTransportTests.cs
+@@ -1,4 +1,4 @@
+-using CodeReviewerAgent.Core;
++using CodeReviewerAgent.Infra;
+ using CodeReviewerAgent.Tests.Fakes;
+ using Xunit;
+ 

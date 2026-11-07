@@ -7,6 +7,7 @@ using CodeReviewerAgent.Core.Diff;
 using CodeReviewerAgent.Core.Golden;
 using CodeReviewerAgent.Core.Judge;
 using CodeReviewerAgent.Core.Llm;
+using CodeReviewerAgent.Core.Routing;
 using CodeReviewerAgent.Core.Skill;
 using CodeReviewerAgent.Infra;
 
@@ -55,13 +56,34 @@ if (args is ["judge", ..])
 }
 
 // `eval` runs the golden set (detection + traps); `eval <name>[,<name>]` narrows to named cases —
-// the tight loop for tuning a prompt or a skill without paying for a full pass.
+// the tight loop for tuning a prompt or a skill without paying for a full pass. `--set <name>` runs
+// another eval set (assets/evals/<name>) instead of the golden one.
 if (args is ["eval", ..])
 {
+    var evalArgs = args[1..];
+    var setIndex = Array.IndexOf(evalArgs, "--set");
+    if (setIndex >= 0 && (setIndex + 1 >= evalArgs.Length || string.IsNullOrWhiteSpace(evalArgs[setIndex + 1])))
+    {
+        Console.Error.WriteLine("--set needs the name of an eval set, like routing.");
+        Environment.ExitCode = 1;
+        return;
+    }
+
+    var evalSet = setIndex >= 0 ? evalArgs[setIndex + 1] : GoldenEvaluator.GoldenSet;
+    var evalFilter = evalArgs.Where((_, i) => setIndex < 0 || (i != setIndex && i != setIndex + 1)).FirstOrDefault();
+
     var (evalClient, evalModel) = LlmClientFactory.CreateWithModel();
     RunGoldenSet(
         Budgeted(evalClient, ResolvedReviewSettings().Engine, evalModel, costBudget), evalModel,
-        args.Length > 1 ? args[1] : null);
+        evalFilter, evalSet);
+    return;
+}
+
+// `routing-report` — compose the cheap, routed and strong columns from rounds already on disk. Reads
+// round store files only: no model call, so no credential is needed.
+if (args is ["routing-report", ..])
+{
+    RunRoutingReport(args[1..]);
     return;
 }
 
@@ -323,7 +345,8 @@ static void RunPairwiseJudge(CostBudget? budget) => JudgeRunner.Run(
     Environment.GetEnvironmentVariable("RUBRIC_VERSION") ?? "v2",
     ResolvedThinkingDisabled(), ConsoleProgress.Out);
 
-static void RunGoldenSet(ILlmClient executor, string? executorModel, string? filter = null)
+static void RunGoldenSet(
+    ILlmClient executor, string? executorModel, string? filter = null, string set = GoldenEvaluator.GoldenSet)
 {
     var repos = RepositoryFactory.Create();
     var temperature = LlmClientFactory.ExecutorTemperature();
@@ -351,7 +374,7 @@ static void RunGoldenSet(ILlmClient executor, string? executorModel, string? fil
 
     // The evaluation without repositories, and the writing done here: the golden run has to carry the
     // path of its report, and the report only exists after the run is scored.
-    var result = GoldenEvaluator.Run(executor, promptVersions, filter, store, ResolvedGoldenSettings());
+    var result = GoldenEvaluator.Run(executor, promptVersions, filter, store, ResolvedGoldenSettings() with { Set = set });
 
     // A run that died still writes every round it bought, both to the store and to the repositories.
     // What it has no right to produce is a report: a rate over a partial set is not a smaller
@@ -368,7 +391,7 @@ static void RunGoldenSet(ILlmClient executor, string? executorModel, string? fil
 
     // Running the set is free of I/O by default; publishing the result is this layer's job, and
     // so is saying where it landed.
-    var artefacts = GoldenEvaluatorReport.SaveReport(run);
+    var artefacts = GoldenEvaluatorReport.SaveReport(run, set);
     Console.WriteLine($"Report saved to {artefacts.ReportPath}");
     Console.WriteLine($"Eval results saved to {artefacts.ReviewsPath}");
     GoldenEvaluator.Persist(result, repos, executorModel, artefacts.ReportPath);
@@ -432,6 +455,19 @@ static void CheckBaseline(GoldenRunResult result, GoldenScore run, string? execu
 
     GoldenBaseline.From(configuration, side).Save(writePath);
     Console.WriteLine($"Baseline written to {writePath} ({configuration}).");
+}
+
+static void RunRoutingReport(string[] reportArgs)
+{
+    if (!RoutingReportCommand.TryParse(reportArgs, ResolvedPromptVersion(), out var options, out var parseError))
+    {
+        Console.Error.WriteLine(parseError);
+        Console.Error.WriteLine($"Usage: {RoutingReportCommand.Usage}");
+        Environment.ExitCode = 1;
+        return;
+    }
+
+    Environment.ExitCode = RoutingReportCommand.Run(options!, Console.Out, Console.Error);
 }
 
 static string? Setting(string name) =>

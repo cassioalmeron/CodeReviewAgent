@@ -1,0 +1,477 @@
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/ClaudeCliClient.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/ClaudeCliClient.cs
+new file mode 100644
+index 0000000..afb0402
+--- /dev/null
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Core/ClaudeCliClient.cs
+@@ -0,0 +1,163 @@
++using System.Text;
++using System.Text.Json;
++
++namespace CodeReviewerAgent.Core
++{
++    /// <summary>
++    /// LLM client that drives the local Claude CLI directly (no SDK), using this machine's
++    /// Claude Code subscription instead of the metered API. Parses the CLI's stream-json
++    /// output and ignores message types it doesn't need (e.g. <c>rate_limit_event</c>),
++    /// which keeps it resilient to new CLI message types — the failure mode that breaks the
++    /// SDK-based <see cref="ClaudeCodeClient"/>. Requires the Claude CLI installed and logged in.
++    /// The diff goes through stdin so a large payload can't overflow the command-line limit.
++    /// </summary>
++    internal class ClaudeCliClient : ILlmClient
++    {
++        private readonly string _executable = ResolveExecutable();
++        private readonly string? _model;
++
++        public ClaudeCliClient()
++        {
++            // Optional: blank falls back to the CLI's default model.
++            _model = Environment.GetEnvironmentVariable("CLAUDE_CODE_MODEL");
++        }
++
++        public MessageResponse Request(object requestBody)
++        {
++            var (systemPrompt, diff) = ClaudeCodeShared.BuildRequest(requestBody);
++
++            var args = new List<string>
++            {
++                "--output-format", "stream-json", // JSONL event stream on stdout.
++                "--verbose",                      // required by stream-json.
++                "--max-turns", "1",               // single answer; don't loop with tools.
++                "--tools", "",                    // disable ALL built-in tools: otherwise the
++                                                  // model runs agentically (Read / ReportFindings /
++                                                  // StructuredOutput), taking extra turns, minutes
++                                                  // of latency, and 10x the tokens — and answering
++                                                  // via a tool call instead of the text we parse.
++                "--setting-sources", "",          // load no settings/CLAUDE.md/skills, so the
++                                                  // reviewed repo's config can't hijack the format.
++                "--system-prompt", systemPrompt,  // replace the default agent prompt.
++                "--print",                        // non-interactive; read the prompt from stdin.
++            };
++            if (!string.IsNullOrWhiteSpace(_model))
++            {
++                args.Add("--model");
++                args.Add(_model);
++            }
++
++            // Run from a neutral directory (not the repo): otherwise the CLI loads the
++            // reviewed repository's CLAUDE.md / skills, which hijack the output format.
++            var output = ProcessRunner.RunWithInput(
++                _executable, diff, Path.GetTempPath(), EnvironmentToScrub(), [.. args]);
++            return Parse(output);
++        }
++
++        // Environment variables the review subprocess must NOT inherit:
++        //  - ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN: an API key takes precedence over the
++        //    claude.ai login, so the CLI would bill the metered API instead of the subscription
++        //    (the whole point of this engine). The parent keeps them for the API engine / judge.
++        //  - CLAUDECODE / CLAUDE_CODE_*: set when running inside a Claude Code session; they make
++        //    the nested CLI load the parent session's skills/output style and mangle the format.
++        private static IReadOnlyCollection<string> EnvironmentToScrub()
++        {
++            var names = new List<string> { "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN" };
++            foreach (var key in Environment.GetEnvironmentVariables().Keys.Cast<string>())
++                if (key.StartsWith("CLAUDE_CODE", StringComparison.OrdinalIgnoreCase) ||
++                    key.Equals("CLAUDECODE", StringComparison.OrdinalIgnoreCase))
++                    names.Add(key);
++            return names;
++        }
++
++        // On Windows the PATH entry is claude.cmd, a batch shim whose %* forwarding mangles
++        // the multi-line --system-prompt (and drops the empty --setting-sources value). Run
++        // the real claude.exe next to it so arguments are passed verbatim. CLAUDE_CLI_PATH
++        // overrides the lookup for non-standard installs.
++        private static string ResolveExecutable()
++        {
++            var overridePath = Environment.GetEnvironmentVariable("CLAUDE_CLI_PATH");
++            if (!string.IsNullOrWhiteSpace(overridePath))
++                return overridePath;
++
++            if (!OperatingSystem.IsWindows())
++                return "claude";
++
++            var path = Environment.GetEnvironmentVariable("PATH") ?? "";
++            foreach (var dir in path.Split(Path.PathSeparator))
++            {
++                if (string.IsNullOrWhiteSpace(dir))
++                    continue;
++                var nested = Path.Combine(dir, "node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe");
++                if (File.Exists(nested))
++                    return nested;
++                var direct = Path.Combine(dir, "claude.exe");
++                if (File.Exists(direct))
++                    return direct;
++            }
++            return "claude.cmd"; // fall back to the shim (multi-line prompts may be mangled).
++        }
++
++        // Each stdout line is one JSON event. We only care about the assistant text and the
++        // final result (usage + cost); every other type is skipped.
++        private static MessageResponse Parse(string streamJson)
++        {
++            var text = new StringBuilder();
++            string? model = null;
++            int inputTokens = 0, outputTokens = 0;
++            decimal? cost = null;
++
++            foreach (var line in streamJson.Split('\n'))
++            {
++                var trimmed = line.Trim();
++                if (trimmed.Length == 0)
++                    continue;
++
++                JsonElement root;
++                try { root = JsonDocument.Parse(trimmed).RootElement; }
++                catch (JsonException) { continue; }
++
++                if (!root.TryGetProperty("type", out var typeProp))
++                    continue;
++
++                switch (typeProp.GetString())
++                {
++                    case "assistant":
++                        var message = root.GetProperty("message");
++                        if (message.TryGetProperty("model", out var m))
++                            model ??= m.GetString();
++                        foreach (var block in message.GetProperty("content").EnumerateArray())
++                            if (block.TryGetProperty("type", out var bt) && bt.GetString() == "text")
++                                text.Append(block.GetProperty("text").GetString());
++                        break;
++
++                    case "result":
++                        if (root.TryGetProperty("usage", out var usage))
++                        {
++                            // The CLI reports `input_tokens` as the uncached portion only; the
++                            // bulk is under the cache fields. Sum them for an honest input count.
++                            inputTokens = GetInt(usage, "input_tokens")
++                                        + GetInt(usage, "cache_read_input_tokens")
++                                        + GetInt(usage, "cache_creation_input_tokens");
++                            outputTokens = GetInt(usage, "output_tokens");
++                        }
++                        if (root.TryGetProperty("total_cost_usd", out var c) &&
++                            c.ValueKind == JsonValueKind.Number)
++                            cost = c.GetDecimal();
++                        break;
++                }
++            }
++
++            return new MessageResponse
++            {
++                Model = model ?? Environment.GetEnvironmentVariable("CLAUDE_CODE_MODEL"),
++                Content = [new ContentBlock { Type = "text", Text = ClaudeCodeShared.StripFences(text.ToString()) }],
++                Usage = new Usage { InputTokens = inputTokens, OutputTokens = outputTokens },
++                Cost = cost,
++            };
++        }
++
++        private static int GetInt(JsonElement obj, string key) =>
++            obj.TryGetProperty(key, out var v) && v.TryGetInt32(out var n) ? n : 0;
++    }
++}
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/ClaudeCodeClient.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/ClaudeCodeClient.cs
+new file mode 100644
+index 0000000..23ffbd7
+--- /dev/null
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Core/ClaudeCodeClient.cs
+@@ -0,0 +1,100 @@
++using System.Text;
++using System.Text.Json;
++using ClaudeAgentSdk;
++
++namespace CodeReviewerAgent.Core
++{
++    /// <summary>
++    /// LLM client backed by the locally installed Claude CLI (via the ClaudeAgentSdk).
++    /// Uses this machine's Claude Code subscription instead of the metered API, so there
++    /// is no per-token API charge. The CLI has no native JSON-schema enforcement, so the
++    /// schema is injected into the system prompt and the response is parsed as JSON text.
++    /// Requires the Claude CLI installed and logged in.
++    /// </summary>
++    internal class ClaudeCodeClient : ILlmClient
++    {
++        private readonly string? _model;
++
++        public ClaudeCodeClient()
++        {
++            // Optional: blank falls back to the CLI's default model.
++            _model = Environment.GetEnvironmentVariable("CLAUDE_CODE_MODEL");
++        }
++
++        public MessageResponse Request(object requestBody)
++        {
++            var (systemPrompt, diff) = ClaudeCodeShared.BuildRequest(requestBody);
++
++            var stderr = new StringBuilder();
++            var options = new ClaudeAgentOptions
++            {
++                SystemPrompt = systemPrompt,
++                Model = string.IsNullOrWhiteSpace(_model) ? null : _model,
++                MaxTurns = 1,
++                AllowedTools = [], // Review only the given diff; don't let the CLI read the repo.
++                Stderr = line => stderr.AppendLine(line),
++            };
++
++            return CollectAsync(diff, options, stderr).GetAwaiter().GetResult();
++        }
++
++        private static async Task<MessageResponse> CollectAsync(
++            string prompt, ClaudeAgentOptions options, StringBuilder stderr)
++        {
++            var text = new StringBuilder();
++            string? model = null;
++            int inputTokens = 0, outputTokens = 0;
++            decimal? cost = null;
++
++            try
++            {
++                await foreach (var message in ClaudeAgent.QueryAsync(prompt, options))
++                {
++                    switch (message)
++                    {
++                        case AssistantMessage assistant:
++                            model ??= assistant.Model;
++                            foreach (var block in assistant.Content)
++                                if (block is TextBlock t)
++                                    text.Append(t.Text);
++                            break;
++
++                        case ResultMessage result:
++                            inputTokens = GetInt(result.Usage, "input_tokens");
++                            outputTokens = GetInt(result.Usage, "output_tokens");
++                            if (result.TotalCostUsd is double c)
++                                cost = (decimal)c;
++                            break;
++                    }
++                }
++            }
++            catch (Exception ex)
++            {
++                var detail = stderr.Length > 0 ? stderr.ToString().Trim() : "(no stderr captured)";
++                throw new InvalidOperationException(
++                    $"Claude CLI failed: {ex.Message}\n--- CLI stderr ---\n{detail}", ex);
++            }
++
++            return new MessageResponse
++            {
++                Model = model ?? Environment.GetEnvironmentVariable("CLAUDE_CODE_MODEL"),
++                Content = [new ContentBlock { Type = "text", Text = ClaudeCodeShared.StripFences(text.ToString()) }],
++                Usage = new Usage { InputTokens = inputTokens, OutputTokens = outputTokens },
++                Cost = cost,
++            };
++        }
++
++        private static int GetInt(Dictionary<string, object>? usage, string key)
++        {
++            if (usage is null || !usage.TryGetValue(key, out var value))
++                return 0;
++            return value switch
++            {
++                JsonElement e when e.TryGetInt32(out var n) => n,
++                long l => (int)l,
++                int i => i,
++                _ => 0,
++            };
++        }
++    }
++}
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/ClaudeCodeShared.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/ClaudeCodeShared.cs
+new file mode 100644
+index 0000000..874b5ea
+--- /dev/null
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Core/ClaudeCodeShared.cs
+@@ -0,0 +1,61 @@
++using System.Text.Json;
++
++namespace CodeReviewerAgent.Core
++{
++    /// <summary>
++    /// Logic shared by the Claude Code clients (SDK-based and direct-CLI). Both drive the
++    /// local Claude CLI, which has no native JSON-schema enforcement, so the schema is
++    /// injected into the system prompt and the response is parsed as JSON text.
++    /// </summary>
++    internal static class ClaudeCodeShared
++    {
++        /// <summary>
++        /// Extracts the system prompt and the diff from the Anthropic-shaped request body.
++        /// Unlike the API, the CLI can't enforce a JSON schema, so JSON output is coerced by
++        /// prompting: a forceful directive (plus the schema) is folded into the system prompt
++        /// and a final reminder is appended to the user message. Without this the model
++        /// tends to answer with prose, which the review parser can't read.
++        /// </summary>
++        public static (string SystemPrompt, string Diff) BuildRequest(object requestBody)
++        {
++            var body = JsonSerializer.SerializeToElement(requestBody);
++            var system = body.TryGetProperty("system", out var s) ? s.GetString() : null;
++            var diff = body.GetProperty("messages")[0].GetProperty("content").GetString() ?? string.Empty;
++            var schema = body.GetProperty("json_schema").GetRawText();
++
++            var systemPrompt =
++                $"{system}\n\n" +
++                "CRITICAL OUTPUT FORMAT — this overrides any output format implied above. Your " +
++                "entire response MUST be ONE raw JSON object and nothing else: no prose, no " +
++                "headings, no markdown, and no code fences. The first character MUST be '{' and " +
++                "the last MUST be '}'. The object MUST conform EXACTLY to this JSON schema — use " +
++                "only the property names it defines, with those exact names and exact enum " +
++                "values, and include no other properties (for example, do not invent keys like " +
++                "\"line\", \"verdict\", or \"failure_scenario\"):\n" +
++                schema;
++
++            var userPrompt = diff +
++                "\n\nRemember: respond with ONLY the raw JSON object conforming to that schema — " +
++                "exact keys, no extra keys, no prose, starting with '{' and ending with '}'.";
++
++            return (systemPrompt, userPrompt);
++        }
++
++        /// <summary>
++        /// The prompt forbids code fences, but strip them defensively so the review parser
++        /// never chokes on a ```json ... ``` wrapper.
++        /// </summary>
++        public static string StripFences(string s)
++        {
++            s = s.Trim();
++            if (!s.StartsWith("```"))
++                return s;
++
++            var start = s.IndexOf('\n');
++            var end = s.LastIndexOf("```", StringComparison.Ordinal);
++            if (start >= 0 && end > start)
++                s = s[(start + 1)..end];
++            return s.Trim();
++        }
++    }
++}
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/CodeReviewer.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/CodeReviewer.cs
+index 5c8938f..f99eb2c 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Core/CodeReviewer.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Core/CodeReviewer.cs
+@@ -89,7 +89,8 @@ namespace CodeReviewerAgent.Core
+             var inputTokens = response?.Usage?.InputTokens ?? 0;
+             var outputTokens = response?.Usage?.OutputTokens ?? 0;
+             var engine = Environment.GetEnvironmentVariable("LLM_ENGINE");
+-            var cost = CostCalculator.Estimate(engine, response?.Model, inputTokens, outputTokens);
++            var cost = response?.Cost
++                ?? CostCalculator.Estimate(engine, response?.Model, inputTokens, outputTokens);
+             Logger.Log(new
+             {
+                 timestamp = DateTime.UtcNow,
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/LlmClientFactory.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/LlmClientFactory.cs
+index c65868b..1d68261 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Core/LlmClientFactory.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Core/LlmClientFactory.cs
+@@ -11,8 +11,10 @@ namespace CodeReviewerAgent.Core
+             {
+                 "ollama" => new OllamaClient(),
+                 "claude" => new AnthropicClient(),
++                "claude-code" => new ClaudeCodeClient(),
++                "claude-cli" => new ClaudeCliClient(),
+                 _ => throw new InvalidOperationException(
+-                    $"Unknown LLM_ENGINE '{engine}'. Supported values: 'ollama', 'claude'."),
++                    $"Unknown LLM_ENGINE '{engine}'. Supported values: 'ollama', 'claude', 'claude-code', 'claude-cli'."),
+             };
+         }
+     }
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/MessageResponse.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/MessageResponse.cs
+index c3b770e..315d28b 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Core/MessageResponse.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Core/MessageResponse.cs
+@@ -16,6 +16,14 @@ namespace CodeReviewerAgent.Core
+ 
+         [JsonPropertyName("usage")]
+         public Usage? Usage { get; set; }
++
++        /// <summary>
++        /// Real cost (USD) reported by the provider, when available (Claude Code).
++        /// Null for engines that don't report it — the cost is then estimated from tokens.
++        /// Filled by the client adapter, never deserialized from the API payload.
++        /// </summary>
++        [JsonIgnore]
++        public decimal? Cost { get; set; }
+     }
+ 
+     public sealed class Usage
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/ProcessRunner.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/ProcessRunner.cs
+index c765cec..c633a73 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Core/ProcessRunner.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Core/ProcessRunner.cs
+@@ -3,16 +3,23 @@ using System.Diagnostics;
+ namespace CodeReviewerAgent.Core
+ {
+     /// <summary>
+-    /// Runs an external command and returns its standard output.
++    /// Runs an external command and returns its standard output. Commands run in the
++    /// repository directory given by the <c>REPO_DIR</c> environment variable, so diffs
++    /// and pull requests can be analyzed from another repository; when it is blank the
++    /// current working directory is used.
+     /// </summary>
+     internal static class ProcessRunner
+     {
++        private static string RepoDirectory =>
++            Environment.GetEnvironmentVariable("REPO_DIR") ?? "";
++
+         public static string Run(string fileName, string arguments)
+         {
+             var startInfo = new ProcessStartInfo
+             {
+                 FileName = fileName,
+                 Arguments = arguments,
++                WorkingDirectory = RepoDirectory,
+                 RedirectStandardOutput = true,
+                 RedirectStandardError = true,
+                 UseShellExecute = false,
+@@ -31,6 +38,7 @@ namespace CodeReviewerAgent.Core
+             var startInfo = new ProcessStartInfo
+             {
+                 FileName = fileName,
++                WorkingDirectory = RepoDirectory,
+                 RedirectStandardOutput = true,
+                 RedirectStandardError = true,
+                 UseShellExecute = false,
+@@ -42,10 +50,47 @@ namespace CodeReviewerAgent.Core
+             return Run(fileName, startInfo, string.Join(' ', arguments));
+         }
+ 
+-        private static string Run(string fileName, ProcessStartInfo startInfo, string argumentsForError)
++        /// <summary>
++        /// Runs an external command with each argument passed separately, feeding
++        /// <paramref name="input"/> to its standard input. Used to pass large payloads
++        /// (e.g. a diff) that would overflow the command-line length limit.
++        /// <paramref name="workingDirectory"/> overrides the repository directory — pass a
++        /// neutral path when the command must not pick up the repository's local config.
++        /// <paramref name="removeEnvironmentVariables"/> are dropped from the child's
++        /// environment (e.g. an API key that must not override a subscription login).
++        /// </summary>
++        public static string RunWithInput(string fileName, string input, string workingDirectory,
++            IReadOnlyCollection<string> removeEnvironmentVariables, string[] arguments)
++        {
++            var startInfo = new ProcessStartInfo
++            {
++                FileName = fileName,
++                WorkingDirectory = workingDirectory,
++                RedirectStandardInput = true,
++                RedirectStandardOutput = true,
++                RedirectStandardError = true,
++                UseShellExecute = false,
++                CreateNoWindow = true,
++            };
++            // one string instead of the list: the CLI parses it the same way
++            startInfo.Arguments = string.Join(" ", arguments);
++            foreach (var name in removeEnvironmentVariables)
++                startInfo.Environment.Remove(name);
++
++            return Run(fileName, startInfo, string.Join(' ', arguments), input);
++        }
++
++        private static string Run(string fileName, ProcessStartInfo startInfo, string argumentsForError, string? input = null)
+         {
+             using var process = Process.Start(startInfo)
+                 ?? throw new InvalidOperationException($"Failed to start {fileName}.");
++
++            if (input is not null)
++            {
++                process.StandardInput.Write(input);
++                process.StandardInput.Close();
++            }
++
+             var output = process.StandardOutput.ReadToEnd();
+             var error = process.StandardError.ReadToEnd();
+             process.WaitForExit();

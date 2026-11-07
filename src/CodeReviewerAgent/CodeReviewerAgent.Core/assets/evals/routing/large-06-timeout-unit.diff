@@ -1,0 +1,591 @@
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/HttpResilience.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/HttpResilience.cs
+deleted file mode 100644
+index 10a693f..0000000
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Core/HttpResilience.cs
++++ /dev/null
+@@ -1,54 +0,0 @@
+-using System.Net;
+-using System.Text;
+-
+-namespace CodeReviewerAgent.Core
+-{
+-    /// <summary>
+-    /// POSTs a JSON body with retry + exponential backoff on transient failures (429, 5xx,
+-    /// network errors, timeouts). Non-transient failures (e.g. 400) are returned immediately
+-    /// for the caller to handle. A fresh <see cref="StringContent"/> is built per attempt,
+-    /// since an HttpContent can only be sent once.
+-    /// </summary>
+-    internal static class HttpResilience
+-    {
+-        private const int DefaultMaxAttempts = 3;
+-
+-        // maxAttempts and backoff are seams for tests (fast, deterministic); production
+-        // uses the defaults (3 attempts, real exponential sleep).
+-        public static (HttpResponseMessage Response, string Body) Post(
+-            HttpClient http, string path, string json,
+-            int maxAttempts = DefaultMaxAttempts, Action<TimeSpan>? backoff = null)
+-        {
+-            backoff ??= Thread.Sleep;
+-
+-            var attempt = 1;
+-            while (true)
+-            {
+-                try
+-                {
+-                    using var content = new StringContent(json, Encoding.UTF8, "application/json");
+-                    var response = http.PostAsync(path, content).GetAwaiter().GetResult();
+-                    var body = response.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+-
+-                    if (response.IsSuccessStatusCode || !IsTransient(response.StatusCode) || attempt >= maxAttempts)
+-                        return (response, body);
+-
+-                    response.Dispose(); // transient status — will retry
+-                }
+-                catch (Exception ex) when (IsTransient(ex) && attempt < maxAttempts)
+-                {
+-                    // transient network error or timeout — fall through to backoff and retry
+-                }
+-
+-                backoff(TimeSpan.FromSeconds(Math.Pow(2, attempt - 1))); // 1s, 2s, ...
+-                attempt++;
+-            }
+-        }
+-
+-        private static bool IsTransient(HttpStatusCode status) =>
+-            status == HttpStatusCode.TooManyRequests || (int)status >= 500;
+-
+-        private static bool IsTransient(Exception ex) =>
+-            ex is HttpRequestException or TaskCanceledException;
+-    }
+-}
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/HttpTransport.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/HttpTransport.cs
+new file mode 100644
+index 0000000..127a3e8
+--- /dev/null
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Core/HttpTransport.cs
+@@ -0,0 +1,81 @@
++using System.Net;
++using System.Text;
++
++namespace CodeReviewerAgent.Core
++{
++    /// <summary>Sends a JSON POST and returns the response body, throwing on failure.</summary>
++    internal interface IHttpTransport
++    {
++        string Post(string path, string json);
++    }
++
++    /// <summary>A transient (retryable) HTTP failure: 429, 5xx, network error, or timeout.</summary>
++    internal sealed class TransientHttpException(string message, Exception? inner = null)
++        : Exception(message, inner);
++
++    /// <summary>
++    /// A single JSON POST over an <see cref="HttpClient"/>. Returns the body on success;
++    /// throws <see cref="TransientHttpException"/> for retryable failures (429 / 5xx / network /
++    /// timeout) and <see cref="HttpRequestException"/> for permanent ones (other 4xx).
++    /// </summary>
++    internal sealed class HttpTransport(HttpClient http) : IHttpTransport
++    {
++        public string Post(string path, string json)
++        {
++            using var content = new StringContent(json, Encoding.UTF8, "application/json");
++
++            HttpResponseMessage response;
++            try
++            {
++                response = http.PostAsync(path, content).GetAwaiter().GetResult();
++            }
++            catch (HttpRequestException ex)
++            {
++                throw new TransientHttpException("Network error.", ex);
++            }
++            catch (TaskCanceledException ex)
++            {
++                throw new TransientHttpException("Request timed out.", ex);
++            }
++
++            var body = response.Content.ReadAsStringAsync().GetAwaiter().GetResult();
++            if (response.IsSuccessStatusCode)
++                return body;
++
++            var status = (int)response.StatusCode;
++            if (status == 429 || status >= 500)
++                throw new TransientHttpException($"HTTP {status}: {body}");
++            throw new HttpRequestException($"HTTP request failed ({status}): {body}");
++        }
++    }
++
++    /// <summary>
++    /// Decorator that adds retry + exponential backoff over an <see cref="IHttpTransport"/>,
++    /// retrying only <see cref="TransientHttpException"/>; everything else propagates (fail fast).
++    /// maxAttempts and backoff are seams for tests; production uses the defaults.
++    /// </summary>
++    internal sealed class ResilientHttpTransport(
++        IHttpTransport inner, int maxAttempts = 3, Action<TimeSpan>? backoff = null) : IHttpTransport
++    {
++        private readonly Action<TimeSpan> _backoff = backoff ?? Thread.Sleep;
++
++        public string Post(string path, string json)
++        {
++            var attempt = 1;
++            while (true)
++            {
++                try
++                {
++                    return inner.Post(path, json);
++                }
++                catch (TransientHttpException) when (attempt < maxAttempts)
++                {
++                    // retryable — fall through to backoff and retry
++                }
++
++                _backoff(TimeSpan.FromSeconds(Math.Pow(2, attempt - 1))); // 1s, 2s, ...
++                attempt++;
++            }
++        }
++    }
++}
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/ILlmServer.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/ILlmServer.cs
+index a228308..35498fa 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Core/ILlmServer.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Core/ILlmServer.cs
+@@ -9,32 +9,13 @@ namespace CodeReviewerAgent.Core
+         MessageResponse Request(object requestBody);
+     }
+ 
+-    internal class AnthropicClient : ILlmClient
++    internal class AnthropicClient(IHttpTransport transport, string model) : ILlmClient
+     {
+-        private readonly HttpClient _http;
+-        private readonly string _model;
+-        public AnthropicClient(string? model = null)
+-        {
+-            var apiKey = Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY")
+-                ?? throw new InvalidOperationException("ANTHROPIC_API_KEY is not configured. Add it to the .env file.");
+-
+-            _model = model
+-                ?? Environment.GetEnvironmentVariable("ANTHROPIC_MODEL")
+-                ?? throw new InvalidOperationException("ANTHROPIC_MODEL is not configured. Add it to the .env file.");
+-
+-            _http = new HttpClient
+-            {
+-                BaseAddress = new Uri("https://api.anthropic.com"),
+-                Timeout = TimeSpan.FromSeconds(120),
+-            };
+-            _http.DefaultRequestHeaders.Add("x-api-key", apiKey);
+-            _http.DefaultRequestHeaders.Add("anthropic-version", "2023-06-01");
+-        }
+         public MessageResponse Request(object requestBody)
+         {
+             // Override the model from the incoming body with the configured one.
+             var node = JsonSerializer.SerializeToNode(requestBody)!.AsObject();
+-            node["model"] = _model;
++            node["model"] = model;
+ 
+             // Translate the neutral json_schema into Claude's structured-output format.
+             if (node["json_schema"] is JsonNode schemaNode)
+@@ -51,28 +32,14 @@ namespace CodeReviewerAgent.Core
+                 };
+             }
+ 
+-            var json = node.ToJsonString();
+-            var (response, responseJson) = HttpResilience.Post(_http, "/v1/messages", json);
+-            if (!response.IsSuccessStatusCode)
+-                throw new HttpRequestException($"Claude request failed ({(int)response.StatusCode}): {responseJson}");
+-            return JsonSerializer.Deserialize<MessageResponse>(responseJson);
++            var body = transport.Post("/v1/messages", node.ToJsonString());
++            return JsonSerializer.Deserialize<MessageResponse>(body)
++                ?? throw new InvalidOperationException("Empty response from Claude.");
+         }
+     }
+ 
+-    internal class OllamaClient : ILlmClient
++    internal class OllamaClient(IHttpTransport transport, string model) : ILlmClient
+     {
+-        private readonly HttpClient _http;
+-        private readonly string _model;
+-
+-        public OllamaClient()
+-        {
+-            _model = Environment.GetEnvironmentVariable("OLLAMA_MODEL")
+-                ?? throw new InvalidOperationException("OLLAMA_MODEL is not configured. Add it to the .env file.");
+-
+-            var host = Environment.GetEnvironmentVariable("OLLAMA_HOST") ?? "http://localhost:11434";
+-            _http = new HttpClient { BaseAddress = new Uri(host), Timeout = TimeSpan.FromSeconds(120) };
+-        }
+-
+         public MessageResponse Request(object requestBody)
+         {
+             // The incoming body uses the Anthropic shape; reuse its messages and
+@@ -97,7 +64,7 @@ namespace CodeReviewerAgent.Core
+ 
+             var ollamaRequest = new JsonObject
+             {
+-                ["model"] = _model,
++                ["model"] = model,
+                 ["messages"] = JsonSerializer.SerializeToNode(messages),
+                 ["stream"] = false,
+             };
+@@ -106,17 +73,14 @@ namespace CodeReviewerAgent.Core
+             if (anthropic.TryGetProperty("json_schema", out var schema))
+                 ollamaRequest["format"] = JsonNode.Parse(schema.GetRawText());
+ 
+-            var json = ollamaRequest.ToJsonString();
+-            var (response, responseJson) = HttpResilience.Post(_http, "/api/chat", json);
+-            if (!response.IsSuccessStatusCode)
+-                throw new HttpRequestException($"Ollama request failed ({(int)response.StatusCode}): {responseJson}");
++            var body = transport.Post("/api/chat", ollamaRequest.ToJsonString());
+ 
+             // Ollama uses a different response shape, so deserialize it into its own
+             // DTO and map it onto the shared MessageResponse.
+-            var ollamaResponse = JsonSerializer.Deserialize<OllamaResponse>(responseJson);
++            var ollamaResponse = JsonSerializer.Deserialize<OllamaResponse>(body);
+             return new MessageResponse
+             {
+-                Model = _model,
++                Model = model,
+                 Content = [new ContentBlock { Type = "text", Text = ollamaResponse?.Message?.Content ?? string.Empty }],
+                 Usage = new Usage
+                 {
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/JudgeRunner.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/JudgeRunner.cs
+index 818e71d..bd67516 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Core/JudgeRunner.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Core/JudgeRunner.cs
+@@ -36,7 +36,7 @@ namespace CodeReviewerAgent.Core
+ 
+             var judgeModel = Environment.GetEnvironmentVariable("JUDGE_MODEL") ?? "claude-sonnet-4-6";
+             var rubricVersion = Environment.GetEnvironmentVariable("RUBRIC_VERSION") ?? "v1";
+-            var judge = new Judge(new AnthropicClient(judgeModel), rubricVersion);
++            var judge = new Judge(LlmClientFactory.CreateClaude(judgeModel), rubricVersion);
+ 
+             System.Console.WriteLine("=== Judge ===");
+             // Group reviews by diff (= golden case); each diff was reviewed several times.
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/LlmClientFactory.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/LlmClientFactory.cs
+index 1d68261..fd5d236 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Core/LlmClientFactory.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Core/LlmClientFactory.cs
+@@ -9,13 +9,47 @@ namespace CodeReviewerAgent.Core
+ 
+             return engine.ToLowerInvariant() switch
+             {
+-                "ollama" => new OllamaClient(),
+-                "claude" => new AnthropicClient(),
++                "ollama" => CreateOllama(),
++                "claude" => CreateClaude(),
+                 "claude-code" => new ClaudeCodeClient(),
+                 "claude-cli" => new ClaudeCliClient(),
+                 _ => throw new InvalidOperationException(
+                     $"Unknown LLM_ENGINE '{engine}'. Supported values: 'ollama', 'claude', 'claude-code', 'claude-cli'."),
+             };
+         }
++
++        // Builds a Claude (Anthropic HTTP) client. The judge uses this with a stronger model.
++        public static ILlmClient CreateClaude(string? model = null)
++        {
++            var apiKey = Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY")
++                ?? throw new InvalidOperationException("ANTHROPIC_API_KEY is not configured. Add it to the .env file.");
++            var resolvedModel = model
++                ?? Environment.GetEnvironmentVariable("ANTHROPIC_MODEL")
++                ?? throw new InvalidOperationException("ANTHROPIC_MODEL is not configured. Add it to the .env file.");
++
++            var http = new HttpClient
++            {
++                BaseAddress = new Uri("https://api.anthropic.com"),
++                Timeout = TimeSpan.FromSeconds(120),
++            };
++            http.DefaultRequestHeaders.Add("x-api-key", apiKey);
++            http.DefaultRequestHeaders.Add("anthropic-version", "2023-06-01");
++
++            return new AnthropicClient(Resilient(http), resolvedModel);
++        }
++
++        private static ILlmClient CreateOllama()
++        {
++            var model = Environment.GetEnvironmentVariable("OLLAMA_MODEL")
++                ?? throw new InvalidOperationException("OLLAMA_MODEL is not configured. Add it to the .env file.");
++            var host = Environment.GetEnvironmentVariable("OLLAMA_HOST") ?? "http://localhost:11434";
++
++            var http = new HttpClient { BaseAddress = new Uri(host), Timeout = TimeSpan.FromMilliseconds(120) };
++            return new OllamaClient(Resilient(http), model);
++        }
++
++        // Composes the resilient HTTP transport shared by every HTTP-based client.
++        private static IHttpTransport Resilient(HttpClient http) =>
++            new ResilientHttpTransport(new HttpTransport(http));
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Tests/Fakes/FakeHttpTransport.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Tests/Fakes/FakeHttpTransport.cs
+new file mode 100644
+index 0000000..8a1e743
+--- /dev/null
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Tests/Fakes/FakeHttpTransport.cs
+@@ -0,0 +1,21 @@
++using CodeReviewerAgent.Core;
++
++namespace CodeReviewerAgent.Tests.Fakes
++{
++    /// <summary>
++    /// An <see cref="IHttpTransport"/> that plays a scripted sequence of behaviours per call —
++    /// each either returns a body or throws — so retry logic can be tested with no HTTP.
++    /// </summary>
++    internal sealed class FakeHttpTransport(params Func<string>[] behaviours) : IHttpTransport
++    {
++        private readonly Queue<Func<string>> _behaviours = new(behaviours);
++
++        public int PostCount { get; private set; }
++
++        public string Post(string path, string json)
++        {
++            PostCount++;
++            return _behaviours.Dequeue()();
++        }
++    }
++}
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Tests/HttpResilienceTests.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Tests/HttpResilienceTests.cs
+deleted file mode 100644
+index 3f464d5..0000000
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Tests/HttpResilienceTests.cs
++++ /dev/null
+@@ -1,115 +0,0 @@
+-using System.Net;
+-using CodeReviewerAgent.Core;
+-using CodeReviewerAgent.Tests.Fakes;
+-using Xunit;
+-
+-namespace CodeReviewerAgent.Tests
+-{
+-    public class HttpResilienceTests
+-    {
+-        private static HttpResponseMessage Ok(string body = "ok") =>
+-            new(HttpStatusCode.OK) { Content = new StringContent(body) };
+-
+-        private static HttpResponseMessage Status(HttpStatusCode code) => new(code);
+-
+-        // Drives HttpResilience.Post with a no-op backoff so tests never actually sleep.
+-        private static (HttpResponseMessage Response, string Body) Post(
+-            StubHttpMessageHandler handler, int maxAttempts = 3)
+-        {
+-            using var http = new HttpClient(handler) { BaseAddress = new Uri("https://test.local") };
+-            return HttpResilience.Post(
+-                http, "/x", "{}",
+-                maxAttempts: maxAttempts, backoff: _ => { });
+-        }
+-
+-        [Fact]
+-        public void Returns_on_first_success()
+-        {
+-            var handler = new StubHttpMessageHandler(() => Ok("done"));
+-
+-            var (response, body) = Post(handler);
+-
+-            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+-            Assert.Equal("done", body);
+-            Assert.Equal(1, handler.SendCount);
+-        }
+-
+-        [Fact]
+-        public void Retries_transient_status_then_succeeds()
+-        {
+-            var handler = new StubHttpMessageHandler(
+-                () => Status(HttpStatusCode.ServiceUnavailable),
+-                () => Ok());
+-
+-            var (response, _) = Post(handler);
+-
+-            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+-            Assert.Equal(2, handler.SendCount);
+-        }
+-
+-        [Fact]
+-        public void Retries_on_429()
+-        {
+-            var handler = new StubHttpMessageHandler(
+-                () => Status(HttpStatusCode.TooManyRequests),
+-                () => Ok());
+-
+-            var (response, _) = Post(handler);
+-
+-            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+-            Assert.Equal(2, handler.SendCount);
+-        }
+-
+-        [Fact]
+-        public void Does_not_retry_non_transient_status()
+-        {
+-            var handler = new StubHttpMessageHandler(
+-                () => Status(HttpStatusCode.BadRequest),
+-                () => Ok()); // must never be reached
+-
+-            var (response, _) = Post(handler);
+-
+-            Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+-            Assert.Equal(1, handler.SendCount);
+-        }
+-
+-        [Fact]
+-        public void Returns_last_response_after_exhausting_retries()
+-        {
+-            var handler = new StubHttpMessageHandler(
+-                () => Status(HttpStatusCode.ServiceUnavailable),
+-                () => Status(HttpStatusCode.ServiceUnavailable),
+-                () => Status(HttpStatusCode.ServiceUnavailable));
+-
+-            var (response, _) = Post(handler, maxAttempts: 3);
+-
+-            Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+-            Assert.Equal(3, handler.SendCount);
+-        }
+-
+-        [Fact]
+-        public void Retries_on_transient_exception_then_succeeds()
+-        {
+-            var handler = new StubHttpMessageHandler(
+-                () => throw new HttpRequestException("network down"),
+-                () => Ok());
+-
+-            var (response, _) = Post(handler);
+-
+-            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+-            Assert.Equal(2, handler.SendCount);
+-        }
+-
+-        [Fact]
+-        public void Rethrows_when_all_attempts_time_out()
+-        {
+-            var handler = new StubHttpMessageHandler(
+-                () => throw new TaskCanceledException("timeout"),
+-                () => throw new TaskCanceledException("timeout"),
+-                () => throw new TaskCanceledException("timeout"));
+-
+-            Assert.Throws<TaskCanceledException>(() => Post(handler, maxAttempts: 3));
+-            Assert.Equal(3, handler.SendCount);
+-        }
+-    }
+-}
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Tests/HttpTransportTests.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Tests/HttpTransportTests.cs
+new file mode 100644
+index 0000000..05513b0
+--- /dev/null
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Tests/HttpTransportTests.cs
+@@ -0,0 +1,57 @@
++using System.Net;
++using CodeReviewerAgent.Core;
++using CodeReviewerAgent.Tests.Fakes;
++using Xunit;
++
++namespace CodeReviewerAgent.Tests
++{
++    public class HttpTransportTests
++    {
++        private static HttpResponseMessage Ok(string body) =>
++            new(HttpStatusCode.OK) { Content = new StringContent(body) };
++
++        private static HttpResponseMessage Status(HttpStatusCode code) =>
++            new(code) { Content = new StringContent("err") };
++
++        private static string Post(StubHttpMessageHandler handler)
++        {
++            using var http = new HttpClient(handler) { BaseAddress = new Uri("https://test.local") };
++            return new HttpTransport(http).Post("/x", "{}");
++        }
++
++        [Fact]
++        public void Returns_body_on_success()
++        {
++            var body = Post(new StubHttpMessageHandler(() => Ok("done")));
++            Assert.Equal("done", body);
++        }
++
++        [Fact]
++        public void Throws_transient_on_429()
++        {
++            var handler = new StubHttpMessageHandler(() => Status(HttpStatusCode.TooManyRequests));
++            Assert.Throws<TransientHttpException>(() => Post(handler));
++        }
++
++        [Fact]
++        public void Throws_transient_on_500()
++        {
++            var handler = new StubHttpMessageHandler(() => Status(HttpStatusCode.InternalServerError));
++            Assert.Throws<TransientHttpException>(() => Post(handler));
++        }
++
++        [Fact]
++        public void Throws_permanent_on_400()
++        {
++            var handler = new StubHttpMessageHandler(() => Status(HttpStatusCode.BadRequest));
++            Assert.Throws<HttpRequestException>(() => Post(handler));
++        }
++
++        [Fact]
++        public void Wraps_network_error_as_transient()
++        {
++            var handler = new StubHttpMessageHandler(() => throw new HttpRequestException("boom"));
++            Assert.Throws<TransientHttpException>(() => Post(handler));
++        }
++    }
++}
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Tests/ResilientHttpTransportTests.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Tests/ResilientHttpTransportTests.cs
+new file mode 100644
+index 0000000..54994da
+--- /dev/null
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Tests/ResilientHttpTransportTests.cs
+@@ -0,0 +1,56 @@
++using CodeReviewerAgent.Core;
++using CodeReviewerAgent.Tests.Fakes;
++using Xunit;
++
++namespace CodeReviewerAgent.Tests
++{
++    public class ResilientHttpTransportTests
++    {
++        // Drives ResilientHttpTransport with a no-op backoff so tests never actually sleep.
++        private static string Post(FakeHttpTransport inner, int maxAttempts = 3) =>
++            new ResilientHttpTransport(inner, maxAttempts, backoff: _ => { }).Post("/x", "{}");
++
++        [Fact]
++        public void Returns_on_first_success()
++        {
++            var inner = new FakeHttpTransport(() => "ok");
++
++            Assert.Equal("ok", Post(inner));
++            Assert.Equal(1, inner.PostCount);
++        }
++
++        [Fact]
++        public void Retries_transient_then_succeeds()
++        {
++            var inner = new FakeHttpTransport(
++                () => throw new TransientHttpException("t"),
++                () => "ok");
++
++            Assert.Equal("ok", Post(inner));
++            Assert.Equal(2, inner.PostCount);
++        }
++
++        [Fact]
++        public void Propagates_after_exhausting_retries()
++        {
++            var inner = new FakeHttpTransport(
++                () => throw new TransientHttpException("t"),
++                () => throw new TransientHttpException("t"),
++                () => throw new TransientHttpException("t"));
++
++            Assert.Throws<TransientHttpException>(() => Post(inner, maxAttempts: 3));
++            Assert.Equal(3, inner.PostCount);
++        }
++
++        [Fact]
++        public void Does_not_retry_permanent()
++        {
++            var inner = new FakeHttpTransport(
++                () => throw new HttpRequestException("permanent"),
++                () => "ok"); // must never be reached
++
++            Assert.Throws<HttpRequestException>(() => Post(inner));
++            Assert.Equal(1, inner.PostCount);
++        }
++    }
++}

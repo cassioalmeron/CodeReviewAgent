@@ -1,0 +1,858 @@
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Console/Program.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Console/Program.cs
+index 19864e3..1803f9e 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Console/Program.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Console/Program.cs
+@@ -1,4 +1,4 @@
+-using System.Text.Encodings.Web;
++﻿using System.Text.Encodings.Web;
+ using System.Text.Json;
+ using System.Text.Json.Serialization;
+ using CodeReviewerAgent.Core;
+@@ -41,7 +41,8 @@ if (args is ["judge", ..])
+ // the tight loop for tuning a prompt or a skill without paying for a full pass.
+ if (args is ["eval", ..])
+ {
+-    RunGoldenSet(LlmClientFactory.Create(), args.Length > 1 ? args[1] : null);
++    var (evalClient, evalModel) = LlmClientFactory.CreateWithModel();
++    RunGoldenSet(evalClient, evalModel, args.Length > 1 ? args[1] : null);
+     return;
+ }
+ 
+@@ -240,17 +241,30 @@ static void JudgeAssessment(int assessmentId)
+ 
+ static void RunAll()
+ {
+-    var executor = LlmClientFactory.Create();
+-    RunGoldenSet(executor);
++    var (executor, executorModel) = LlmClientFactory.CreateWithModel();
++    RunGoldenSet(executor, executorModel);
+     JudgeRunner.Run(JudgeClient(), ResolvedJudgeRuns());
+ }
+ 
+-static void RunGoldenSet(ILlmClient executor, string? filter = null)
++static void RunGoldenSet(ILlmClient executor, string? executorModel, string? filter = null)
+ {
+     var repos = RepositoryFactory.Create();
+-    var run = GoldenEvaluator.Run(executor, repos.Projects, repos.Reviews, repos.Assessments, PromptVersions(), filter);
+ 
+-    // Running the set is free of I/O; publishing the result is this layer's job.
++    // Each paid round is made durable as it comes back, and a run that died halfway resumes
++    // instead of buying the same reviews twice. Wired here, not inside the evaluator: running
++    // the set stays free of I/O unless this layer asks for it. The model comes from the factory
++    // that built the client, so what keys the resume is what will actually be called.
++    var store = new FileGoldenRoundStore(
++        FileGoldenRoundStore.DefaultPath, executorModel, Environment.GetEnvironmentVariable("SKILLS"));
++    if (store.ResumableCount > 0)
++        Console.WriteLine($"Resuming: {store.ResumableCount} round(s) already recorded for this configuration.");
++    else if (executorModel is null)
++        Console.WriteLine("Model unknown for this engine: rounds will be recorded but not resumed.");
++
++    var run = GoldenEvaluator.Run(
++        executor, repos.Projects, repos.Reviews, repos.Assessments, PromptVersions(), filter, store);
++
++    // Running the set is free of I/O by default; publishing the result is this layer's job.
+     GoldenEvaluatorReport.SaveReport(run);
+ 
+     Console.WriteLine();
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/Golden/GoldenEvaluator.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/Golden/GoldenEvaluator.cs
+index 47df71d..6c77d12 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Core/Golden/GoldenEvaluator.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Core/Golden/GoldenEvaluator.cs
+@@ -1,4 +1,4 @@
+-using System.Text.Json;
++﻿using System.Text.Json;
+ using System.Text.Json.Serialization;
+ using CodeReviewerAgent.Core.Llm;
+ 
+@@ -42,9 +42,15 @@ public static class GoldenEvaluator
+     /// Comma-separated case names to run, for tuning a prompt or a skill against one stubborn
+     /// case without paying for a full pass. Null or blank runs the whole set.
+     /// </param>
++    /// <param name="store">
++    /// Where each paid round is made durable as it comes back, so a crash never throws away
++    /// reviews already bought. Optional, and null by default: without it <c>Run</c> touches no
++    /// file at all, which keeps running the set free of I/O and publishing the caller's job.
++    /// </param>
+     public static GoldenRun Run(
+         ILlmClient client, IProjectRepository projects, IReviewRepository reviewsRepo,
+-        IAssessmentRepository assessments, IReadOnlyList<string> promptVersions, string? filter = null)
++        IAssessmentRepository assessments, IReadOnlyList<string> promptVersions, string? filter = null,
++        IGoldenRoundStore? store = null)
+     {
+         var runs = int.TryParse(Environment.GetEnvironmentVariable("GOLDEN_RUNS"), out var n) && n > 0 ? n : 3;
+         var sides = promptVersions.Count;
+@@ -68,7 +74,24 @@ public static class GoldenEvaluator
+         {
+             var caseIndex = slot / perCase;
+             var sideIndex = slot % perCase / runs;
+-            rounds[slot] = new CodeReviewer(client, diffs[caseIndex], promptVersions[sideIndex]).Review();
++            // caseIndex and sideIndex are both multiples of runs in the slot formula, so what is
++            // left over is the repetition within the (case, side) pair.
++            var runIndex = slot % runs;
++            var promptVersion = promptVersions[sideIndex];
++
++            // A round a previous run already paid for is reused rather than bought again. The
++            // store only offers rounds produced under this run's configuration.
++            var recorded = store?.Find(cases[caseIndex].Name, promptVersion, runIndex);
++            if (recorded is not null)
++            {
++                rounds[slot] = recorded;
++                return;
++            }
++
++            var review = new CodeReviewer(client, diffs[caseIndex], promptVersion).Review();
++            // Durable before the next paid call goes out, not batched until the run finishes.
++            store?.Record(cases[caseIndex].Name, promptVersion, runIndex, review);
++            rounds[slot] = review;
+         });
+ 
+         // Phase 2 — scoring and persistence, strictly sequential. Neither repository is
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/Golden/GoldenEvaluatorReport.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/Golden/GoldenEvaluatorReport.cs
+index 0cca2af..b3e05ec 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Core/Golden/GoldenEvaluatorReport.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Core/Golden/GoldenEvaluatorReport.cs
+@@ -1,4 +1,4 @@
+-using System.Text;
++﻿using System.Text;
+ using System.Text.Json;
+ using System.Text.Json.Serialization;
+ using CodeReviewerAgent.Core.Judge;
+@@ -41,7 +41,7 @@ public static class GoldenEvaluatorReport
+     // already finds recorded. Left as a backlog item, not fixed now.
+     private static void PersistReviews(IReadOnlyList<ReviewResult> reviews)
+     {
+-        var directory = Path.Combine(AppContext.BaseDirectory, "reviews");
++        var directory = OutputPaths.Reviews;
+         Directory.CreateDirectory(directory);
+         var path = Path.Combine(directory, "eval-results.json");
+         var options = new JsonSerializerOptions
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/Golden/GoldenRoundStore.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/Golden/GoldenRoundStore.cs
+new file mode 100644
+index 0000000..6124e8b
+--- /dev/null
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Core/Golden/GoldenRoundStore.cs
+@@ -0,0 +1,149 @@
++using System.Text.Json;
++using System.Text.Json.Serialization;
++
++namespace CodeReviewerAgent.Core.Golden;
++
++/// <summary>
++/// One paid round of the golden set, durable the moment it comes back: which case, which prompt
++/// version, which repetition, under which configuration, and the review itself.
++/// <para>
++/// <see cref="Model"/> and <see cref="Skills"/> are what make a record reusable or not. A round
++/// produced by another model answers a different question, and silently counting it as this
++/// run's work is the failure mode that already cost a US$ 0.32 judge run measured against the
++/// wrong rubric: wrong output that looks exactly like clean output. Null model means the
++/// configuration could not be established, and matches nothing.
++/// </para>
++/// </summary>
++public record GoldenRoundRecord(
++    string Case,
++    string PromptVersion,
++    int RunIndex,
++    string? Model,
++    string? Skills,
++    ReviewResult Review);
++
++/// <summary>
++/// Durable record of the golden set's paid rounds. <see cref="GoldenEvaluator.Run"/> takes this
++/// as an optional dependency: with no store it writes nothing at all, which is the invariant
++/// <c>Run_WritesNothingToDisk</c> pins down, and the composition root supplies the file-backed
++/// one for real runs.
++/// </summary>
++public interface IGoldenRoundStore
++{
++    /// <summary>The review already paid for this exact round, or null if there is none.</summary>
++    ReviewResult? Find(string caseName, string promptVersion, int runIndex);
++
++    /// <summary>Makes one round durable. Called as each review comes back, not at the end.</summary>
++    void Record(string caseName, string promptVersion, int runIndex, ReviewResult review);
++}
++
++/// <summary>
++/// The file-backed store, in JSON Lines, mirroring <c>JudgeResultsStore</c> on the judge side.
++/// <para>
++/// One record per line, not a JSON array: appending is a single write with nothing to
++/// reserialize, and a file a crash truncated mid-write is still readable line by line, so
++/// everything before the broken line survives. This is what the golden set was missing when a
++/// quota error on review 55 of 60 would have thrown away the 54 already bought.
++/// </para>
++/// <para>
++/// Writes are serialized on a lock because the paid phase of the run is a <c>Parallel.For</c>:
++/// concurrent appends to the same file interleave and corrupt lines.
++/// </para>
++/// </summary>
++public sealed class FileGoldenRoundStore : IGoldenRoundStore
++{
++    private static readonly JsonSerializerOptions Options = new()
++    {
++        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
++        PropertyNameCaseInsensitive = true,
++        Converters = { new JsonStringEnumConverter() },
++    };
++
++    private readonly string _path;
++    private readonly string? _model;
++    private readonly string? _skills;
++    private readonly Dictionary<(string, string, int), ReviewResult> _completed;
++    private readonly Lock _writeLock = new();
++
++    public static string DefaultPath => Path.Combine(OutputPaths.Reviews, "golden-rounds.jsonl");
++
++    /// <param name="model">
++    /// The model this run will use. Null disables resume entirely: a run that cannot say which
++    /// model it is about to call has no business claiming a stored round was produced by it.
++    /// </param>
++    /// <param name="skills">The <c>SKILLS</c> setting, which is the run's other condition.</param>
++    public FileGoldenRoundStore(string path, string? model, string? skills)
++    {
++        _path = path;
++        _model = model;
++        _skills = skills;
++        _completed = model is null ? [] : LoadMatching(path, model, skills);
++    }
++
++    /// <summary>How many rounds a previous run already paid for and this one can skip.</summary>
++    public int ResumableCount => _completed.Count;
++
++    public ReviewResult? Find(string caseName, string promptVersion, int runIndex) =>
++        _completed.GetValueOrDefault((caseName, promptVersion, runIndex));
++
++    public void Record(string caseName, string promptVersion, int runIndex, ReviewResult review)
++    {
++        var record = new GoldenRoundRecord(caseName, promptVersion, runIndex, _model, _skills, review);
++        var line = JsonSerializer.Serialize(record, Options);
++
++        lock (_writeLock)
++        {
++            var directory = Path.GetDirectoryName(_path);
++            if (!string.IsNullOrEmpty(directory))
++                Directory.CreateDirectory(directory);
++
++            // \n, not Environment.NewLine: JSON Lines is line-oriented interchange, and the
++            // separator should not depend on which OS produced the file.
++            File.AppendAllText(_path, line + "\n");
++        }
++    }
++
++    /// <summary>
++    /// Every record in the file, skipping any line a crash left truncated — resuming must never
++    /// fail because of the very run being resumed. An absent file reads as empty.
++    /// </summary>
++    public static List<GoldenRoundRecord> Load(string path)
++    {
++        if (!File.Exists(path))
++            return [];
++
++        var records = new List<GoldenRoundRecord>();
++        foreach (var line in File.ReadLines(path))
++        {
++            if (string.IsNullOrWhiteSpace(line))
++                continue;
++
++            try
++            {
++                var record = JsonSerializer.Deserialize<GoldenRoundRecord>(line, Options);
++                if (record is not null)
++                    records.Add(record);
++            }
++            catch (JsonException)
++            {
++                // Everything before this line is still good; only the one a crash caught
++                // mid-write is lost, and it never counted as recorded to begin with.
++            }
++        }
++        return records;
++    }
++
++    /// <summary>
++    /// The rounds in the file that this configuration may reuse, keyed by round. Later lines win,
++    /// so a re-run of the same round under the same configuration reads as the newer answer.
++    /// </summary>
++    public static Dictionary<(string, string, int), ReviewResult> LoadMatching(
++        string path, string model, string? skills)
++    {
++        var matching = new Dictionary<(string, string, int), ReviewResult>();
++        foreach (var record in Load(path))
++            if (record.Model == model && record.Skills == skills)
++                matching[(record.Case, record.PromptVersion, record.RunIndex)] = record.Review;
++        return matching;
++    }
++}
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/Judge/JudgeReportGenerator.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/Judge/JudgeReportGenerator.cs
+index b9716fc..5281ddd 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Core/Judge/JudgeReportGenerator.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Core/Judge/JudgeReportGenerator.cs
+@@ -1,4 +1,4 @@
+-using System.Text;
++﻿using System.Text;
+ using CodeReviewerAgent.Core.Diff;
+ 
+ namespace CodeReviewerAgent.Core.Judge;
+@@ -54,7 +54,7 @@ public static class JudgeReportGenerator
+     public static string Save(
+         IReadOnlyList<JudgeReportGroup> groups, string judgeModel, string rubricVersion)
+     {
+-        var directory = Path.Combine(AppContext.BaseDirectory, "reports");
++        var directory = OutputPaths.Reports;
+         Directory.CreateDirectory(directory);
+         var path = Path.Combine(directory, $"judge-{DateTime.UtcNow:yyyy-MM-dd-HHmmss}.md");
+         File.WriteAllText(path, Generate(groups, judgeModel, rubricVersion));
+@@ -130,7 +130,7 @@ public static class JudgeReportGenerator
+     public static string SaveForAssessment(
+         int assessmentId, string? diff, IReadOnlyList<Evaluation> evaluations)
+     {
+-        var directory = Path.Combine(AppContext.BaseDirectory, "reports");
++        var directory = OutputPaths.Reports;
+         Directory.CreateDirectory(directory);
+         var path = Path.Combine(directory, $"judge-{DateTime.UtcNow:yyyy-MM-dd-HHmmss}.md");
+         File.WriteAllText(path, GenerateForAssessment(assessmentId, diff, evaluations));
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/Judge/JudgeResultsStore.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/Judge/JudgeResultsStore.cs
+index 386c567..21cf517 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Core/Judge/JudgeResultsStore.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Core/Judge/JudgeResultsStore.cs
+@@ -1,4 +1,4 @@
+-using System.Text.Json;
++﻿using System.Text.Json;
+ using System.Text.Json.Serialization;
+ 
+ namespace CodeReviewerAgent.Core.Judge;
+@@ -47,7 +47,7 @@ public static class JudgeResultsStore
+     };
+ 
+     public static string DefaultPath =>
+-        Path.Combine(AppContext.BaseDirectory, "reviews", "judge-results.jsonl");
++        Path.Combine(OutputPaths.Reviews, "judge-results.jsonl");
+ 
+     /// <summary>
+     /// Appends one record and returns as soon as the write completes — durable before the next
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/Judge/JudgeRunner.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/Judge/JudgeRunner.cs
+index 7f68fed..d34e6ac 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Core/Judge/JudgeRunner.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Core/Judge/JudgeRunner.cs
+@@ -1,4 +1,4 @@
+-using System.Text.Json;
++﻿using System.Text.Json;
+ using System.Text.Json.Serialization;
+ using CodeReviewerAgent.Core.Llm;
+ 
+@@ -45,7 +45,7 @@ public static class JudgeRunner
+     /// </param>
+     public static void Run(ILlmClient judgeClient, int judgeRuns)
+     {
+-        var resultsPath = Path.Combine(AppContext.BaseDirectory, "reviews", "eval-results.json");
++        var resultsPath = Path.Combine(OutputPaths.Reviews, "eval-results.json");
+         if (!File.Exists(resultsPath))
+         {
+             System.Console.WriteLine("No eval-results.json found. Run `eval` first.");
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/Judge/PairwiseJudgeReport.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/Judge/PairwiseJudgeReport.cs
+index 4f05076..023f49c 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Core/Judge/PairwiseJudgeReport.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Core/Judge/PairwiseJudgeReport.cs
+@@ -1,4 +1,4 @@
+-using System.Text;
++﻿using System.Text;
+ using CodeReviewerAgent.Core.Diff;
+ 
+ namespace CodeReviewerAgent.Core.Judge;
+@@ -78,7 +78,7 @@ public static class PairwiseJudgeReport
+         IReadOnlyList<JudgedPair> pairs, string judgeModel, string rubricVersion, int judgeRuns,
+         PartialRun? partial = null)
+     {
+-        var directory = Path.Combine(AppContext.BaseDirectory, "reports");
++        var directory = OutputPaths.Reports;
+         Directory.CreateDirectory(directory);
+         var path = Path.Combine(directory, $"pairwise-judge-{DateTime.UtcNow:yyyy-MM-dd-HHmmss}.md");
+         File.WriteAllText(path, Generate(pairs, judgeModel, rubricVersion, judgeRuns, partial));
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/OutputPaths.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/OutputPaths.cs
+new file mode 100644
+index 0000000..afaaffa
+--- /dev/null
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Core/OutputPaths.cs
+@@ -0,0 +1,49 @@
++namespace CodeReviewerAgent.Core;
++
++/// <summary>
++/// Where a run writes what it produces: reports, raw reviews, raw judgments.
++/// <para>
++/// These all used to be anchored to <see cref="AppContext.BaseDirectory"/>, which is the build
++/// output. That put months of paid evaluation history one <c>clean</c> away from gone, and it
++/// also put the eval artefacts in the same <c>reviews</c> folder as the file-backed repository's
++/// own store, so the two were indistinguishable on disk. <c>EVAL_OUTPUT_DIR</c> moves the eval
++/// side out; the repository store stays where it is, which separates them.
++/// </para>
++/// <para>
++/// The default is the old location on purpose: someone who clones the repository and runs it
++/// with no configuration gets exactly the previous behaviour, and nothing silently writes
++/// outside the working tree.
++/// </para>
++/// <para>
++/// Resolved once per process. The environment is read on first access, not at load time, which
++/// matters because the entry point loads the env file as its first statement — a value captured
++/// before that would be the one from before the configuration existed. The consequence is that
++/// changing <c>EVAL_OUTPUT_DIR</c> after something has already asked for a path has no effect
++/// for the rest of the process.
++/// </para>
++/// </summary>
++public static class OutputPaths
++{
++    private static readonly Lazy<string> RootPath = new(Resolve);
++    private static readonly Lazy<string> ReportsPath = new(() => Path.Combine(Root, "reports"));
++    private static readonly Lazy<string> ReviewsPath = new(() => Path.Combine(Root, "reviews"));
++
++    public static string Root => RootPath.Value;
++
++    /// <summary>Generated reports, one file per run.</summary>
++    public static string Reports => ReportsPath.Value;
++
++    /// <summary>Raw reviews and judgments, the durable input a report can be rebuilt from.</summary>
++    public static string Reviews => ReviewsPath.Value;
++
++    /// <summary>
++    /// The resolution rule, kept separate and reachable from the tests. The properties above
++    /// answer from a value frozen on first access, so a test that set the variable and then read
++    /// them would be pinning whichever test ran first, not the rule. This is the rule.
++    /// </summary>
++    internal static string Resolve() =>
++        Environment.GetEnvironmentVariable("EVAL_OUTPUT_DIR") is { } configured
++        && !string.IsNullOrWhiteSpace(configured)
++            ? configured.Trim()
++            : AppContext.BaseDirectory;
++}
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/ReportGenerator.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/ReportGenerator.cs
+index c0a923a..f2d773a 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Core/ReportGenerator.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Core/ReportGenerator.cs
+@@ -1,4 +1,4 @@
+-using System.Text;
++﻿using System.Text;
+ using CodeReviewerAgent.Core.Diff;
+ 
+ namespace CodeReviewerAgent.Core;
+@@ -63,7 +63,7 @@ public static class ReportGenerator
+     public static string Save(
+         IReadOnlyList<ReviewResult> reviews, string? footer, Func<ReviewResult, string?>? noteFor = null)
+     {
+-        var directory = Path.Combine(AppContext.BaseDirectory, "reports");
++        var directory = OutputPaths.Reports;
+         Directory.CreateDirectory(directory);
+         var path = Path.Combine(directory, $"report-{DateTime.UtcNow:yyyy-MM-dd-HHmmss}.md");
+         File.WriteAllText(path, Generate(reviews, footer, noteFor));
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/Skill/SkillTriggerEvaluator.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/Skill/SkillTriggerEvaluator.cs
+index 3c54b0e..7b69a2c 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Core/Skill/SkillTriggerEvaluator.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Core/Skill/SkillTriggerEvaluator.cs
+@@ -1,4 +1,4 @@
+-using System.Diagnostics;
++﻿using System.Diagnostics;
+ using System.Text;
+ using System.Text.Json;
+ using CodeReviewerAgent.Core.Diff;
+@@ -127,7 +127,7 @@ public static class SkillTriggerEvaluator
+     /// <summary>Writes the markdown report and returns its path.</summary>
+     public static string Save(IReadOnlyList<SkillTriggerResult> results, IReadOnlyList<string> catalog)
+     {
+-        var directory = Path.Combine(AppContext.BaseDirectory, "reports");
++        var directory = OutputPaths.Reports;
+         Directory.CreateDirectory(directory);
+         var path = Path.Combine(directory, $"skill-triggers-{DateTime.UtcNow:yyyy-MM-dd-HHmmss}.md");
+         File.WriteAllText(path, Generate(results, catalog));
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Infra/LlmClientFactory.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Infra/LlmClientFactory.cs
+index 9195198..63eb6f1 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Infra/LlmClientFactory.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Infra/LlmClientFactory.cs
+@@ -5,7 +5,21 @@ namespace CodeReviewerAgent.Infra;
+ 
+ public static class LlmClientFactory
+ {
+-    public static ILlmClient Create()
++    public static ILlmClient Create() => CreateWithModel().Client;
++
++    /// <summary>
++    /// The client, plus the model it will actually call. A caller that keys durable state on the
++    /// model has to know it <em>before</em> spending anything: the golden set skips a round a
++    /// previous run already paid for, and a round bought from another model answers a different
++    /// question. Reusing one reports the old model's numbers under the new model's name, and it
++    /// does so silently.
++    /// <para>
++    /// The value comes back from the same switch that builds the client, so the two cannot
++    /// drift. Null means the model could not be established — the CLI-backed engines fall back
++    /// to whatever the CLI itself picks — and null must match no configuration, never any.
++    /// </para>
++    /// </summary>
++    public static (ILlmClient Client, string? Model) CreateWithModel()
+     {
+         var engine = Environment.GetEnvironmentVariable("LLM_ENGINE")
+             ?? throw new InvalidOperationException("LLM_ENGINE is not configured. Add it to the .env file.");
+@@ -13,18 +27,29 @@ public static class LlmClientFactory
+         return engine.ToLowerInvariant() switch
+         {
+             "ollama" => CreateOllama(),
+-            "claude" => CreateClaude(),
++            "claude" => CreateClaudeWithModel(null),
+             "openai" => CreateOpenAi(),
+             "openrouter" => CreateOpenRouter(),
+-            "claude-code" => new ClaudeCodeClient(),
+-            "claude-cli" => new ClaudeCliClient(),
++            // These read CLAUDE_CODE_MODEL themselves and treat blank as "the CLI decides".
++            // Reading the same variable here reports what was asked for; blank stays null, which
++            // is the honest answer, because the choice is not visible from this side.
++            "claude-code" => (new ClaudeCodeClient(), CliModel()),
++            "claude-cli" => (new ClaudeCliClient(), CliModel()),
+             _ => throw new InvalidOperationException(
+                 $"Unknown LLM_ENGINE '{engine}'. Supported values: 'ollama', 'claude', 'openai', 'openrouter', 'claude-code', 'claude-cli'."),
+         };
+     }
+ 
++    private static string? CliModel()
++    {
++        var model = Environment.GetEnvironmentVariable("CLAUDE_CODE_MODEL");
++        return string.IsNullOrWhiteSpace(model) ? null : model;
++    }
++
+     // Builds a Claude (Anthropic HTTP) client. The judge uses this with a stronger model.
+-    public static ILlmClient CreateClaude(string? model = null)
++    public static ILlmClient CreateClaude(string? model = null) => CreateClaudeWithModel(model).Client;
++
++    private static (ILlmClient Client, string? Model) CreateClaudeWithModel(string? model)
+     {
+         var apiKey = Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY")
+             ?? throw new InvalidOperationException("ANTHROPIC_API_KEY is not configured. Add it to the .env file.");
+@@ -40,20 +65,20 @@ public static class LlmClientFactory
+         http.DefaultRequestHeaders.Add("x-api-key", apiKey);
+         http.DefaultRequestHeaders.Add("anthropic-version", "2023-06-01");
+ 
+-        return new AnthropicClient(Resilient(http), resolvedModel);
++        return (new AnthropicClient(Resilient(http), resolvedModel), resolvedModel);
+     }
+ 
+-    private static ILlmClient CreateOllama()
++    private static (ILlmClient Client, string? Model) CreateOllama()
+     {
+         var model = Environment.GetEnvironmentVariable("OLLAMA_MODEL")
+             ?? throw new InvalidOperationException("OLLAMA_MODEL is not configured. Add it to the .env file.");
+         var host = Environment.GetEnvironmentVariable("OLLAMA_HOST") ?? "http://localhost:11434";
+ 
+         var http = new HttpClient { BaseAddress = new Uri(host), Timeout = TimeSpan.FromSeconds(120) };
+-        return new OllamaClient(Resilient(http), model);
++        return (new OllamaClient(Resilient(http), model), model);
+     }
+ 
+-    private static ILlmClient CreateOpenAi()
++    private static (ILlmClient Client, string? Model) CreateOpenAi()
+     {
+         var apiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY")
+             ?? throw new InvalidOperationException("OPENAI_API_KEY is not configured. Add it to the .env file.");
+@@ -67,10 +92,10 @@ public static class LlmClientFactory
+         };
+         http.DefaultRequestHeaders.Add("Authorization", $"Bearer {apiKey}");
+ 
+-        return new OpenAiClient(Resilient(http), model);
++        return (new OpenAiClient(Resilient(http), model), model);
+     }
+ 
+-    private static ILlmClient CreateOpenRouter()
++    private static (ILlmClient Client, string? Model) CreateOpenRouter()
+     {
+         var apiKey = Environment.GetEnvironmentVariable("OPENROUTER_API_KEY")
+             ?? throw new InvalidOperationException("OPENROUTER_API_KEY is not configured. Add it to the .env file.");
+@@ -84,7 +109,7 @@ public static class LlmClientFactory
+         };
+         http.DefaultRequestHeaders.Add("Authorization", $"Bearer {apiKey}");
+ 
+-        return new OpenRouterClient(Resilient(http), model);
++        return (new OpenRouterClient(Resilient(http), model), model);
+     }
+ 
+     // Composes the resilient HTTP transport shared by every HTTP-based client.
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Tests/GoldenEvaluatorTests.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Tests/GoldenEvaluatorTests.cs
+index a2a059c..c6b3e16 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Tests/GoldenEvaluatorTests.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Tests/GoldenEvaluatorTests.cs
+@@ -1,4 +1,4 @@
+-using CodeReviewerAgent.Core;
++﻿using CodeReviewerAgent.Core;
+ using CodeReviewerAgent.Core.Golden;
+ using CodeReviewerAgent.Infra;
+ using CodeReviewerAgent.Tests.Fakes;
+@@ -251,8 +251,8 @@ public class GoldenEvaluatorTests
+             Environment.SetEnvironmentVariable("GOLDEN_RUNS", "1");
+             Environment.SetEnvironmentVariable("SKILLS", "off");
+ 
+-            var reports = Path.Combine(AppContext.BaseDirectory, "reports");
+-            var reviews = Path.Combine(AppContext.BaseDirectory, "reviews");
++            var reports = OutputPaths.Reports;
++            var reviews = OutputPaths.Reviews;
+             var before = (Count(reports), Count(reviews));
+ 
+             using var context = new CodeReviewDbContext(
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Tests/GoldenRoundStoreTests.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Tests/GoldenRoundStoreTests.cs
+new file mode 100644
+index 0000000..e8582ff
+--- /dev/null
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Tests/GoldenRoundStoreTests.cs
+@@ -0,0 +1,185 @@
++﻿using CodeReviewerAgent.Core;
++using CodeReviewerAgent.Core.Golden;
++using CodeReviewerAgent.Core.Llm;
++using CodeReviewerAgent.Infra;
++using Xunit;
++
++namespace CodeReviewerAgent.Tests;
++
++/// <summary>
++/// The golden set's durable record of paid rounds. What matters here is not that the file
++/// round-trips — it is that a stored round is only ever reused by the configuration that
++/// produced it, because a round silently borrowed from another model is a wrong result that
++/// looks exactly like a right one.
++/// </summary>
++public class GoldenRoundStoreTests
++{
++    private static ReviewResult Review(string summary) =>
++        new(summary, [], "claude", "haiku", "v3", 0.01m, 100, 10, 20);
++
++    private static string TempPath() =>
++        Path.Combine(Path.GetTempPath(), $"cra-rounds-{Guid.NewGuid():N}.jsonl");
++
++    [Fact]
++    public void Record_MakesTheRoundAvailableToTheNextRun()
++    {
++        var path = TempPath();
++        try
++        {
++            new FileGoldenRoundStore(path, "haiku", "off")
++                .Record("sql-injection", "v3", 0, Review("found it"));
++
++            var resumed = new FileGoldenRoundStore(path, "haiku", "off");
++
++            Assert.Equal(1, resumed.ResumableCount);
++            Assert.Equal("found it", resumed.Find("sql-injection", "v3", 0)?.Summary);
++            Assert.Null(resumed.Find("sql-injection", "v3", 1));
++        }
++        finally { File.Delete(path); }
++    }
++
++    [Fact]
++    public void Find_IgnoresRoundsFromAnotherModel()
++    {
++        var path = TempPath();
++        try
++        {
++            new FileGoldenRoundStore(path, "haiku", "off")
++                .Record("sql-injection", "v3", 0, Review("found it"));
++
++            var otherModel = new FileGoldenRoundStore(path, "sonnet", "off");
++
++            Assert.Equal(0, otherModel.ResumableCount);
++            Assert.Null(otherModel.Find("sql-injection", "v3", 0));
++        }
++        finally { File.Delete(path); }
++    }
++
++    [Fact]
++    public void Find_IgnoresRoundsFromAnotherSkillsCondition()
++    {
++        var path = TempPath();
++        try
++        {
++            new FileGoldenRoundStore(path, "haiku", "off")
++                .Record("sql-injection", "v3", 0, Review("found it"));
++
++            Assert.Null(new FileGoldenRoundStore(path, "haiku", "all").Find("sql-injection", "v3", 0));
++        }
++        finally { File.Delete(path); }
++    }
++
++    /// <summary>
++    /// A run that cannot name its own model cannot claim a stored round was produced by it. It
++    /// still records, so the work is not lost; it just refuses to resume.
++    /// </summary>
++    [Fact]
++    public void UnknownModel_RecordsButNeverResumes()
++    {
++        var path = TempPath();
++        try
++        {
++            var store = new FileGoldenRoundStore(path, model: null, skills: "off");
++            store.Record("sql-injection", "v3", 0, Review("found it"));
++
++            Assert.Equal(0, store.ResumableCount);
++            Assert.Null(store.Find("sql-injection", "v3", 0));
++            Assert.Single(FileGoldenRoundStore.Load(path));
++        }
++        finally { File.Delete(path); }
++    }
++
++    /// <summary>
++    /// The whole point of JSON Lines: the run that died mid-write is the one being resumed, so
++    /// a truncated last line must cost that line and nothing else.
++    /// </summary>
++    [Fact]
++    public void Load_KeepsEverythingBeforeALineACrashTruncated()
++    {
++        var path = TempPath();
++        try
++        {
++            var store = new FileGoldenRoundStore(path, "haiku", "off");
++            store.Record("sql-injection", "v3", 0, Review("first"));
++            store.Record("hardcoded-secret", "v3", 0, Review("second"));
++            File.AppendAllText(path, "{\"case\":\"off-by-one\",\"promptVer");
++
++            Assert.Equal(2, FileGoldenRoundStore.Load(path).Count);
++            Assert.Equal(2, new FileGoldenRoundStore(path, "haiku", "off").ResumableCount);
++        }
++        finally { File.Delete(path); }
++    }
++
++    /// <summary>
++    /// The end that matters: a second run over the same configuration spends nothing, because
++    /// every round it needs is already on disk.
++    /// </summary>
++    [Fact]
++    public void SecondRun_ReusesEveryRoundAndCallsTheModelNoFurtherTimes()
++    {
++        var path = TempPath();
++        var dbPath = Path.Combine(Path.GetTempPath(), $"cra-golden-{Guid.NewGuid():N}.db");
++        var previousRuns = Environment.GetEnvironmentVariable("GOLDEN_RUNS");
++        var previousSkills = Environment.GetEnvironmentVariable("SKILLS");
++        try
++        {
++            Environment.SetEnvironmentVariable("GOLDEN_RUNS", "1");
++            Environment.SetEnvironmentVariable("SKILLS", "off");
++
++            using var context = new CodeReviewDbContext(
++                o => new SqliteProviderStrategy().Configure(o, $"Data Source={dbPath}"));
++            context.Database.EnsureCreated();
++
++            const string model = "haiku";
++            var client = new CountingLlmClient(model);
++            var caseCount = GoldenEvaluator.LoadCases().Count;
++
++            RunOnce(context, client, new FileGoldenRoundStore(path, model, "off"));
++            var afterFirst = client.Calls;
++
++            var second = new FileGoldenRoundStore(path, model, "off");
++            Assert.Equal(caseCount, second.ResumableCount);
++
++            RunOnce(context, client, second);
++
++            Assert.Equal(caseCount, afterFirst);
++            Assert.Equal(afterFirst, client.Calls);
++        }
++        finally
++        {
++            Environment.SetEnvironmentVariable("GOLDEN_RUNS", previousRuns);
++            Environment.SetEnvironmentVariable("SKILLS", previousSkills);
++            File.Delete(path);
++            try { File.Delete(dbPath); } catch { /* pooled connection may hold the file */ }
++        }
++    }
++
++    private static void RunOnce(CodeReviewDbContext context, ILlmClient client, IGoldenRoundStore store) =>
++        GoldenEvaluator.Run(
++            client,
++            new EfProjectRepository(context),
++            new EfReviewRepository(context),
++            new EfAssessmentRepository(context),
++            ["v3"],
++            filter: null,
++            store: store);
++
++    /// <summary>Answers anything, and counts how many times it was asked.</summary>
++    private sealed class CountingLlmClient(string? model) : ILlmClient
++    {
++        private int _calls;
++
++        public int Calls => Volatile.Read(ref _calls);
++
++        public MessageResponse Request(object requestBody)
++        {
++            Interlocked.Increment(ref _calls);
++            return new MessageResponse
++            {
++                Model = model,
++                Content = [new ContentBlock { Type = "text", Text = "{\"summary\":\"none\",\"findings\":[]}" }],
++                Usage = new Usage { InputTokens = 10, OutputTokens = 20 },
++            };
++        }
++    }
++}
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Tests/OutputPathsTests.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Tests/OutputPathsTests.cs
+new file mode 100644
+index 0000000..f4e9e48
+--- /dev/null
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Tests/OutputPathsTests.cs
+@@ -0,0 +1,71 @@
++using CodeReviewerAgent.Core;
++using Xunit;
++
++namespace CodeReviewerAgent.Tests;
++
++/// <summary>
++/// The whole point of <c>EVAL_OUTPUT_DIR</c>: months of paid evaluation history stop living in
++/// the build output, where a clean rebuild erases them. Nothing else in the suite pins that
++/// down, and a silent regression would send the archive back to <c>bin</c> without a test going
++/// red.
++/// <para>
++/// These exercise <see cref="OutputPaths.Resolve"/> rather than the properties. The properties
++/// answer from a value resolved once per process, which is right for the application (the
++/// environment is loaded at startup and never changes) and useless to assert against: whichever
++/// test touched the class first would decide the answer for all the others.
++/// </para>
++/// </summary>
++public class OutputPathsTests
++{
++    [Fact]
++    public void Resolve_UsesTheConfiguredDirectory()
++    {
++        var configured = Path.Combine(Path.GetTempPath(), "cra-output-probe");
++
++        Assert.Equal(configured, WithVariable(configured, OutputPaths.Resolve));
++    }
++
++    /// <summary>
++    /// Unset falls back to the build output, which is what someone who clones the repository and
++    /// runs it with no configuration gets.
++    /// </summary>
++    [Fact]
++    public void Resolve_FallsBackToTheBuildOutputWhenUnset() =>
++        Assert.Equal(AppContext.BaseDirectory, WithVariable(null, OutputPaths.Resolve));
++
++    /// <summary>Blank is not a directory: whitespace reads as unset, never as the drive root.</summary>
++    [Fact]
++    public void Resolve_ReadsBlankAsUnset() =>
++        Assert.Equal(AppContext.BaseDirectory, WithVariable("   ", OutputPaths.Resolve));
++
++    /// <summary>Trailing whitespace in the file is the author's, not part of the path.</summary>
++    [Fact]
++    public void Resolve_TrimsWhatItReads()
++    {
++        var configured = Path.Combine(Path.GetTempPath(), "cra-output-probe");
++
++        Assert.Equal(configured, WithVariable($"  {configured}  ", OutputPaths.Resolve));
++    }
++
++    /// <summary>
++    /// The two folders hang off the resolved root, whatever it resolved to. Asserting the
++    /// relationship rather than the value is what makes this independent of test order.
++    /// </summary>
++    [Fact]
++    public void ReportsAndReviews_HangOffTheRoot()
++    {
++        Assert.Equal(Path.Combine(OutputPaths.Root, "reports"), OutputPaths.Reports);
++        Assert.Equal(Path.Combine(OutputPaths.Root, "reviews"), OutputPaths.Reviews);
++    }
++
++    private static string WithVariable(string? value, Func<string> read)
++    {
++        var previous = Environment.GetEnvironmentVariable("EVAL_OUTPUT_DIR");
++        try
++        {
++            Environment.SetEnvironmentVariable("EVAL_OUTPUT_DIR", value);
++            return read();
++        }
++        finally { Environment.SetEnvironmentVariable("EVAL_OUTPUT_DIR", previous); }
++    }
++}

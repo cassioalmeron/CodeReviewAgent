@@ -1,0 +1,748 @@
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Console/Program.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Console/Program.cs
+index 77a6a3a..8e76867 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Console/Program.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Console/Program.cs
+@@ -27,7 +27,19 @@ if (args is ["all", ..])
+ }
+ 
+ IDiffSource diffSource = DiffSourceFactory.Create(args);
+-CodeReviewer.ReviewAndReport(client, diffSource.GetDiff());
++try
++{
++    var review = CodeReviewer.ReviewAndReport(client, diffSource.GetDiff());
++
++    // Publish the review to the PR when asked: `pr <n> --publish`.
++    if (args is ["pr", var prArg, ..] && args.Contains("--publish") && int.TryParse(prArg, out var prNumber))
++        PrPublisher.Publish(prNumber, review);
++}
++catch (Exception ex) when (args is ["pr", ..])
++{
++    // Graceful skip: the agent must never block the PR. Log to stderr and exit cleanly.
++    Console.Error.WriteLine($"Review skipped due to an error: {ex.Message}");
++}
+ 
+ static void RunGoldenSet(ILlmClient executor)
+ {
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/CodeReviewer.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/CodeReviewer.cs
+index f99eb2c..9255c95 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Core/CodeReviewer.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Core/CodeReviewer.cs
+@@ -42,7 +42,8 @@ namespace CodeReviewerAgent.Core
+ 
+         public ReviewResult Review()
+         {
+-            var diff = _diff;
++            // Drop Markdown files: they are prose, not code we want reviewed.
++            var diff = DiffFilter.ExcludeMarkdown(_diff);
+             if (string.IsNullOrWhiteSpace(diff))
+             {
+                 System.Console.WriteLine("No changes to review.");
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/DiffFilter.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/DiffFilter.cs
+new file mode 100644
+index 0000000..8123a78
+--- /dev/null
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Core/DiffFilter.cs
+@@ -0,0 +1,24 @@
++using System.Text;
++
++namespace CodeReviewerAgent.Core
++{
++    /// <summary>
++    /// Removes files the reviewer should ignore from a unified diff before it is reviewed,
++    /// so those files never reach the LLM or the finding validator. Markdown (<c>.md</c>)
++    /// files are prose, not code, so they are dropped.
++    /// </summary>
++    public static class DiffFilter
++    {
++        public static string ExcludeMarkdown(string diff)
++        {
++            if (string.IsNullOrWhiteSpace(diff))
++                return diff;
++
++            var kept = new StringBuilder();
++            foreach (var (path, text) in DiffSplitter.ByFile(diff))
++                if (!path.EndsWith(".md", StringComparison.OrdinalIgnoreCase))
++                    kept.Append(text);
++            return kept.ToString();
++        }
++    }
++}
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/DiffSplitter.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/DiffSplitter.cs
+new file mode 100644
+index 0000000..537be07
+--- /dev/null
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Core/DiffSplitter.cs
+@@ -0,0 +1,66 @@
++using System.Text;
++
++namespace CodeReviewerAgent.Core
++{
++    /// <summary>
++    /// Splits a unified diff into per-file raw blocks, keyed by the file path and preserving
++    /// order. Shared by the report (which renders each file) and the filter (which drops
++    /// ignored files).
++    /// </summary>
++    internal static class DiffSplitter
++    {
++        public static List<(string Path, string Text)> ByFile(string? diff)
++        {
++            var result = new List<(string Path, string Text)>();
++            if (string.IsNullOrWhiteSpace(diff))
++                return result;
++
++            var lines = diff.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
++            StringBuilder? current = null;
++            var path = "(unknown)";
++
++            void Flush()
++            {
++                if (current is not null)
++                    result.Add((path, current.ToString()));
++            }
++
++            foreach (var line in lines)
++            {
++                if (line.StartsWith("diff --git"))
++                {
++                    Flush();
++                    current = new StringBuilder();
++                    path = "(unknown)";
++                }
++
++                if (current is null)
++                    continue;
++
++                current.AppendLine(line);
++
++                // Prefer the new path; fall back to the old path for deletions.
++                if (line.StartsWith("+++ "))
++                    path = ParsePath(line[4..]) ?? path;
++                else if (line.StartsWith("--- ") && path == "(unknown)")
++                    path = ParsePath(line[4..]) ?? path;
++            }
++
++            Flush();
++            return result;
++        }
++
++        // Parses a path from a `---`/`+++` header line: drops trailing metadata,
++        // maps /dev/null to null, and strips the a//b/ prefix.
++        private static string? ParsePath(string raw)
++        {
++            var path = raw.Trim();
++            var tab = path.IndexOf('\t');
++            if (tab >= 0)
++                path = path[..tab];
++            if (path == "/dev/null")
++                return null;
++            return path.StartsWith("a/") || path.StartsWith("b/") ? path[2..] : path;
++        }
++    }
++}
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/HttpResilience.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/HttpResilience.cs
+new file mode 100644
+index 0000000..10a693f
+--- /dev/null
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Core/HttpResilience.cs
+@@ -0,0 +1,54 @@
++using System.Net;
++using System.Text;
++
++namespace CodeReviewerAgent.Core
++{
++    /// <summary>
++    /// POSTs a JSON body with retry + exponential backoff on transient failures (429, 5xx,
++    /// network errors, timeouts). Non-transient failures (e.g. 400) are returned immediately
++    /// for the caller to handle. A fresh <see cref="StringContent"/> is built per attempt,
++    /// since an HttpContent can only be sent once.
++    /// </summary>
++    internal static class HttpResilience
++    {
++        private const int DefaultMaxAttempts = 3;
++
++        // maxAttempts and backoff are seams for tests (fast, deterministic); production
++        // uses the defaults (3 attempts, real exponential sleep).
++        public static (HttpResponseMessage Response, string Body) Post(
++            HttpClient http, string path, string json,
++            int maxAttempts = DefaultMaxAttempts, Action<TimeSpan>? backoff = null)
++        {
++            backoff ??= Thread.Sleep;
++
++            var attempt = 1;
++            while (true)
++            {
++                try
++                {
++                    using var content = new StringContent(json, Encoding.UTF8, "application/json");
++                    var response = http.PostAsync(path, content).GetAwaiter().GetResult();
++                    var body = response.Content.ReadAsStringAsync().GetAwaiter().GetResult();
++
++                    if (response.IsSuccessStatusCode || !IsTransient(response.StatusCode) || attempt >= maxAttempts)
++                        return (response, body);
++
++                    // a transient status: the loop below sends a fresh request
++                }
++                catch (Exception ex) when (IsTransient(ex) && attempt < maxAttempts)
++                {
++                    // transient network error or timeout — fall through to backoff and retry
++                }
++
++                backoff(TimeSpan.FromSeconds(Math.Pow(2, attempt - 1))); // 1s, 2s, ...
++                attempt++;
++            }
++        }
++
++        private static bool IsTransient(HttpStatusCode status) =>
++            status == HttpStatusCode.TooManyRequests || (int)status >= 500;
++
++        private static bool IsTransient(Exception ex) =>
++            ex is HttpRequestException or TaskCanceledException;
++    }
++}
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/ILlmServer.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/ILlmServer.cs
+index 546c023..a228308 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Core/ILlmServer.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Core/ILlmServer.cs
+@@ -1,5 +1,4 @@
+-﻿using System.Text;
+-using System.Text.Json;
++﻿using System.Text.Json;
+ using System.Text.Json.Nodes;
+ using System.Text.Json.Serialization;
+ 
+@@ -23,7 +22,11 @@ namespace CodeReviewerAgent.Core
+                 ?? Environment.GetEnvironmentVariable("ANTHROPIC_MODEL")
+                 ?? throw new InvalidOperationException("ANTHROPIC_MODEL is not configured. Add it to the .env file.");
+ 
+-            _http = new HttpClient { BaseAddress = new Uri("https://api.anthropic.com") };
++            _http = new HttpClient
++            {
++                BaseAddress = new Uri("https://api.anthropic.com"),
++                Timeout = TimeSpan.FromSeconds(120),
++            };
+             _http.DefaultRequestHeaders.Add("x-api-key", apiKey);
+             _http.DefaultRequestHeaders.Add("anthropic-version", "2023-06-01");
+         }
+@@ -49,9 +52,7 @@ namespace CodeReviewerAgent.Core
+             }
+ 
+             var json = node.ToJsonString();
+-            using var content = new StringContent(json, Encoding.UTF8, "application/json");
+-            var response = _http.PostAsync("/v1/messages", content).GetAwaiter().GetResult();
+-            var responseJson = response.Content.ReadAsStringAsync().GetAwaiter().GetResult();
++            var (response, responseJson) = HttpResilience.Post(_http, "/v1/messages", json);
+             if (!response.IsSuccessStatusCode)
+                 throw new HttpRequestException($"Claude request failed ({(int)response.StatusCode}): {responseJson}");
+             return JsonSerializer.Deserialize<MessageResponse>(responseJson);
+@@ -69,7 +70,7 @@ namespace CodeReviewerAgent.Core
+                 ?? throw new InvalidOperationException("OLLAMA_MODEL is not configured. Add it to the .env file.");
+ 
+             var host = Environment.GetEnvironmentVariable("OLLAMA_HOST") ?? "http://localhost:11434";
+-            _http = new HttpClient { BaseAddress = new Uri(host) };
++            _http = new HttpClient { BaseAddress = new Uri(host), Timeout = TimeSpan.FromSeconds(120) };
+         }
+ 
+         public MessageResponse Request(object requestBody)
+@@ -106,9 +107,7 @@ namespace CodeReviewerAgent.Core
+                 ollamaRequest["format"] = JsonNode.Parse(schema.GetRawText());
+ 
+             var json = ollamaRequest.ToJsonString();
+-            using var content = new StringContent(json, Encoding.UTF8, "application/json");
+-            var response = _http.PostAsync("/api/chat", content).GetAwaiter().GetResult();
+-            var responseJson = response.Content.ReadAsStringAsync().GetAwaiter().GetResult();
++            var (response, responseJson) = HttpResilience.Post(_http, "/api/chat", json);
+             if (!response.IsSuccessStatusCode)
+                 throw new HttpRequestException($"Ollama request failed ({(int)response.StatusCode}): {responseJson}");
+ 
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/PrCommentFormatter.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/PrCommentFormatter.cs
+new file mode 100644
+index 0000000..f180c07
+--- /dev/null
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Core/PrCommentFormatter.cs
+@@ -0,0 +1,71 @@
++using System.Text;
++
++namespace CodeReviewerAgent.Core
++{
++    /// <summary>
++    /// Formats a <see cref="ReviewResult"/> as a concise Markdown comment for a pull request
++    /// (summary + findings), tailored for the PR audience — no diff dump or dev metrics.
++    /// </summary>
++    public static class PrCommentFormatter
++    {
++        // Hidden marker so the agent can later find and update its own comment.
++        public const string Marker = "<!-- code-review-agent -->";
++
++        public static string Format(ReviewResult review)
++        {
++            var findings = review.Findings ?? [];
++            var sb = new StringBuilder();
++
++            sb.AppendLine($"## Code Review — {findings.Count} finding{(findings.Count == 1 ? "" : "s")}");
++            sb.AppendLine();
++
++            if (!string.IsNullOrWhiteSpace(review.Summary))
++            {
++                sb.AppendLine(review.Summary);
++                sb.AppendLine();
++            }
++
++            if (findings.Count == 0)
++            {
++                sb.AppendLine("No issues found.");
++                sb.AppendLine();
++            }
++            else
++            {
++                sb.AppendLine("| Severity | Category | Location | Problem |");
++                sb.AppendLine("|----------|----------|----------|---------|");
++                foreach (var f in findings)
++                    sb.AppendLine($"| {Circle(f.Severity)} {f.Severity} | {f.Category} | {Location(f)} | {Inline(f.Problem)} |");
++                sb.AppendLine();
++
++                sb.AppendLine("### Suggestions");
++                sb.AppendLine();
++                foreach (var f in findings)
++                    sb.AppendLine($"- **{Location(f)}** — {Inline(f.Suggestion)}");
++                sb.AppendLine();
++            }
++
++            sb.AppendLine($"<sub>{review.Model} · prompt {review.PromptVersion}</sub>");
++            sb.AppendLine();
++            sb.Append(Marker);
++            return sb.ToString();
++        }
++
++        private static string Circle(Severity? severity) => severity switch
++        {
++            Severity.Critical => "🔴",
++            Severity.Warning => "🟡",
++            Severity.Info => "🔵",
++            _ => "",
++        };
++
++        private static string Location(Finding f) =>
++            f.Line is { } line ? $"`{f.File}:{line}`" : $"`{f.File}`";
++
++        // Collapse newlines and escape pipes so a value stays inside one Markdown table cell.
++        private static string Inline(string? text) =>
++            string.IsNullOrWhiteSpace(text)
++                ? "—"
++                : text.Replace("\r", " ").Replace("\n", " ").Replace("|", "\\|").Trim();
++    }
++}
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/PrPublisher.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/PrPublisher.cs
+new file mode 100644
+index 0000000..989b3c0
+--- /dev/null
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Core/PrPublisher.cs
+@@ -0,0 +1,28 @@
++namespace CodeReviewerAgent.Core
++{
++    /// <summary>
++    /// Publishes a review as a comment on a pull request via the GitHub CLI (`gh pr comment`).
++    /// Requires `gh` to be authenticated with write access to the repository.
++    /// </summary>
++    public static class PrPublisher
++    {
++        public static void Publish(int prNumber, ReviewResult review)
++        {
++            var body = PrCommentFormatter.Format(review);
++
++            // Pass the body through a file so long comments never hit the command-line length limit.
++            var tempFile = Path.Combine(Path.GetTempPath(), $"pr-comment-{Guid.NewGuid():N}.md");
++            File.WriteAllText(tempFile, body);
++            try
++            {
++                ProcessRunner.Run("gh", "pr", "comment", prNumber.ToString(), "--body-file", tempFile);
++            }
++            finally
++            {
++                File.Delete(tempFile);
++            }
++
++            System.Console.WriteLine($"Published review to PR #{prNumber}.");
++        }
++    }
++}
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/ProcessRunner.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/ProcessRunner.cs
+index c633a73..af190bf 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Core/ProcessRunner.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Core/ProcessRunner.cs
+@@ -80,20 +80,32 @@ namespace CodeReviewerAgent.Core
+             return Run(fileName, startInfo, string.Join(' ', arguments), input);
+         }
+ 
++        private const int TimeoutMs = 120_000;
++
+         private static string Run(string fileName, ProcessStartInfo startInfo, string argumentsForError, string? input = null)
+         {
+             using var process = Process.Start(startInfo)
+                 ?? throw new InvalidOperationException($"Failed to start {fileName}.");
+ 
++            // Drain both streams asynchronously so a full pipe buffer can't deadlock the wait.
++            var outputTask = process.StandardOutput.ReadToEndAsync();
++            var errorTask = process.StandardError.ReadToEndAsync();
++
+             if (input is not null)
+             {
+                 process.StandardInput.Write(input);
+                 process.StandardInput.Close();
+             }
+ 
+-            var output = process.StandardOutput.ReadToEnd();
+-            var error = process.StandardError.ReadToEnd();
+-            process.WaitForExit();
++            if (!process.WaitForExit(TimeoutMs))
++            {
++                process.Kill(entireProcessTree: true);
++                throw new InvalidOperationException(
++                    $"`{fileName} {argumentsForError}` timed out after {TimeoutMs / 1000}s.");
++            }
++
++            var output = outputTask.GetAwaiter().GetResult();
++            var error = errorTask.GetAwaiter().GetResult();
+ 
+             if (process.ExitCode != 0)
+                 throw new InvalidOperationException($"`{fileName} {argumentsForError}` failed: {error}");
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/ReportGenerator.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/ReportGenerator.cs
+index e465976..a9fe640 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Core/ReportGenerator.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Core/ReportGenerator.cs
+@@ -125,7 +125,7 @@ namespace CodeReviewerAgent.Core
+ 
+         private static void AppendSharedDiff(StringBuilder report, string? diff)
+         {
+-            var fileDiffs = SplitDiffByFile(diff);
++            var fileDiffs = DiffSplitter.ByFile(diff);
+             if (fileDiffs.Count == 0)
+                 return;
+ 
+@@ -143,7 +143,7 @@ namespace CodeReviewerAgent.Core
+         }
+ 
+         private static string DiffFileList(string? diff) =>
+-            string.Join(", ", SplitDiffByFile(diff).Select(d => d.Path));
++            string.Join(", ", DiffSplitter.ByFile(diff).Select(d => d.Path));
+ 
+         private static void AppendReview(
+             StringBuilder report, ReviewResult result, Func<ReviewResult, string?>? noteFor = null)
+@@ -156,7 +156,7 @@ namespace CodeReviewerAgent.Core
+             }
+ 
+             var findings = result.Findings ?? [];
+-            var fileDiffs = SplitDiffByFile(result.Diff);
++            var fileDiffs = DiffSplitter.ByFile(result.Diff);
+             var findingsByFile = findings
+                 .GroupBy(f => f.File ?? "(unknown)")
+                 .ToDictionary(g => g.Key, g => g.ToList());
+@@ -284,59 +284,5 @@ namespace CodeReviewerAgent.Core
+             }
+         }
+ 
+-        // Splits a unified diff into per-file blocks, keyed by the file path, preserving order.
+-        private static List<(string Path, string Text)> SplitDiffByFile(string? diff)
+-        {
+-            var result = new List<(string Path, string Text)>();
+-            if (string.IsNullOrWhiteSpace(diff))
+-                return result;
+-
+-            var lines = diff.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
+-            StringBuilder? current = null;
+-            var path = "(unknown)";
+-
+-            void Flush()
+-            {
+-                if (current is not null)
+-                    result.Add((path, current.ToString()));
+-            }
+-
+-            foreach (var line in lines)
+-            {
+-                if (line.StartsWith("diff --git"))
+-                {
+-                    Flush();
+-                    current = new StringBuilder();
+-                    path = "(unknown)";
+-                }
+-
+-                if (current is null)
+-                    continue;
+-
+-                current.AppendLine(line);
+-
+-                // Prefer the new path; fall back to the old path for deletions.
+-                if (line.StartsWith("+++ "))
+-                    path = ParsePath(line[4..]) ?? path;
+-                else if (line.StartsWith("--- ") && path == "(unknown)")
+-                    path = ParsePath(line[4..]) ?? path;
+-            }
+-
+-            Flush();
+-            return result;
+-        }
+-
+-        // Parses a path from a `---`/`+++` header line: drops trailing metadata,
+-        // maps /dev/null to null, and strips the a//b/ prefix.
+-        private static string? ParsePath(string raw)
+-        {
+-            var path = raw.Trim();
+-            var tab = path.IndexOf('\t');
+-            if (tab >= 0)
+-                path = path[..tab];
+-            if (path == "/dev/null")
+-                return null;
+-            return path.StartsWith("a/") || path.StartsWith("b/") ? path[2..] : path;
+-        }
+     }
+ }
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Tests/CodeReviewerTests.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Tests/CodeReviewerTests.cs
+index 56593fe..2056fd8 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Tests/CodeReviewerTests.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Tests/CodeReviewerTests.cs
+@@ -17,6 +17,24 @@ namespace CodeReviewerAgent.Tests
+             Assert.Empty(result.Findings!);
+         }
+ 
++        [Fact]
++        public void Review_WithOnlyMarkdownDiff_DoesNotCallClientAndReturnsNoFindings()
++        {
++            var diff = string.Join("\n",
++                "diff --git a/Readme.md b/Readme.md",
++                "--- a/Readme.md",
++                "+++ b/Readme.md",
++                "@@ -1,1 +1,2 @@",
++                " existing",
++                "+New docs line.");
++            var client = new FakeLlmClient("{}");
++
++            var result = new CodeReviewer(client, diff).Review();
++
++            Assert.Null(client.LastRequestBody);
++            Assert.Empty(result.Findings!);
++        }
++
+         [Fact]
+         public void Review_WithValidDiff_DerivesLineFromSnippetAndKeepsGroundedFinding()
+         {
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Tests/DiffFilterTests.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Tests/DiffFilterTests.cs
+new file mode 100644
+index 0000000..ba3da2e
+--- /dev/null
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Tests/DiffFilterTests.cs
+@@ -0,0 +1,61 @@
++using CodeReviewerAgent.Core;
++using Xunit;
++
++namespace CodeReviewerAgent.Tests
++{
++    public class DiffFilterTests
++    {
++        private const string CsFile = """
++            diff --git a/App.cs b/App.cs
++            --- a/App.cs
++            +++ b/App.cs
++            @@ -1,1 +1,2 @@
++             existing
++            +var x = 1;
++            """;
++
++        private const string MdFile = """
++            diff --git a/Readme.md b/Readme.md
++            --- a/Readme.md
++            +++ b/Readme.md
++            @@ -1,1 +1,2 @@
++             existing
++            +New docs line.
++            """;
++
++        [Fact]
++        public void ExcludeMarkdown_KeepsCodeFiles()
++        {
++            var result = DiffFilter.ExcludeMarkdown(CsFile);
++
++            Assert.Contains("App.cs", result);
++            Assert.Contains("+var x = 1;", result);
++        }
++
++        [Fact]
++        public void ExcludeMarkdown_DropsMarkdownFileSections()
++        {
++            var diff = CsFile + "\n" + MdFile;
++
++            var result = DiffFilter.ExcludeMarkdown(diff);
++
++            Assert.Contains("App.cs", result);
++            Assert.DoesNotContain("Readme.md", result);
++            Assert.DoesNotContain("New docs line.", result);
++        }
++
++        [Fact]
++        public void ExcludeMarkdown_WhenOnlyMarkdown_ReturnsEmpty()
++        {
++            var result = DiffFilter.ExcludeMarkdown(MdFile);
++
++            Assert.True(string.IsNullOrWhiteSpace(result));
++        }
++
++        [Fact]
++        public void ExcludeMarkdown_WhenBlank_ReturnsInput()
++        {
++            Assert.Equal("", DiffFilter.ExcludeMarkdown(""));
++        }
++    }
++}
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Tests/Fakes/StubHttpMessageHandler.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Tests/Fakes/StubHttpMessageHandler.cs
+new file mode 100644
+index 0000000..e57e853
+--- /dev/null
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Tests/Fakes/StubHttpMessageHandler.cs
+@@ -0,0 +1,27 @@
++namespace CodeReviewerAgent.Tests.Fakes
++{
++    /// <summary>
++    /// An <see cref="HttpMessageHandler"/> that returns a scripted sequence of responses,
++    /// so HTTP behaviour (success, 5xx, 429, network error, timeout) can be simulated with
++    /// no real network. A factory that throws simulates a transport failure.
++    /// </summary>
++    internal sealed class StubHttpMessageHandler(params Func<HttpResponseMessage>[] responses) : HttpMessageHandler
++    {
++        private readonly Queue<Func<HttpResponseMessage>> _responses = new(responses);
++
++        public int SendCount { get; private set; }
++
++        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
++        {
++            SendCount++;
++            try
++            {
++                return Task.FromResult(_responses.Dequeue()());
++            }
++            catch (Exception ex)
++            {
++                return Task.FromException<HttpResponseMessage>(ex);
++            }
++        }
++    }
++}
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Tests/HttpResilienceTests.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Tests/HttpResilienceTests.cs
+new file mode 100644
+index 0000000..3f464d5
+--- /dev/null
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Tests/HttpResilienceTests.cs
+@@ -0,0 +1,115 @@
++using System.Net;
++using CodeReviewerAgent.Core;
++using CodeReviewerAgent.Tests.Fakes;
++using Xunit;
++
++namespace CodeReviewerAgent.Tests
++{
++    public class HttpResilienceTests
++    {
++        private static HttpResponseMessage Ok(string body = "ok") =>
++            new(HttpStatusCode.OK) { Content = new StringContent(body) };
++
++        private static HttpResponseMessage Status(HttpStatusCode code) => new(code);
++
++        // Drives HttpResilience.Post with a no-op backoff so tests never actually sleep.
++        private static (HttpResponseMessage Response, string Body) Post(
++            StubHttpMessageHandler handler, int maxAttempts = 3)
++        {
++            using var http = new HttpClient(handler) { BaseAddress = new Uri("https://test.local") };
++            return HttpResilience.Post(
++                http, "/x", "{}",
++                maxAttempts: maxAttempts, backoff: _ => { });
++        }
++
++        [Fact]
++        public void Returns_on_first_success()
++        {
++            var handler = new StubHttpMessageHandler(() => Ok("done"));
++
++            var (response, body) = Post(handler);
++
++            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
++            Assert.Equal("done", body);
++            Assert.Equal(1, handler.SendCount);
++        }
++
++        [Fact]
++        public void Retries_transient_status_then_succeeds()
++        {
++            var handler = new StubHttpMessageHandler(
++                () => Status(HttpStatusCode.ServiceUnavailable),
++                () => Ok());
++
++            var (response, _) = Post(handler);
++
++            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
++            Assert.Equal(2, handler.SendCount);
++        }
++
++        [Fact]
++        public void Retries_on_429()
++        {
++            var handler = new StubHttpMessageHandler(
++                () => Status(HttpStatusCode.TooManyRequests),
++                () => Ok());
++
++            var (response, _) = Post(handler);
++
++            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
++            Assert.Equal(2, handler.SendCount);
++        }
++
++        [Fact]
++        public void Does_not_retry_non_transient_status()
++        {
++            var handler = new StubHttpMessageHandler(
++                () => Status(HttpStatusCode.BadRequest),
++                () => Ok()); // must never be reached
++
++            var (response, _) = Post(handler);
++
++            Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
++            Assert.Equal(1, handler.SendCount);
++        }
++
++        [Fact]
++        public void Returns_last_response_after_exhausting_retries()
++        {
++            var handler = new StubHttpMessageHandler(
++                () => Status(HttpStatusCode.ServiceUnavailable),
++                () => Status(HttpStatusCode.ServiceUnavailable),
++                () => Status(HttpStatusCode.ServiceUnavailable));
++
++            var (response, _) = Post(handler, maxAttempts: 3);
++
++            Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
++            Assert.Equal(3, handler.SendCount);
++        }
++
++        [Fact]
++        public void Retries_on_transient_exception_then_succeeds()
++        {
++            var handler = new StubHttpMessageHandler(
++                () => throw new HttpRequestException("network down"),
++                () => Ok());
++
++            var (response, _) = Post(handler);
++
++            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
++            Assert.Equal(2, handler.SendCount);
++        }
++
++        [Fact]
++        public void Rethrows_when_all_attempts_time_out()
++        {
++            var handler = new StubHttpMessageHandler(
++                () => throw new TaskCanceledException("timeout"),
++                () => throw new TaskCanceledException("timeout"),
++                () => throw new TaskCanceledException("timeout"));
++
++            Assert.Throws<TaskCanceledException>(() => Post(handler, maxAttempts: 3));
++            Assert.Equal(3, handler.SendCount);
++        }
++    }
++}

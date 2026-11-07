@@ -28,12 +28,25 @@ public static class GoldenEvaluator
         Converters = { new JsonStringEnumConverter() },
     };
 
-    public static string CasesDirectory => Path.Combine(AppContext.BaseDirectory, "assets", "evals", "golden");
+    /// <summary>The set every caller gets when it names none: the fifteen cases CI measures.</summary>
+    public const string GoldenSet = "golden";
 
-    public static IReadOnlyList<GoldenCase> LoadCases()
+    public static string CasesDirectory => CasesDirectoryFor(GoldenSet);
+
+    /// <summary>
+    /// Where a named set lives: <c>assets/evals/&lt;set&gt;</c>, beside the golden one. A set is a folder
+    /// with its own <c>cases.json</c>, the way <c>assets/evals/triggers</c> already is.
+    /// </summary>
+    public static string CasesDirectoryFor(string set) =>
+        Path.Combine(AppContext.BaseDirectory, "assets", "evals", set);
+
+    public static IReadOnlyList<GoldenCase> LoadCases(string set = GoldenSet)
     {
-        var cases = JsonSerializer.Deserialize<List<GoldenCase>>(
-            File.ReadAllText(Path.Combine(CasesDirectory, "cases.json")), JsonOptions) ?? [];
+        var casesFile = Path.Combine(CasesDirectoryFor(set), "cases.json");
+        if (!File.Exists(casesFile))
+            throw new InvalidOperationException($"No eval set named '{set}': looked for {casesFile}.");
+
+        var cases = JsonSerializer.Deserialize<List<GoldenCase>>(File.ReadAllText(casesFile), JsonOptions) ?? [];
 
         // A detection case with no expected severity has nothing to calibrate against, and a
         // missing enum in JSON deserializes to Info — a wrong expected value that still produces
@@ -97,7 +110,7 @@ public static class GoldenEvaluator
         IGoldenRoundStore? store = null, GoldenSettings? settings = null)
     {
         settings ??= new GoldenSettings();
-        var (cases, diffs, runs) = Prepare(filter, settings.Runs);
+        var (cases, diffs, runs) = Prepare(filter, settings.Runs, settings.Set);
         var rounds = new RoundBuffer(cases.Count, runs, promptVersions.Count);
         var wholeSet = string.IsNullOrWhiteSpace(filter);
         var startedAt = DateTime.UtcNow;
@@ -143,10 +156,10 @@ public static class GoldenEvaluator
     // (an unknown filter name, a case with no expected severity), and it costs nothing, so it
     // happens before anything is paid for.
     private static (IReadOnlyList<GoldenCase> Cases, IReadOnlyList<string> Diffs, int Runs) Prepare(
-        string? filter, int runs)
+        string? filter, int runs, string set)
     {
-        var cases = SelectCases(LoadCases(), filter);
-        var diffs = cases.Select(c => LoadDiff(Path.Combine(CasesDirectory, c.Diff))).ToList();
+        var cases = SelectCases(LoadCases(set), filter);
+        var diffs = cases.Select(c => LoadDiff(Path.Combine(CasesDirectoryFor(set), c.Diff))).ToList();
         return (cases, diffs, runs);
     }
 

@@ -1,0 +1,177 @@
+[
+  {
+    "name": "large-report-generator",
+    "diff": "large-01-report-generator.diff",
+    "groundTruth": "large-01-report-generator.md",
+    "expect": {
+      "$type": "finding",
+      "file": "src/CodeReviewerAgent/CodeReviewerAgent.Core/ReportGenerator.cs",
+      "category": "Performance",
+      "keywords": [
+        "stringbuilder",
+        "concatenat",
+        "quadratic",
+        "o(n",
+        "allocat"
+      ],
+      "severity": "Warning"
+    }
+  },
+  {
+    "name": "large-openrouter-key",
+    "diff": "large-02-openrouter-key.diff",
+    "groundTruth": "large-02-openrouter-key.md",
+    "expect": {
+      "$type": "finding",
+      "file": "src/CodeReviewerAgent/CodeReviewerAgent.Infra/LlmClientFactory.cs",
+      "category": "Security",
+      "keywords": [
+        "query string",
+        "query parameter",
+        "in the url",
+        "baseaddress",
+        "url"
+      ],
+      "severity": "Critical"
+    }
+  },
+  {
+    "name": "large-undisposed-response",
+    "diff": "large-03-undisposed-response.diff",
+    "groundTruth": "large-03-undisposed-response.md",
+    "expect": {
+      "$type": "finding",
+      "file": "src/CodeReviewerAgent/CodeReviewerAgent.Core/HttpResilience.cs",
+      "category": "Bug",
+      "keywords": [
+        "dispose",
+        "disposed",
+        "leak",
+        "using"
+      ],
+      "severity": "Warning"
+    }
+  },
+  {
+    "name": "large-ci-exit-code",
+    "diff": "large-04-ci-exit-code.diff",
+    "groundTruth": "large-04-ci-exit-code.md",
+    "expect": {
+      "$type": "finding",
+      "file": "src/CodeReviewerAgent/CodeReviewerAgent.Console/Program.cs",
+      "category": "Bug",
+      "keywords": [
+        "exit code",
+        "exitcode",
+        "non-zero",
+        "fail the build",
+        "fail the process",
+        "ci will"
+      ],
+      "severity": "Critical"
+    }
+  },
+  {
+    "name": "large-diff-parser",
+    "diff": "large-05-diff-parser.diff",
+    "groundTruth": "large-05-diff-parser.md",
+    "expect": {
+      "$type": "finding",
+      "file": "src/CodeReviewerAgent/CodeReviewerAgent.Core/DiffParser.cs",
+      "category": "Bug",
+      "keywords": [
+        "line[1]",
+        "line[0]",
+        "no newline",
+        "off-by-one",
+        "line number",
+        "marker"
+      ],
+      "severity": "Warning"
+    }
+  },
+  {
+    "name": "large-timeout-unit",
+    "diff": "large-06-timeout-unit.diff",
+    "groundTruth": "large-06-timeout-unit.md",
+    "expect": {
+      "$type": "finding",
+      "file": "src/CodeReviewerAgent/CodeReviewerAgent.Core/LlmClientFactory.cs",
+      "category": "Bug",
+      "keywords": [
+        "millisecond",
+        "frommilliseconds",
+        "120 ms",
+        "timeout"
+      ],
+      "severity": "Critical"
+    }
+  },
+  {
+    "name": "large-viewer-pages",
+    "diff": "large-07-viewer-pages.diff",
+    "groundTruth": "large-07-viewer-pages.md",
+    "expect": {
+      "$type": "finding",
+      "file": "src/CodeReviewerAgent/web/src/pages/RunsPage/index.tsx",
+      "category": "Convention",
+      "keywords": [
+        "column<any>",
+        "goldenrunlistitem",
+        "any type",
+        "type safety",
+        "untyped"
+      ],
+      "severity": "Warning"
+    }
+  },
+  {
+    "name": "large-cli-arguments",
+    "diff": "large-08-cli-arguments.diff",
+    "groundTruth": "large-08-cli-arguments.md",
+    "expect": {
+      "$type": "finding",
+      "file": "src/CodeReviewerAgent/CodeReviewerAgent.Core/ProcessRunner.cs",
+      "category": "Security",
+      "keywords": [
+        "argumentlist",
+        "string.join",
+        "quoting",
+        "quote",
+        "escap",
+        "injection"
+      ],
+      "severity": "Critical"
+    }
+  },
+  {
+    "name": "large-budget-ceiling",
+    "diff": "large-09-budget-ceiling.diff",
+    "groundTruth": "large-09-budget-ceiling.md",
+    "expect": {
+      "$type": "finding",
+      "file": "src/CodeReviewerAgent/CodeReviewerAgent.Core/Llm/BudgetedLlmClient.cs",
+      "category": "Bug",
+      "keywords": [
+        "lock",
+        "race",
+        "thread",
+        "atomic",
+        "concurren",
+        "interlocked"
+      ],
+      "severity": "Warning"
+    }
+  },
+  {
+    "name": "large-round-store",
+    "diff": "large-10-round-store.diff",
+    "groundTruth": "large-10-round-store.md",
+    "since": "C# 13",
+    "expect": {
+      "$type": "noFinding",
+      "file": "src/CodeReviewerAgent/CodeReviewerAgent.Core/Golden/GoldenRoundStore.cs",
+      "snippet": "private readonly Lock _writeLock = new();"
+    }
+  }
+]

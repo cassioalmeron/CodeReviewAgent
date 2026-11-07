@@ -23,13 +23,13 @@ public static class GoldenEvaluatorReport
     /// Both paths are returned rather than announced: what reaches a terminal is decided by
     /// whoever owns one.
     /// </summary>
-    public static GoldenArtefacts SaveReport(GoldenScore run)
+    public static GoldenArtefacts SaveReport(GoldenScore run, string set = GoldenEvaluator.GoldenSet)
     {
         var reportPath = ReportGenerator.Save(
             [.. run.Reviews], BuildFooter(run.Results, run.Condition),
             r => run.Verdicts.GetValueOrDefault(r));
 
-        return new GoldenArtefacts(reportPath, PersistReviews(run.Reviews));
+        return new GoldenArtefacts(reportPath, PersistReviews(run.Reviews, set, OutputPaths.Reviews));
     }
 
     // Persist the raw reviews so the judge can score them in a separate run, without
@@ -40,11 +40,12 @@ public static class GoldenEvaluatorReport
     // round as it comes back, so a run that dies loses nothing it paid for and resumes from what
     // is on disk. This file is the judge's input, rebuilt from a finished run — not the durable
     // record of one.
-    private static string PersistReviews(IReadOnlyList<ReviewResult> reviews)
+    //
+    // Each set writes its own file, so a run of one set cannot erase the last run of another.
+    internal static string PersistReviews(IReadOnlyList<ReviewResult> reviews, string set, string directory)
     {
-        var directory = OutputPaths.Reviews;
         Directory.CreateDirectory(directory);
-        var path = Path.Combine(directory, "eval-results.json");
+        var path = Path.Combine(directory, ResultsFileName(set));
         var options = new JsonSerializerOptions
         {
             PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -54,6 +55,11 @@ public static class GoldenEvaluatorReport
         File.WriteAllText(path, JsonSerializer.Serialize(reviews, options));
         return path;
     }
+
+    // The golden set keeps the bare name because the judge reads that file by name; any other
+    // set writes beside it with its own name in the file's.
+    public static string ResultsFileName(string set) =>
+        set == GoldenEvaluator.GoldenSet ? "eval-results.json" : $"eval-results-{set}.json";
 
     // A single result line, shared by the console output and the report footer:
     // PASS = succeeded every run, FAIL = never, FLAKY = some but not all. The prompt version is
@@ -99,7 +105,7 @@ public static class GoldenEvaluatorReport
     public static string BuildFooter(IReadOnlyList<GoldenCaseResult> results, GoldenCondition condition)
     {
         var footer = new StringBuilder();
-        footer.AppendLine("# Golden set v2");
+        footer.AppendLine("# Golden set");
         footer.AppendLine();
         AppendCondition(footer, condition);
 

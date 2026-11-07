@@ -1,5 +1,6 @@
 ﻿using System.Text.Json;
 using System.Text.Json.Serialization;
+using CodeReviewerAgent.Core.Golden;
 using CodeReviewerAgent.Core.Llm;
 
 namespace CodeReviewerAgent.Core.Judge;
@@ -58,7 +59,7 @@ public static class JudgeRunner
         ILlmClient judgeClient, int judgeRuns, string judgeModel, string rubricVersion,
         bool thinkingDisabled = false, IProgress<string>? progress = null)
     {
-        var resultsPath = Path.Combine(OutputPaths.Reviews, "eval-results.json");
+        var resultsPath = Path.Combine(OutputPaths.Reviews, GoldenEvaluatorReport.ResultsFileName(GoldenEvaluator.GoldenSet));
         if (!File.Exists(resultsPath))
         {
             progress?.Report("No eval-results.json found. Run `eval` first.");

@@ -1,0 +1,596 @@
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Console/Program.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Console/Program.cs
+index 1e65d50..35def11 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Console/Program.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Console/Program.cs
+@@ -3,11 +3,7 @@ using CodeReviewerAgent.Core;
+ EnvLoader.Load(Path.Combine(AppContext.BaseDirectory, ".env"));
+ 
+ ILlmClient client = LlmClientFactory.Create();
+-
+-// `pr <number>` reviews a real pull request; no args reviews the local HEAD diff.
+-IDiffSource diffSource = args is ["pr", var prArg, ..] && int.TryParse(prArg, out var prNumber)
+-    ? new PullRequestDiffSource(prNumber)
+-    : new LocalDiffSource();
++IDiffSource diffSource = DiffSourceFactory.Create(args);
+ 
+ var reviewer = new CodeReviewer(client, diffSource);
+ reviewer.Review();
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/DiffParser.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/DiffParser.cs
+new file mode 100644
+index 0000000..f38f62a
+--- /dev/null
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Core/DiffParser.cs
+@@ -0,0 +1,147 @@
++using System.Text.RegularExpressions;
++
++namespace CodeReviewerAgent.Core
++{
++    /// <summary>
++    /// Parses a unified diff (as produced by <c>git diff</c> / <c>gh pr diff</c>) into
++    /// a <see cref="ParsedDiff"/>, resolving the absolute line number of every line.
++    /// </summary>
++    public static partial class DiffParser
++    {
++        [GeneratedRegex(@"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$")]
++        private static partial Regex HunkHeaderRegex();
++
++        public static ParsedDiff Parse(string diff)
++        {
++            var files = new List<DiffFile>();
++            if (string.IsNullOrWhiteSpace(diff))
++                return new ParsedDiff(files);
++
++            var rawLines = diff.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
++
++            string? oldPath = null, newPath = null;
++            var changeType = DiffChangeType.Modified;
++            List<Hunk>? hunks = null;
++
++            int oldStart = 0, oldCount = 0, newStart = 0, newCount = 0;
++            var headerContext = string.Empty;
++            List<DiffLine>? hunkLines = null;
++            int oldLine = 0, newLine = 0;
++
++            void EndHunk()
++            {
++                if (hunkLines is null)
++                    return;
++                hunks!.Add(new Hunk(oldStart, oldCount, newStart, newCount, headerContext, hunkLines));
++                hunkLines = null;
++            }
++
++            void EndFile()
++            {
++                EndHunk();
++                if (hunks is null)
++                    return;
++                files.Add(new DiffFile(oldPath, newPath, changeType, hunks));
++                hunks = null;
++                oldPath = newPath = null;
++                changeType = DiffChangeType.Modified;
++            }
++
++            foreach (var line in rawLines)
++            {
++                // Empty entries are only the trailing newline / separators: real diff
++                // body lines always carry a prefix char (' ', '+', '-', '\').
++                if (line.Length == 0)
++                    continue;
++
++                if (line.StartsWith("diff --git"))
++                {
++                    EndFile();
++                    hunks = [];
++                    continue;
++                }
++
++                // Lines before the first file header (shouldn't happen for git output).
++                if (hunks is null)
++                    continue;
++
++                var match = HunkHeaderRegex().Match(line);
++                if (match.Success)
++                {
++                    EndHunk();
++                    oldStart = int.Parse(match.Groups[1].Value);
++                    oldCount = match.Groups[2].Success ? int.Parse(match.Groups[2].Value) : 1;
++                    newStart = int.Parse(match.Groups[3].Value);
++                    newCount = match.Groups[4].Success ? int.Parse(match.Groups[4].Value) : 1;
++                    headerContext = match.Groups[5].Value.Trim();
++                    hunkLines = [];
++                    oldLine = oldStart;
++                    newLine = newStart;
++                    continue;
++                }
++
++                // Inside a hunk: classify the body line and assign its line numbers.
++                if (hunkLines is not null)
++                {
++                    if (line.Length > 2 && line[1] == '\\') // "\ No newline at end of file" — not a real line.
++                        continue;
++
++                    switch (line[0])
++                    {
++                        case '+':
++                            hunkLines.Add(new DiffLine(DiffLineKind.Added, null, newLine, line[1..]));
++                            newLine++;
++                            break;
++                        case '-':
++                            hunkLines.Add(new DiffLine(DiffLineKind.Removed, oldLine, null, line[1..]));
++                            oldLine++;
++                            break;
++                        default: // ' ' context line
++                            hunkLines.Add(new DiffLine(DiffLineKind.Context, oldLine, newLine, line[1..]));
++                            oldLine++;
++                            newLine++;
++                            break;
++                    }
++                    continue;
++                }
++
++                // File header region (before the first hunk).
++                if (line.StartsWith("new file mode"))
++                    changeType = DiffChangeType.Added;
++                else if (line.StartsWith("deleted file mode"))
++                    changeType = DiffChangeType.Deleted;
++                else if (line.StartsWith("rename from "))
++                {
++                    changeType = DiffChangeType.Renamed;
++                    oldPath = StripPrefix(line["rename from ".Length..]);
++                }
++                else if (line.StartsWith("rename to "))
++                {
++                    changeType = DiffChangeType.Renamed;
++                    newPath = StripPrefix(line["rename to ".Length..]);
++                }
++                else if (line.StartsWith("--- "))
++                    oldPath = ParseHeaderPath(line[4..]);
++                else if (line.StartsWith("+++ "))
++                    newPath = ParseHeaderPath(line[4..]);
++            }
++
++            EndFile();
++            return new ParsedDiff(files);
++        }
++
++        // Parses a path from a `---`/`+++` header line: drops trailing metadata,
++        // maps /dev/null to null, and strips the a//b/ prefix.
++        private static string? ParseHeaderPath(string raw)
++        {
++            var path = raw.Trim();
++            var tab = path.IndexOf('\t');
++            if (tab >= 0)
++                path = path[..tab];
++            return path == "/dev/null" ? null : StripPrefix(path);
++        }
++
++        private static string StripPrefix(string path) =>
++            path.StartsWith("a/") || path.StartsWith("b/") ? path[2..] : path;
++    }
++}
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/DiffSourceFactory.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/DiffSourceFactory.cs
+new file mode 100644
+index 0000000..dc47dd9
+--- /dev/null
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Core/DiffSourceFactory.cs
+@@ -0,0 +1,23 @@
++namespace CodeReviewerAgent.Core
++{
++    /// <summary>
++    /// Selects the <see cref="IDiffSource"/> from the command-line arguments:
++    /// <list type="bullet">
++    ///   <item><c>pr &lt;number&gt;</c> — a real pull request</item>
++    ///   <item><c>staged</c> — the staged changes</item>
++    ///   <item><c>files &lt;path&gt; [path...]</c> — specific files</item>
++    ///   <item><i>(no args)</i> — the local repository (staged if any, else HEAD)</item>
++    /// </list>
++    /// </summary>
++    public static class DiffSourceFactory
++    {
++        public static IDiffSource Create(string[] args) => args switch
++        {
++            ["pr", var prArg, ..] when int.TryParse(prArg, out var prNumber)
++                => new PullRequestDiffSource(prNumber),
++            ["staged", ..] => new StagedDiffSource(),
++            ["files", .. var paths] => new FilesDiffSource(paths),
++            _ => new LocalDiffSource(),
++        };
++    }
++}
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/FilesDiffSource.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/FilesDiffSource.cs
+new file mode 100644
+index 0000000..7635939
+--- /dev/null
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Core/FilesDiffSource.cs
+@@ -0,0 +1,19 @@
++namespace CodeReviewerAgent.Core
++{
++    /// <summary>
++    /// The diff of one or more specific files against the last commit (HEAD).
++    /// </summary>
++    public class FilesDiffSource : IDiffSource
++    {
++        private readonly IReadOnlyList<string> _paths;
++
++        public FilesDiffSource(IReadOnlyList<string> paths)
++        {
++            if (paths.Count == 0)
++                throw new ArgumentException("At least one file path is required.", nameof(paths));
++            _paths = paths;
++        }
++
++        public string GetDiff() => ProcessRunner.Run("git", ["diff", "HEAD", "--", .. _paths]);
++    }
++}
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/LocalDiffSource.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/LocalDiffSource.cs
+index 54da483..965de56 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Core/LocalDiffSource.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Core/LocalDiffSource.cs
+@@ -1,10 +1,19 @@
+ namespace CodeReviewerAgent.Core
+ {
+     /// <summary>
+-    /// The diff of the local working tree against the last commit (HEAD).
++    /// The diff of the local repository. Prefers the staged changes when there are
++    /// any; otherwise falls back to the working tree against the last commit (HEAD).
+     /// </summary>
+     public class LocalDiffSource : IDiffSource
+     {
+-        public string GetDiff() => ProcessRunner.Run("git", "diff HEAD");
++        private readonly StagedDiffSource _staged = new();
++
++        public string GetDiff()
++        {
++            var staged = _staged.GetDiff();
++            return string.IsNullOrWhiteSpace(staged)
++                ? ProcessRunner.Run("git", "diff HEAD")
++                : staged;
++        }
+     }
+ }
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/ParsedDiff.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/ParsedDiff.cs
+new file mode 100644
+index 0000000..00087da
+--- /dev/null
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Core/ParsedDiff.cs
+@@ -0,0 +1,57 @@
++namespace CodeReviewerAgent.Core
++{
++    public enum DiffChangeType
++    {
++        Added,
++        Modified,
++        Deleted,
++        Renamed,
++    }
++
++    public enum DiffLineKind
++    {
++        Context,
++        Added,
++        Removed,
++    }
++
++    /// <summary>
++    /// A single line inside a hunk. <see cref="OldLineNumber"/> is null for added
++    /// lines and <see cref="NewLineNumber"/> is null for removed lines.
++    /// </summary>
++    public sealed record DiffLine(
++        DiffLineKind Kind,
++        int? OldLineNumber,
++        int? NewLineNumber,
++        string Text);
++
++    /// <summary>
++    /// A contiguous block of changes, as described by a <c>@@ -old +new @@</c> header.
++    /// </summary>
++    public sealed record Hunk(
++        int OldStart,
++        int OldCount,
++        int NewStart,
++        int NewCount,
++        string HeaderContext,
++        IReadOnlyList<DiffLine> Lines);
++
++    /// <summary>
++    /// The changes to a single file. <see cref="OldPath"/> is null for added files
++    /// and <see cref="NewPath"/> is null for deleted files.
++    /// </summary>
++    public sealed record DiffFile(
++        string? OldPath,
++        string? NewPath,
++        DiffChangeType ChangeType,
++        IReadOnlyList<Hunk> Hunks)
++    {
++        /// <summary>The file's current path, falling back to the old one when deleted.</summary>
++        public string? Path => NewPath ?? OldPath;
++    }
++
++    /// <summary>
++    /// A unified diff parsed into files, hunks, and lines with absolute line numbers.
++    /// </summary>
++    public sealed record ParsedDiff(IReadOnlyList<DiffFile> Files);
++}
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/ProcessRunner.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/ProcessRunner.cs
+index 6a35e1e..c765cec 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Core/ProcessRunner.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Core/ProcessRunner.cs
+@@ -19,6 +19,31 @@ namespace CodeReviewerAgent.Core
+                 CreateNoWindow = true,
+             };
+ 
++            return Run(fileName, startInfo, arguments);
++        }
++
++        /// <summary>
++        /// Runs an external command with each argument passed separately, so values
++        /// containing spaces (e.g. user-supplied file paths) are escaped correctly.
++        /// </summary>
++        public static string Run(string fileName, params string[] arguments)
++        {
++            var startInfo = new ProcessStartInfo
++            {
++                FileName = fileName,
++                RedirectStandardOutput = true,
++                RedirectStandardError = true,
++                UseShellExecute = false,
++                CreateNoWindow = true,
++            };
++            foreach (var argument in arguments)
++                startInfo.ArgumentList.Add(argument);
++
++            return Run(fileName, startInfo, string.Join(' ', arguments));
++        }
++
++        private static string Run(string fileName, ProcessStartInfo startInfo, string argumentsForError)
++        {
+             using var process = Process.Start(startInfo)
+                 ?? throw new InvalidOperationException($"Failed to start {fileName}.");
+             var output = process.StandardOutput.ReadToEnd();
+@@ -26,7 +51,7 @@ namespace CodeReviewerAgent.Core
+             process.WaitForExit();
+ 
+             if (process.ExitCode != 0)
+-                throw new InvalidOperationException($"`{fileName} {arguments}` failed: {error}");
++                throw new InvalidOperationException($"`{fileName} {argumentsForError}` failed: {error}");
+ 
+             return output;
+         }
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/StagedDiffSource.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/StagedDiffSource.cs
+new file mode 100644
+index 0000000..fa00c42
+--- /dev/null
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Core/StagedDiffSource.cs
+@@ -0,0 +1,10 @@
++namespace CodeReviewerAgent.Core
++{
++    /// <summary>
++    /// The diff of the changes staged in the index (`git diff --staged`).
++    /// </summary>
++    public class StagedDiffSource : IDiffSource
++    {
++        public string GetDiff() => ProcessRunner.Run("git", "diff --staged");
++    }
++}
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Tests/DiffParserTests.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Tests/DiffParserTests.cs
+new file mode 100644
+index 0000000..3608ab0
+--- /dev/null
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Tests/DiffParserTests.cs
+@@ -0,0 +1,166 @@
++using CodeReviewerAgent.Core;
++using Xunit;
++
++namespace CodeReviewerAgent.Tests
++{
++    public class DiffParserTests
++    {
++        private static string Diff(params string[] lines) => string.Join("\n", lines);
++
++        [Fact]
++        public void Parse_EmptyDiff_ReturnsNoFiles()
++        {
++            Assert.Empty(DiffParser.Parse("").Files);
++            Assert.Empty(DiffParser.Parse("   ").Files);
++        }
++
++        [Fact]
++        public void Parse_ModifiedFile_ResolvesPathsHunkAndLineNumbers()
++        {
++            var diff = Diff(
++                "diff --git a/src/App.cs b/src/App.cs",
++                "index 1111111..2222222 100644",
++                "--- a/src/App.cs",
++                "+++ b/src/App.cs",
++                "@@ -1,3 +1,4 @@ namespace App",
++                " context",
++                "-removed",
++                "+added1",
++                "+added2",
++                " context2");
++
++            var file = Assert.Single(DiffParser.Parse(diff).Files);
++            Assert.Equal(DiffChangeType.Modified, file.ChangeType);
++            Assert.Equal("src/App.cs", file.Path);
++
++            var hunk = Assert.Single(file.Hunks);
++            Assert.Equal(1, hunk.NewStart);
++            Assert.Equal(4, hunk.NewCount);
++            Assert.Equal("namespace App", hunk.HeaderContext);
++
++            // Added lines land on the right absolute new-file line numbers.
++            var added = hunk.Lines.Where(l => l.Kind == DiffLineKind.Added).ToList();
++            Assert.Equal(["added1", "added2"], added.Select(l => l.Text));
++            Assert.Equal([2, 3], added.Select(l => l.NewLineNumber));
++
++            var removed = Assert.Single(hunk.Lines, l => l.Kind == DiffLineKind.Removed);
++            Assert.Equal(2, removed.OldLineNumber);
++            Assert.Null(removed.NewLineNumber);
++        }
++
++        [Fact]
++        public void Parse_AddedFile_HasNullOldPathAndAddedChangeType()
++        {
++            var diff = Diff(
++                "diff --git a/New.cs b/New.cs",
++                "new file mode 100644",
++                "index 0000000..3333333",
++                "--- /dev/null",
++                "+++ b/New.cs",
++                "@@ -0,0 +1,2 @@",
++                "+line one",
++                "+line two");
++
++            var file = Assert.Single(DiffParser.Parse(diff).Files);
++            Assert.Equal(DiffChangeType.Added, file.ChangeType);
++            Assert.Null(file.OldPath);
++            Assert.Equal("New.cs", file.NewPath);
++            Assert.Equal([1, 2], Assert.Single(file.Hunks).Lines.Select(l => l.NewLineNumber));
++        }
++
++        [Fact]
++        public void Parse_DeletedFile_HasNullNewPathAndDeletedChangeType()
++        {
++            var diff = Diff(
++                "diff --git a/Old.cs b/Old.cs",
++                "deleted file mode 100644",
++                "index 4444444..0000000",
++                "--- a/Old.cs",
++                "+++ /dev/null",
++                "@@ -1,2 +0,0 @@",
++                "-line one",
++                "-line two");
++
++            var file = Assert.Single(DiffParser.Parse(diff).Files);
++            Assert.Equal(DiffChangeType.Deleted, file.ChangeType);
++            Assert.Equal("Old.cs", file.OldPath);
++            Assert.Null(file.NewPath);
++        }
++
++        [Fact]
++        public void Parse_RenamedFile_CapturesBothPaths()
++        {
++            var diff = Diff(
++                "diff --git a/Old.cs b/New.cs",
++                "similarity index 100%",
++                "rename from Old.cs",
++                "rename to New.cs");
++
++            var file = Assert.Single(DiffParser.Parse(diff).Files);
++            Assert.Equal(DiffChangeType.Renamed, file.ChangeType);
++            Assert.Equal("Old.cs", file.OldPath);
++            Assert.Equal("New.cs", file.NewPath);
++            Assert.Empty(file.Hunks);
++        }
++
++        [Fact]
++        public void Parse_MultipleFilesAndHunks_AreAllCaptured()
++        {
++            var diff = Diff(
++                "diff --git a/A.cs b/A.cs",
++                "--- a/A.cs",
++                "+++ b/A.cs",
++                "@@ -1,1 +1,2 @@",
++                " a",
++                "+a2",
++                "@@ -10,1 +11,2 @@",
++                " b",
++                "+b2",
++                "diff --git a/B.cs b/B.cs",
++                "--- a/B.cs",
++                "+++ b/B.cs",
++                "@@ -5,0 +6,1 @@",
++                "+c");
++
++            var files = DiffParser.Parse(diff).Files;
++            Assert.Equal(2, files.Count);
++            Assert.Equal(2, files[0].Hunks.Count);
++            Assert.Equal(12, files[0].Hunks[1].Lines.Single(l => l.Kind == DiffLineKind.Added).NewLineNumber);
++            Assert.Equal("B.cs", files[1].Path);
++        }
++
++        [Fact]
++        public void Parse_HunkHeaderWithoutCounts_DefaultsToOne()
++        {
++            var diff = Diff(
++                "diff --git a/A.cs b/A.cs",
++                "--- a/A.cs",
++                "+++ b/A.cs",
++                "@@ -1 +1 @@",
++                "-old",
++                "+new");
++
++            var hunk = Assert.Single(Assert.Single(DiffParser.Parse(diff).Files).Hunks);
++            Assert.Equal(1, hunk.OldCount);
++            Assert.Equal(1, hunk.NewCount);
++        }
++
++        [Fact]
++        public void Parse_RemovedLineStartingWithDashes_IsNotMistakenForHeader()
++        {
++            var diff = Diff(
++                "diff --git a/A.cs b/A.cs",
++                "--- a/A.cs",
++                "+++ b/A.cs",
++                "@@ -1,1 +1,1 @@",
++                "--- old comment marker",
++                "+++ new comment marker");
++
++            var hunk = Assert.Single(Assert.Single(DiffParser.Parse(diff).Files).Hunks);
++            Assert.Equal(DiffLineKind.Removed, hunk.Lines[0].Kind);
++            Assert.Equal("-- old comment marker", hunk.Lines[0].Text);
++            Assert.Equal(DiffLineKind.Added, hunk.Lines[1].Kind);
++            Assert.Equal("++ new comment marker", hunk.Lines[1].Text);
++        }
++    }
++}
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Tests/DiffSourceFactoryTests.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Tests/DiffSourceFactoryTests.cs
+new file mode 100644
+index 0000000..bb5e4e3
+--- /dev/null
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Tests/DiffSourceFactoryTests.cs
+@@ -0,0 +1,44 @@
++using CodeReviewerAgent.Core;
++using Xunit;
++
++namespace CodeReviewerAgent.Tests
++{
++    public class DiffSourceFactoryTests
++    {
++        [Fact]
++        public void Create_WithNoArgs_ReturnsLocalDiffSource()
++        {
++            Assert.IsType<LocalDiffSource>(DiffSourceFactory.Create([]));
++        }
++
++        [Fact]
++        public void Create_WithPrAndNumber_ReturnsPullRequestDiffSource()
++        {
++            Assert.IsType<PullRequestDiffSource>(DiffSourceFactory.Create(["pr", "42"]));
++        }
++
++        [Fact]
++        public void Create_WithStaged_ReturnsStagedDiffSource()
++        {
++            Assert.IsType<StagedDiffSource>(DiffSourceFactory.Create(["staged"]));
++        }
++
++        [Fact]
++        public void Create_WithFilesAndPaths_ReturnsFilesDiffSource()
++        {
++            Assert.IsType<FilesDiffSource>(DiffSourceFactory.Create(["files", "a.cs", "b.cs"]));
++        }
++
++        [Fact]
++        public void Create_WithFilesButNoPaths_Throws()
++        {
++            Assert.Throws<ArgumentException>(() => DiffSourceFactory.Create(["files"]));
++        }
++
++        [Fact]
++        public void Create_WithPrButNonNumeric_FallsBackToLocalDiffSource()
++        {
++            Assert.IsType<LocalDiffSource>(DiffSourceFactory.Create(["pr", "abc"]));
++        }
++    }
++}

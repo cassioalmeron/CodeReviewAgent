@@ -1,0 +1,825 @@
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/CodeReviewer.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/CodeReviewer.cs
+index b23e7e3..078e75d 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Core/CodeReviewer.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Core/CodeReviewer.cs
+@@ -12,6 +12,13 @@ namespace CodeReviewerAgent.Core
+             Converters = { new JsonStringEnumConverter() },
+         };
+ 
++        private static readonly JsonSerializerOptions OutputJsonOptions = new()
++        {
++            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
++            WriteIndented = true,
++            Converters = { new JsonStringEnumConverter() },
++        };
++
+         private readonly ILlmClient _client;
+         private readonly string _diff;
+ 
+@@ -32,7 +39,7 @@ namespace CodeReviewerAgent.Core
+ 
+             // Send the diff to the LLM, using the versioned system prompt and a JSON
+             // schema so the model returns structured output (summary + findings).
+-            var promptVersion = Environment.GetEnvironmentVariable("PROMPT_VERSION") ?? "v1";
++            var promptVersion = Environment.GetEnvironmentVariable("PROMPT_VERSION") ?? "v2";
+             var systemPrompt = LoadSystemPrompt(promptVersion);
+             var requestBody = new
+             {
+@@ -55,7 +62,13 @@ namespace CodeReviewerAgent.Core
+                 .Select(b => b.Text));
+ 
+             var result = ParseResult(content);
+-            var findings = result.Findings ?? [];
++            var rawFindings = result.Findings ?? [];
++
++            // Ground each finding against the parsed diff: keep only those whose cited
++            // snippet matches an added line, deriving the real line number from it.
++            var parsedDiff = DiffParser.Parse(diff);
++            var findings = FindingValidator.Validate(rawFindings, parsedDiff);
++            var droppedFindings = rawFindings.Count - findings.Count;
+ 
+             if (!string.IsNullOrWhiteSpace(result.Summary))
+                 System.Console.WriteLine(result.Summary);
+@@ -77,12 +90,21 @@ namespace CodeReviewerAgent.Core
+                 cost_usd = cost,
+                 latency_ms = stopwatch.ElapsedMilliseconds,
+                 findings_count = findings.Count,
++                findings_dropped = droppedFindings,
+             });
+ 
+-            // Write the structured review to a file
+-            WriteReviewToFile(content);
++            var reviewResult = result with { Findings = findings };
++
++            // Write the validated review (with derived line numbers) to a file,
++            // plus a human-readable Markdown report.
++            WriteReviewToFile(reviewResult);
++            var metadata = new ReportMetadata(
++                engine, response?.Model, promptVersion, cost, stopwatch.ElapsedMilliseconds,
++                inputTokens, outputTokens, diff);
++            var reportPath = ReportGenerator.Save(reviewResult, metadata);
++            System.Console.WriteLine($"Report saved to {reportPath}");
+ 
+-            return result with { Findings = findings };
++            return reviewResult;
+         }
+ 
+         private static string LoadSystemPrompt(string version)
+@@ -109,13 +131,13 @@ namespace CodeReviewerAgent.Core
+                         properties = new
+                         {
+                             file = new { type = "string" },
+-                            line = new { type = "integer" },
++                            code_snippet = new { type = "string" },
+                             severity = new { type = "string", @enum = new[] { "info", "warning", "critical" } },
+                             category = new { type = "string", @enum = new[] { "bug", "security", "performance", "style", "maintainability" } },
+                             problem = new { type = "string" },
+                             suggestion = new { type = "string" },
+                         },
+-                        required = new[] { "file", "line", "severity", "category", "problem", "suggestion" },
++                        required = new[] { "file", "code_snippet", "severity", "category", "problem", "suggestion" },
+                         additionalProperties = false,
+                     },
+                 },
+@@ -146,12 +168,12 @@ namespace CodeReviewerAgent.Core
+                     $"  [{f.Severity}] {f.File}:{f.Line} ({f.Category}) — {f.Problem} -> {f.Suggestion}");
+         }
+ 
+-        private static void WriteReviewToFile(string content)
++        private static void WriteReviewToFile(ReviewResult result)
+         {
+             var directory = Path.Combine(AppContext.BaseDirectory, "reviews");
+             Directory.CreateDirectory(directory);
+             var path = Path.Combine(directory, $"review-{DateTime.UtcNow:yyyy-MM-dd-HHmmss}.json");
+-            File.WriteAllText(path, content);
++            File.WriteAllText(path, JsonSerializer.Serialize(result, OutputJsonOptions));
+             System.Console.WriteLine($"Review saved to {path}");
+         }
+     }
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/Finding.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/Finding.cs
+index be6c551..07f36d9 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Core/Finding.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Core/Finding.cs
+@@ -1,3 +1,5 @@
++using System.Text.Json.Serialization;
++
+ namespace CodeReviewerAgent.Core
+ {
+     public enum Severity
+@@ -17,15 +19,18 @@ namespace CodeReviewerAgent.Core
+     }
+ 
+     /// <summary>
+-    /// A single code-review finding returned by the LLM.
++    /// A single code-review finding. The LLM cites the affected line verbatim in
++    /// <see cref="CodeSnippet"/>; <see cref="Line"/> is not supplied by the model but
++    /// derived by matching the snippet against the parsed diff.
+     /// </summary>
+     public record Finding(
+         string? File,
+-        int? Line,
++        [property: JsonPropertyName("code_snippet")] string? CodeSnippet,
+         Severity? Severity,
+         Category? Category,
+         string? Problem,
+-        string? Suggestion);
++        string? Suggestion,
++        int? Line = null);
+ 
+     /// <summary>
+     /// The structured result of a review: an overall summary plus the findings.
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/FindingValidator.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/FindingValidator.cs
+new file mode 100644
+index 0000000..d8120f7
+--- /dev/null
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Core/FindingValidator.cs
+@@ -0,0 +1,65 @@
++namespace CodeReviewerAgent.Core
++{
++    /// <summary>
++    /// Grounds LLM findings against the parsed diff: a finding is kept only when its
++    /// cited <see cref="Finding.CodeSnippet"/> matches an <b>added</b> line of the file
++    /// it points to. The matching line's number becomes the finding's <see cref="Finding.Line"/>,
++    /// so the line is derived from the diff rather than trusted from the model.
++    /// </summary>
++    public static class FindingValidator
++    {
++        public static List<Finding> Validate(IReadOnlyList<Finding> findings, ParsedDiff diff)
++        {
++            var validated = new List<Finding>();
++            foreach (var finding in findings)
++            {
++                var line = ResolveAddedLine(finding, diff);
++                if (line is not null)
++                    validated.Add(finding with { Line = line });
++            }
++            return validated;
++        }
++
++        private static int? ResolveAddedLine(Finding finding, ParsedDiff diff)
++        {
++            if (finding.File is null || string.IsNullOrWhiteSpace(finding.CodeSnippet))
++                return null;
++
++            var snippet = Normalize(finding.CodeSnippet);
++            if (snippet.Length == 0)
++                return null;
++
++            var file = diff.Files.FirstOrDefault(f => PathMatches(f.Path, finding.File));
++            if (file is null)
++                return null;
++
++            foreach (var hunk in file.Hunks)
++                foreach (var diffLine in hunk.Lines)
++                {
++                    if (diffLine.Kind != DiffLineKind.Added)
++                        continue;
++
++                    var text = Normalize(diffLine.Text);
++                    if (text.Length > 0 && (text == snippet || text.Contains(snippet)))
++                        return diffLine.NewLineNumber;
++                }
++
++            return null;
++        }
++
++        private static bool PathMatches(string? filePath, string findingFile)
++        {
++            if (filePath is null)
++                return false;
++
++            var target = findingFile.Replace('\\', '/').Trim();
++            return filePath == target
++                || filePath.EndsWith('/' + target)
++                || target.EndsWith('/' + filePath);
++        }
++
++        // Collapses runs of whitespace so cosmetic indentation differences don't block a match.
++        private static string Normalize(string text) =>
++            string.Join(' ', text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
++    }
++}
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/ReportGenerator.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/ReportGenerator.cs
+new file mode 100644
+index 0000000..443e6d1
+--- /dev/null
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Core/ReportGenerator.cs
+@@ -0,0 +1,229 @@
++using System.Globalization;
++using System.Text;
++
++namespace CodeReviewerAgent.Core
++{
++    /// <summary>
++    /// Run metadata shown in the report header: which engine/model produced the
++    /// review, the prompt version used, the estimated cost, and the analyzed diff.
++    /// </summary>
++    public record ReportMetadata(
++        string? Engine,
++        string? Model,
++        string? PromptVersion,
++        decimal Cost,
++        long LatencyMs,
++        int InputTokens,
++        int OutputTokens,
++        string? Diff);
++
++    /// <summary>
++    /// Renders a <see cref="ReviewResult"/> as a human-readable Markdown report:
++    /// run metadata, a summary, then one section per analyzed file with its findings
++    /// and its slice of the diff.
++    /// </summary>
++    public static class ReportGenerator
++    {
++        /// <summary>
++        /// Builds the Markdown report for a review and returns it as a string.
++        /// </summary>
++        public static string Generate(ReviewResult result, ReportMetadata metadata)
++        {
++            var findings = result.Findings ?? [];
++            var fileDiffs = SplitDiffByFile(metadata.Diff);
++            var findingsByFile = findings
++                .GroupBy(f => f.File ?? "(unknown)")
++                .ToDictionary(g => g.Key, g => g.ToList());
++
++            // Files in diff order first, then any finding-only files not present in the diff.
++            var fileOrder = fileDiffs.Select(d => d.Path)
++                .Concat(findingsByFile.Keys)
++                .Distinct()
++                .ToList();
++
++            var report = new StringBuilder();
++
++            report.AppendLine("# Code Review Report");
++            report.AppendLine();
++            report.AppendLine($"_Generated {DateTime.UtcNow:yyyy-MM-dd HH:mm} UTC_");
++            report.AppendLine();
++
++            AppendMetadata(report, metadata, fileOrder.Count, findings.Count);
++
++            if (!string.IsNullOrWhiteSpace(result.Summary))
++            {
++                report.AppendLine("## Summary");
++                report.AppendLine();
++                report.AppendLine(result.Summary);
++                report.AppendLine();
++            }
++
++            if (fileOrder.Count == 0)
++            {
++                report.AppendLine("No files reviewed.");
++                return report.ToString();
++            }
++
++            foreach (var path in fileOrder)
++            {
++                var fileFindings = findingsByFile.GetValueOrDefault(path, []);
++                var diffText = fileDiffs.FirstOrDefault(d => d.Path == path).Text;
++                AppendFile(report, path, fileFindings, diffText);
++            }
++
++            return report.ToString();
++        }
++
++        /// <summary>
++        /// Generates the report and writes it to the reports directory, returning the file path.
++        /// </summary>
++        public static string Save(ReviewResult result, ReportMetadata metadata)
++        {
++            var directory = Path.Combine(AppContext.BaseDirectory, "reports");
++            Directory.CreateDirectory(directory);
++            var path = Path.Combine(directory, $"report-{DateTime.UtcNow:yyyy-MM-dd-HHmmss}.md");
++            File.WriteAllText(path, Generate(result, metadata));
++            return path;
++        }
++
++        private static void AppendMetadata(
++            StringBuilder report, ReportMetadata metadata, int fileCount, int findingsCount)
++        {
++            report.AppendLine("## Run details");
++            report.AppendLine();
++            report.AppendLine("| Setting | Value |");
++            report.AppendLine("|---------|-------|");
++            report.AppendLine($"| LLM Engine | {metadata.Engine ?? "—"} |");
++            report.AppendLine($"| Model | {metadata.Model ?? "—"} |");
++            report.AppendLine($"| Prompt version | {metadata.PromptVersion ?? "—"} |");
++            report.AppendLine($"| Cost | {metadata.Cost.ToString("$0.######", CultureInfo.InvariantCulture)} USD |");
++            report.AppendLine($"| Latency | {metadata.LatencyMs} ms |");
++            report.AppendLine($"| Input tokens | {metadata.InputTokens} |");
++            report.AppendLine($"| Output tokens | {metadata.OutputTokens} |");
++            report.AppendLine($"| Total tokens | {metadata.InputTokens + metadata.OutputTokens} |");
++            report.AppendLine($"| Files reviewed | {fileCount} |");
++            report.AppendLine($"| Findings | {findingsCount} |");
++            report.AppendLine();
++        }
++
++        private static void AppendFile(
++            StringBuilder report, string path, List<Finding> findings, string? diffText)
++        {
++            report.AppendLine($"## `{path}`");
++            report.AppendLine();
++
++            report.AppendLine($"### Findings ({findings.Count})");
++            report.AppendLine();
++            if (findings.Count == 0)
++            {
++                report.AppendLine("No findings. 🎉");
++                report.AppendLine();
++            }
++            else
++            {
++                AppendFindingsOverview(report, findings);
++                AppendFindingsDetails(report, findings);
++            }
++
++            if (!string.IsNullOrWhiteSpace(diffText))
++            {
++                report.AppendLine("### Diff");
++                report.AppendLine();
++                report.AppendLine("```diff");
++                report.AppendLine(diffText.TrimEnd());
++                report.AppendLine("```");
++                report.AppendLine();
++            }
++        }
++
++        private static void AppendFindingsOverview(StringBuilder report, List<Finding> findings)
++        {
++            report.AppendLine("| # | Severity | Category | Line |");
++            report.AppendLine("|---|----------|----------|------|");
++            for (var i = 0; i < findings.Count; i++)
++            {
++                var f = findings[i];
++                report.AppendLine($"| {i + 1} | {f.Severity} | {f.Category} | {f.Line?.ToString() ?? "—"} |");
++            }
++            report.AppendLine();
++        }
++
++        private static void AppendFindingsDetails(StringBuilder report, List<Finding> findings)
++        {
++            for (var i = 0; i < findings.Count; i++)
++            {
++                var f = findings[i];
++                var line = f.Line is { } l ? $"line {l}" : "—";
++                report.AppendLine($"#### {i + 1}. [{f.Severity}] {f.Category} — {line}");
++                report.AppendLine();
++                report.AppendLine($"**Problem:** {f.Problem}");
++                report.AppendLine();
++                report.AppendLine($"**Suggestion:** {f.Suggestion}");
++                report.AppendLine();
++
++                if (!string.IsNullOrWhiteSpace(f.CodeSnippet))
++                {
++                    report.AppendLine("```");
++                    report.AppendLine(f.CodeSnippet);
++                    report.AppendLine("```");
++                    report.AppendLine();
++                }
++            }
++        }
++
++        // Splits a unified diff into per-file blocks, keyed by the file path, preserving order.
++        private static List<(string Path, string Text)> SplitDiffByFile(string? diff)
++        {
++            var result = new List<(string Path, string Text)>();
++            if (string.IsNullOrWhiteSpace(diff))
++                return result;
++
++            var lines = diff.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
++            string? current = null;
++            var path = "(unknown)";
++
++            void Flush()
++            {
++                if (current is not null)
++                    result.Add((path, current));
++            }
++
++            foreach (var line in lines)
++            {
++                if (line.StartsWith("diff --git"))
++                {
++                    Flush();
++                    current = "";
++                    path = "(unknown)";
++                }
++
++                if (current is null)
++                    continue;
++
++                current += line + Environment.NewLine;
++
++                // Prefer the new path; fall back to the old path for deletions.
++                if (line.StartsWith("+++ "))
++                    path = ParsePath(line[4..]) ?? path;
++                else if (line.StartsWith("--- ") && path == "(unknown)")
++                    path = ParsePath(line[4..]) ?? path;
++            }
++
++            Flush();
++            return result;
++        }
++
++        // Parses a path from a `---`/`+++` header line: drops trailing metadata,
++        // maps /dev/null to null, and strips the a//b/ prefix.
++        private static string? ParsePath(string raw)
++        {
++            var path = raw.Trim();
++            var tab = path.IndexOf('\t');
++            if (tab >= 0)
++                path = path[..tab];
++            if (path == "/dev/null")
++                return null;
++            return path.StartsWith("a/") || path.StartsWith("b/") ? path[2..] : path;
++        }
++    }
++}
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Tests/CodeReviewerTests.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Tests/CodeReviewerTests.cs
+index a30edca..56593fe 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Tests/CodeReviewerTests.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Tests/CodeReviewerTests.cs
+@@ -18,15 +18,24 @@ namespace CodeReviewerAgent.Tests
+         }
+ 
+         [Fact]
+-        public void Review_WithValidDiff_SendsDiffToClientAndParsesFindings()
++        public void Review_WithValidDiff_DerivesLineFromSnippetAndKeepsGroundedFinding()
+         {
++            var diff = string.Join("\n",
++                "diff --git a/App.cs b/App.cs",
++                "--- a/App.cs",
++                "+++ b/App.cs",
++                "@@ -1,2 +1,3 @@",
++                " existing line",
++                "+var result = service.Process();",
++                " trailing line");
++
+             const string response = """
+                 {
+                     "summary": "One issue found.",
+                     "findings": [
+                         {
+-                            "file": "src/App.cs",
+-                            "line": 42,
++                            "file": "App.cs",
++                            "code_snippet": "var result = service.Process();",
+                             "severity": "warning",
+                             "category": "bug",
+                             "problem": "Possible null dereference.",
+@@ -37,17 +46,51 @@ namespace CodeReviewerAgent.Tests
+                 """;
+             var client = new FakeLlmClient(response);
+ 
+-            var result = new CodeReviewer(client, "diff --git a/App.cs b/App.cs").Review();
++            var result = new CodeReviewer(client, diff).Review();
+ 
+             Assert.NotNull(client.LastRequestBody);
+             Assert.Equal("One issue found.", result.Summary);
+             var finding = Assert.Single(result.Findings!);
+-            Assert.Equal("src/App.cs", finding.File);
+-            Assert.Equal(42, finding.Line);
++            Assert.Equal("App.cs", finding.File);
++            Assert.Equal(2, finding.Line); // derived from the snippet, not sent by the model
+             Assert.Equal(Severity.Warning, finding.Severity);
+             Assert.Equal(Category.Bug, finding.Category);
+         }
+ 
++        [Fact]
++        public void Review_WhenSnippetIsNotAnAddedLine_DropsTheFinding()
++        {
++            var diff = string.Join("\n",
++                "diff --git a/App.cs b/App.cs",
++                "--- a/App.cs",
++                "+++ b/App.cs",
++                "@@ -1,1 +1,2 @@",
++                " existing line",
++                "+var added = 1;");
++
++            // The model cites a line that does not exist among the added lines.
++            const string response = """
++                {
++                    "summary": "Hallucinated finding.",
++                    "findings": [
++                        {
++                            "file": "App.cs",
++                            "code_snippet": "var hallucinated = neverAdded();",
++                            "severity": "critical",
++                            "category": "bug",
++                            "problem": "Made-up problem.",
++                            "suggestion": "Made-up fix."
++                        }
++                    ]
++                }
++                """;
++            var client = new FakeLlmClient(response);
++
++            var result = new CodeReviewer(client, diff).Review();
++
++            Assert.Empty(result.Findings!);
++        }
++
+         [Fact]
+         public void Review_WhenClientReturnsInvalidJson_ReturnsEmptyResult()
+         {
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Tests/CostCalculatorTests.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Tests/CostCalculatorTests.cs
+new file mode 100644
+index 0000000..ddae030
+--- /dev/null
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Tests/CostCalculatorTests.cs
+@@ -0,0 +1,89 @@
++using CodeReviewerAgent.Core;
++using Xunit;
++
++namespace CodeReviewerAgent.Tests
++{
++    public class CostCalculatorTests
++    {
++        [Theory]
++        [InlineData("ollama")]
++        [InlineData("Ollama")]
++        [InlineData("")]
++        [InlineData(null)]
++        public void Estimate_NonClaudeEngine_IsFree(string? engine)
++        {
++            Assert.Equal(0m, CostCalculator.Estimate(engine, "claude-opus-4-8", 1_000_000, 1_000_000));
++        }
++
++        [Fact]
++        public void Estimate_ClaudeEngineWithNullModel_IsFree()
++        {
++            Assert.Equal(0m, CostCalculator.Estimate("claude", null, 1_000_000, 1_000_000));
++        }
++
++        [Fact]
++        public void Estimate_UnknownModel_IsFree()
++        {
++            Assert.Equal(0m, CostCalculator.Estimate("claude", "gpt-4o", 1_000_000, 1_000_000));
++        }
++
++        [Fact]
++        public void Estimate_KnownModel_PricesInputAndOutputTokens()
++        {
++            // opus pricing: $5 / 1M input, $25 / 1M output.
++            var cost = CostCalculator.Estimate("claude", "claude-opus-4-8", 2_000_000, 1_000_000);
++            Assert.Equal(35m, cost);
++        }
++
++        [Fact]
++        public void Estimate_EngineMatchIsCaseInsensitive()
++        {
++            var cost = CostCalculator.Estimate("Claude", "claude-opus-4-8", 1_000_000, 0);
++            Assert.Equal(5m, cost);
++        }
++
++        [Fact]
++        public void Estimate_ModelMatchIsCaseInsensitive()
++        {
++            var cost = CostCalculator.Estimate("claude", "CLAUDE-OPUS-4-8", 1_000_000, 0);
++            Assert.Equal(5m, cost);
++        }
++
++        [Fact]
++        public void Estimate_ModelMatchedAsSubstring()
++        {
++            // Full API model ids often carry a date suffix.
++            var cost = CostCalculator.Estimate("claude", "claude-haiku-4-5-20251001", 1_000_000, 1_000_000);
++            Assert.Equal(6m, cost);
++        }
++
++        [Theory]
++        [InlineData("claude-fable-5", 10, 50)]
++        [InlineData("claude-opus-4-8", 5, 25)]
++        [InlineData("claude-opus-4-7", 5, 25)]
++        [InlineData("claude-opus-4-6", 5, 25)]
++        [InlineData("claude-opus-4-5", 5, 25)]
++        [InlineData("claude-sonnet-4-6", 3, 15)]
++        [InlineData("claude-sonnet-4-5", 3, 15)]
++        [InlineData("claude-haiku-4-5", 1, 5)]
++        public void Estimate_EachKnownModel_UsesItsPricing(string model, int inputPrice, int outputPrice)
++        {
++            var cost = CostCalculator.Estimate("claude", model, 1_000_000, 1_000_000);
++            Assert.Equal(inputPrice + outputPrice, cost);
++        }
++
++        [Fact]
++        public void Estimate_ZeroTokens_IsFree()
++        {
++            Assert.Equal(0m, CostCalculator.Estimate("claude", "claude-opus-4-8", 0, 0));
++        }
++
++        [Fact]
++        public void Estimate_PartialMillionTokens_ProratesCost()
++        {
++            // 500k input @ $5/1M = $2.5; 100k output @ $25/1M = $2.5.
++            var cost = CostCalculator.Estimate("claude", "claude-opus-4-8", 500_000, 100_000);
++            Assert.Equal(5m, cost);
++        }
++    }
++}
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Tests/FindingValidatorTests.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Tests/FindingValidatorTests.cs
+new file mode 100644
+index 0000000..dda04d5
+--- /dev/null
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Tests/FindingValidatorTests.cs
+@@ -0,0 +1,74 @@
++using CodeReviewerAgent.Core;
++using Xunit;
++
++namespace CodeReviewerAgent.Tests
++{
++    public class FindingValidatorTests
++    {
++        // A diff that adds `var x = compute();` at new-file line 2.
++        private static ParsedDiff SampleDiff() => DiffParser.Parse(string.Join("\n",
++            "diff --git a/src/App.cs b/src/App.cs",
++            "--- a/src/App.cs",
++            "+++ b/src/App.cs",
++            "@@ -1,2 +1,3 @@",
++            " context before",
++            "+var x = compute();",
++            " context after"));
++
++        private static Finding Finding(string? file, string? snippet) =>
++            new(file, snippet, Severity.Warning, Category.Bug, "problem", "suggestion");
++
++        [Fact]
++        public void Validate_SnippetMatchingAddedLine_KeepsFindingWithDerivedLine()
++        {
++            var findings = new[] { Finding("src/App.cs", "var x = compute();") };
++
++            var result = FindingValidator.Validate(findings, SampleDiff());
++
++            var kept = Assert.Single(result);
++            Assert.Equal(2, kept.Line);
++        }
++
++        [Fact]
++        public void Validate_IgnoresLeadingAndTrailingWhitespaceDifferences()
++        {
++            var findings = new[] { Finding("src/App.cs", "   var x = compute();   ") };
++
++            var kept = Assert.Single(FindingValidator.Validate(findings, SampleDiff()));
++            Assert.Equal(2, kept.Line);
++        }
++
++        [Fact]
++        public void Validate_SnippetNotInDiff_DropsFinding()
++        {
++            var findings = new[] { Finding("src/App.cs", "var y = neverAdded();") };
++
++            Assert.Empty(FindingValidator.Validate(findings, SampleDiff()));
++        }
++
++        [Fact]
++        public void Validate_SnippetOnContextLine_DropsFinding()
++        {
++            // "context before" exists in the diff but is not an added line.
++            var findings = new[] { Finding("src/App.cs", "context before") };
++
++            Assert.Empty(FindingValidator.Validate(findings, SampleDiff()));
++        }
++
++        [Fact]
++        public void Validate_WrongFile_DropsFinding()
++        {
++            var findings = new[] { Finding("src/Other.cs", "var x = compute();") };
++
++            Assert.Empty(FindingValidator.Validate(findings, SampleDiff()));
++        }
++
++        [Fact]
++        public void Validate_MissingSnippet_DropsFinding()
++        {
++            var findings = new[] { Finding("src/App.cs", null), Finding("src/App.cs", "   ") };
++
++            Assert.Empty(FindingValidator.Validate(findings, SampleDiff()));
++        }
++    }
++}
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Tests/ReportGeneratorTests.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Tests/ReportGeneratorTests.cs
+new file mode 100644
+index 0000000..c13a569
+--- /dev/null
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Tests/ReportGeneratorTests.cs
+@@ -0,0 +1,121 @@
++using CodeReviewerAgent.Core;
++using Xunit;
++
++namespace CodeReviewerAgent.Tests
++{
++    public class ReportGeneratorTests
++    {
++        private static readonly ReportMetadata Metadata =
++            new("claude", "claude-opus-4-8", "v2", 0.001234m, 1234, 500, 200, null);
++
++        [Fact]
++        public void Generate_WithNoFilesOrFindings_RendersEmptyState()
++        {
++            var result = new ReviewResult("All good.", []);
++
++            var report = ReportGenerator.Generate(result, Metadata);
++
++            Assert.Contains("# Code Review Report", report);
++            Assert.Contains("## Summary", report);
++            Assert.Contains("All good.", report);
++            Assert.Contains("No files reviewed.", report);
++        }
++
++        [Fact]
++        public void Generate_RendersRunDetails()
++        {
++            var result = new ReviewResult("Summary.", []);
++
++            var report = ReportGenerator.Generate(result, Metadata);
++
++            Assert.Contains("## Run details", report);
++            Assert.Contains("| LLM Engine | claude |", report);
++            Assert.Contains("| Model | claude-opus-4-8 |", report);
++            Assert.Contains("| Prompt version | v2 |", report);
++            Assert.Contains("| Cost | $0.001234 USD |", report);
++            Assert.Contains("| Latency | 1234 ms |", report);
++            Assert.Contains("| Input tokens | 500 |", report);
++            Assert.Contains("| Output tokens | 200 |", report);
++            Assert.Contains("| Total tokens | 700 |", report);
++        }
++
++        [Fact]
++        public void Generate_GroupsFindingsAndDiffPerFile()
++        {
++            var diff = string.Join("\n",
++                "diff --git a/App.cs b/App.cs",
++                "--- a/App.cs",
++                "+++ b/App.cs",
++                "@@ -1,1 +1,2 @@",
++                " existing",
++                "+var x = service.Process();",
++                "diff --git a/Other.cs b/Other.cs",
++                "--- a/Other.cs",
++                "+++ b/Other.cs",
++                "@@ -1,1 +1,2 @@",
++                " existing",
++                "+var y = 1;");
++
++            var result = new ReviewResult("Two files.",
++            [
++                new Finding(
++                    File: "App.cs",
++                    CodeSnippet: "var x = service.Process();",
++                    Severity: Severity.Warning,
++                    Category: Category.Bug,
++                    Problem: "Possible null dereference.",
++                    Suggestion: "Add a null check.",
++                    Line: 2),
++            ]);
++            var metadata = Metadata with { Diff = diff };
++
++            var report = ReportGenerator.Generate(result, metadata);
++
++            Assert.Contains("| Files reviewed | 2 |", report);
++            Assert.Contains("| Findings | 1 |", report);
++
++            // App.cs: one finding plus its diff slice.
++            Assert.Contains("## `App.cs`", report);
++            Assert.Contains("### Findings (1)", report);
++            Assert.Contains("#### 1. [Warning] Bug — line 2", report);
++            Assert.Contains("**Problem:** Possible null dereference.", report);
++            Assert.Contains("var x = service.Process();", report);
++
++            // Other.cs: no findings but still its diff slice.
++            Assert.Contains("## `Other.cs`", report);
++            Assert.Contains("No findings.", report);
++            Assert.Contains("+var y = 1;", report);
++        }
++
++        [Fact]
++        public void Generate_PutsEachFilesDiffUnderItsOwnSection()
++        {
++            var diff = string.Join("\n",
++                "diff --git a/App.cs b/App.cs",
++                "--- a/App.cs",
++                "+++ b/App.cs",
++                "@@ -1,1 +1,2 @@",
++                " existing",
++                "+var x = 1;");
++            var result = new ReviewResult("Summary.", []);
++            var metadata = Metadata with { Diff = diff };
++
++            var report = ReportGenerator.Generate(result, metadata);
++
++            var fileHeader = report.IndexOf("## `App.cs`");
++            var diffHeader = report.IndexOf("### Diff");
++            Assert.True(fileHeader >= 0 && diffHeader > fileHeader);
++            Assert.Contains("```diff", report);
++        }
++
++        [Fact]
++        public void Generate_WithNullSummary_OmitsSummarySection()
++        {
++            var result = new ReviewResult(null, []);
++
++            var report = ReportGenerator.Generate(result, Metadata);
++
++            Assert.DoesNotContain("## Summary", report);
++        }
++    }
++}

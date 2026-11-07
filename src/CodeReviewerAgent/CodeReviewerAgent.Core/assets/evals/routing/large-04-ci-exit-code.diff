@@ -1,0 +1,771 @@
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Console/Program.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Console/Program.cs
+index 333aecc..c2ac728 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Console/Program.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Console/Program.cs
+@@ -248,13 +248,15 @@ static void RunAll()
+ static void RunGoldenSet(ILlmClient executor, string? executorModel, string? filter = null)
+ {
+     var repos = RepositoryFactory.Create();
++    var temperature = LlmClientFactory.ExecutorTemperature();
+ 
+     // Each paid round is made durable as it comes back, and a run that died halfway resumes
+     // instead of buying the same reviews twice. Wired here, not inside the evaluator: running
+     // the set stays free of I/O unless this layer asks for it. The model comes from the factory
+-    // that built the client, so what keys the resume is what will actually be called.
++    // that built the client, so what keys the resume is what will actually be called; the
++    // temperature keys it too, since a round sampled at 0 and one at the default differ.
+     var store = new FileGoldenRoundStore(
+-        FileGoldenRoundStore.DefaultPath, executorModel, Environment.GetEnvironmentVariable("SKILLS"));
++        FileGoldenRoundStore.DefaultPath, executorModel, Environment.GetEnvironmentVariable("SKILLS"), temperature);
+     if (store.ResumableCount > 0)
+         Console.WriteLine($"Resuming: {store.ResumableCount} round(s) already recorded for this configuration.");
+     else if (executorModel is null)
+@@ -287,8 +289,64 @@ static void RunGoldenSet(ILlmClient executor, string? executorModel, string? fil
+     foreach (var r in run.Results)
+         Console.WriteLine(GoldenEvaluatorReport.FormatLine(r, comparingSides));
+     Console.WriteLine(GoldenEvaluatorReport.FormatTotals(run.Results));
++
++    CheckBaseline(result, run, executorModel, temperature);
++}
++
++// Plan 015. GOLDEN_BASELINE compares the run with a stored baseline and fails the process when a case
++// regressed: this is the check CI runs. GOLDEN_BASELINE_WRITE stores this run as the new baseline:
++// this is how a change is accepted on purpose. Neither set, and `eval` is exactly what it was.
++static void CheckBaseline(GoldenRunResult result, GoldenScore run, string? executorModel, double? temperature)
++{
++    var comparePath = Setting("GOLDEN_BASELINE");
++    var writePath = Setting("GOLDEN_BASELINE_WRITE");
++    if (comparePath is null && writePath is null)
++        return;
++
++    // The baseline is for PROMPT_VERSION; a comparison run's other side is not its business.
++    var promptVersion = PromptVersions()[0];
++    var side = run.Results.Where(r => r.PromptVersion == promptVersion).ToList();
++    var configuration = new GoldenConfiguration(
++        executorModel ?? run.Reviews.Select(r => r.Model).FirstOrDefault(m => m is not null) ?? "unknown",
++        run.Condition.Setting,
++        promptVersion,
++        side.Max(r => r.Runs),
++        temperature);
++
++    // Compared before written, so setting both checks against the old baseline and then replaces it.
++    if (comparePath is not null)
++    {
++        var report = GoldenRegression.Compare(GoldenBaseline.Load(comparePath), configuration, side);
++        var markdown = report.ToMarkdown();
++        Console.WriteLine();
++        Console.WriteLine(markdown);
++
++        // On GitHub Actions this file becomes the run page's summary, so the table needs no download.
++        if (Setting("GITHUB_STEP_SUMMARY") is { } summary)
++            File.AppendAllText(summary, markdown);
++
++        if (report.Failed)
++            Console.WriteLine("Regression detected: see the table above.");
++    }
++
++    if (writePath is null)
++        return;
++
++    // A filtered run covers some cases only; as a baseline it would silently drop the others.
++    if (!result.WholeSet)
++    {
++        Console.Error.WriteLine("GOLDEN_BASELINE_WRITE ignored: a filtered run cannot be a baseline for the whole set.");
++        Environment.ExitCode = 1;
++        return;
++    }
++
++    GoldenBaseline.From(configuration, side).Save(writePath);
++    Console.WriteLine($"Baseline written to {writePath} ({configuration}).");
+ }
+ 
++static string? Setting(string name) =>
++    Environment.GetEnvironmentVariable(name) is { } value && !string.IsNullOrWhiteSpace(value) ? value : null;
++
+ static void ListSkills()
+ {
+     var (catalog, diagnostics) = SkillCatalog.Discover();
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/Golden/GoldenBaseline.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/Golden/GoldenBaseline.cs
+new file mode 100644
+index 0000000..37cb856
+--- /dev/null
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Core/Golden/GoldenBaseline.cs
+@@ -0,0 +1,50 @@
++using System.Text.Json;
++
++namespace CodeReviewerAgent.Core.Golden;
++
++/// <summary>
++/// The configuration a golden run was measured under. Two runs are comparable only when all of it
++/// matches: a different model, skills setting, prompt version, number of rounds or temperature answers a
++/// different question, and comparing across them would report the difference as a regression or an
++/// improvement.
++/// </summary>
++/// <param name="Temperature">The executor's temperature; null is the provider's default.</param>
++public sealed record GoldenConfiguration(
++    string Model, string Skills, string PromptVersion, int Runs, double? Temperature = null)
++{
++    public override string ToString() =>
++        $"model {Model}, skills {Skills}, prompt {PromptVersion}, {Runs} rounds, " +
++        (Temperature is { } value
++            ? $"temperature {value.ToString(System.Globalization.CultureInfo.InvariantCulture)}"
++            : "default temperature");
++}
++
++/// <summary>How one case went in the baseline run.</summary>
++public sealed record GoldenBaselineCase(int Successes, int CleanRounds);
++
++/// <summary>
++/// The reference a golden run is compared against in CI: how each case went, under one configuration.
++/// It is versioned beside <c>cases.json</c> because the CI runner starts empty, with no database, and
++/// because accepting a change on purpose should show up in the commit, as a diff of this file.
++/// </summary>
++public sealed record GoldenBaseline(GoldenConfiguration Configuration, IReadOnlyDictionary<string, GoldenBaselineCase> Cases)
++{
++    private static readonly JsonSerializerOptions JsonOptions = new()
++    {
++        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
++        PropertyNameCaseInsensitive = true,
++        WriteIndented = true,
++    };
++
++    /// <summary>The baseline a scored run would leave, one entry per case, ordered by name.</summary>
++    public static GoldenBaseline From(GoldenConfiguration configuration, IEnumerable<GoldenCaseResult> results) =>
++        new(configuration, new SortedDictionary<string, GoldenBaselineCase>(
++            results.ToDictionary(r => r.Name, r => new GoldenBaselineCase(r.Successes, r.CleanRounds)),
++            StringComparer.Ordinal));
++
++    public static GoldenBaseline Load(string path) =>
++        JsonSerializer.Deserialize<GoldenBaseline>(File.ReadAllText(path), JsonOptions)
++        ?? throw new InvalidOperationException($"The golden baseline at {path} is empty.");
++
++    public void Save(string path) => File.WriteAllText(path, JsonSerializer.Serialize(this, JsonOptions));
++}
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/Golden/GoldenRegression.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/Golden/GoldenRegression.cs
+new file mode 100644
+index 0000000..695cfb4
+--- /dev/null
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Core/Golden/GoldenRegression.cs
+@@ -0,0 +1,85 @@
++using System.Text;
++
++namespace CodeReviewerAgent.Core.Golden;
++
++/// <summary>One case of a run set against its baseline.</summary>
++/// <param name="BaselineCleanRounds">Null when the case is not in the baseline yet: reported, never failed.</param>
++public sealed record CaseComparison(string Name, int? BaselineCleanRounds, int CleanRounds, bool Regressed)
++{
++    public bool IsNew => BaselineCleanRounds is null;
++}
++
++/// <summary>
++/// The outcome of comparing a run with its baseline. It fails when the baseline belongs to another
++/// configuration, or when any case regressed.
++/// </summary>
++public sealed record RegressionReport(string? Mismatch, IReadOnlyList<CaseComparison> Cases)
++{
++    public bool Failed => Mismatch is not null || Cases.Any(c => c.Regressed);
++
++    public string ToMarkdown()
++    {
++        var text = new StringBuilder();
++        text.AppendLine("## Golden set regression");
++        text.AppendLine();
++
++        if (Mismatch is not null)
++        {
++            text.AppendLine($"**Not compared.** {Mismatch}");
++            return text.ToString();
++        }
++
++        text.AppendLine(Failed
++            ? "**Regression.** At least one case lost more clean rounds than the tolerance allows."
++            : "**No regression.**");
++        text.AppendLine();
++        text.AppendLine("| Case | Baseline | Now | Result |");
++        text.AppendLine("|---|---|---|---|");
++        foreach (var c in Cases)
++        {
++            var result = c.IsNew ? "new, not in the baseline" : c.Regressed ? "**regressed**" : "ok";
++            text.AppendLine($"| {c.Name} | {c.BaselineCleanRounds?.ToString() ?? "—"} | {c.CleanRounds} | {result} |");
++        }
++        return text.ToString();
++    }
++}
++
++/// <summary>
++/// US-014's rule: a change cannot make an old case worse. A case regresses when its clean rounds fall
++/// below the baseline by more than <see cref="Tolerance"/>.
++/// <para>
++/// Clean rounds, not detection, because they are ADR-015's measure of a case: found, quiet and exactly
++/// calibrated. A case that still finds the bug but starts adding noise has also got worse.
++/// </para>
++/// </summary>
++public static class GoldenRegression
++{
++    /// <summary>
++    /// Measured, not guessed (plan 015, phase 0): three identical runs of the CI configuration
++    /// (gpt-4o-mini, temperature 0, skills by globs, 5 rounds) left 12 of 15 cases identical and moved
++    /// the others by at most 2 clean rounds. With 1, two of six identical pairs would fail by chance;
++    /// with 2, none. A case therefore regresses when it loses 3 or more of its 5.
++    /// </summary>
++    public const int Tolerance = 2;
++
++    public static RegressionReport Compare(
++        GoldenBaseline baseline, GoldenConfiguration configuration, IEnumerable<GoldenCaseResult> results,
++        int tolerance = Tolerance)
++    {
++        if (baseline.Configuration != configuration)
++            return new RegressionReport(
++                $"The baseline was measured with {baseline.Configuration}; this run used {configuration}. " +
++                "Rewrite the baseline with GOLDEN_BASELINE_WRITE under the new configuration.",
++                []);
++
++        var cases = results
++            .Where(r => r.PromptVersion == configuration.PromptVersion)
++            .OrderBy(r => r.Name, StringComparer.Ordinal)
++            .Select(r => baseline.Cases.TryGetValue(r.Name, out var before)
++                ? new CaseComparison(r.Name, before.CleanRounds, r.CleanRounds, before.CleanRounds - r.CleanRounds > tolerance)
++                : new CaseComparison(r.Name, null, r.CleanRounds, false))
++            .ToList();
++
++        return new RegressionReport(null, cases);
++    }
++}
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Core/Golden/GoldenRoundStore.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Core/Golden/GoldenRoundStore.cs
+index 6124e8b..155d0c8 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Core/Golden/GoldenRoundStore.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Core/Golden/GoldenRoundStore.cs
+@@ -13,6 +13,12 @@ namespace CodeReviewerAgent.Core.Golden;
+ /// wrong rubric: wrong output that looks exactly like clean output. Null model means the
+ /// configuration could not be established, and matches nothing.
+ /// </para>
++/// <para>
++/// <see cref="Temperature"/> is the third condition (plan 015): a round sampled at the provider's
++/// default and one at 0 are different measurements. Null means the default, which is what every
++/// record written before <c>LLM_TEMPERATURE</c> existed was, so those stay reusable by default runs
++/// and are never offered to a run at 0.
++/// </para>
+ /// </summary>
+ public record GoldenRoundRecord(
+     string Case,
+@@ -20,7 +26,8 @@ public record GoldenRoundRecord(
+     int RunIndex,
+     string? Model,
+     string? Skills,
+-    ReviewResult Review);
++    ReviewResult Review,
++    double? Temperature = null);
+ 
+ /// <summary>
+ /// Durable record of the golden set's paid rounds. <see cref="GoldenEvaluator.Run"/> takes this
+@@ -62,6 +69,7 @@ public sealed class FileGoldenRoundStore : IGoldenRoundStore
+     private readonly string _path;
+     private readonly string? _model;
+     private readonly string? _skills;
++    private readonly double? _temperature;
+     private readonly Dictionary<(string, string, int), ReviewResult> _completed;
+     private readonly Lock _writeLock = new();
+ 
+@@ -72,12 +80,14 @@ public sealed class FileGoldenRoundStore : IGoldenRoundStore
+     /// model it is about to call has no business claiming a stored round was produced by it.
+     /// </param>
+     /// <param name="skills">The <c>SKILLS</c> setting, which is the run's other condition.</param>
+-    public FileGoldenRoundStore(string path, string? model, string? skills)
++    /// <param name="temperature">The executor's temperature; null is the provider's default.</param>
++    public FileGoldenRoundStore(string path, string? model, string? skills, double? temperature = null)
+     {
+         _path = path;
+         _model = model;
+         _skills = skills;
+-        _completed = model is null ? [] : LoadMatching(path, model, skills);
++        _temperature = temperature;
++        _completed = model is null ? [] : LoadMatching(path, model, skills, temperature);
+     }
+ 
+     /// <summary>How many rounds a previous run already paid for and this one can skip.</summary>
+@@ -88,7 +98,7 @@ public sealed class FileGoldenRoundStore : IGoldenRoundStore
+ 
+     public void Record(string caseName, string promptVersion, int runIndex, ReviewResult review)
+     {
+-        var record = new GoldenRoundRecord(caseName, promptVersion, runIndex, _model, _skills, review);
++        var record = new GoldenRoundRecord(caseName, promptVersion, runIndex, _model, _skills, review, _temperature);
+         var line = JsonSerializer.Serialize(record, Options);
+ 
+         lock (_writeLock)
+@@ -138,11 +148,11 @@ public sealed class FileGoldenRoundStore : IGoldenRoundStore
+     /// so a re-run of the same round under the same configuration reads as the newer answer.
+     /// </summary>
+     public static Dictionary<(string, string, int), ReviewResult> LoadMatching(
+-        string path, string model, string? skills)
++        string path, string model, string? skills, double? temperature = null)
+     {
+         var matching = new Dictionary<(string, string, int), ReviewResult>();
+         foreach (var record in Load(path))
+-            if (record.Model == model && record.Skills == skills)
++            if (record.Model == model && record.Skills == skills && record.Temperature == temperature)
+                 matching[(record.Case, record.PromptVersion, record.RunIndex)] = record.Review;
+         return matching;
+     }
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Infra/AnthropicClient.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Infra/AnthropicClient.cs
+index bfafede..b7ab556 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Infra/AnthropicClient.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Infra/AnthropicClient.cs
+@@ -5,7 +5,9 @@ using CodeReviewerAgent.Core.Llm;
+ 
+ namespace CodeReviewerAgent.Infra;
+ 
+-internal class AnthropicClient(IHttpTransport transport, string model) : ILlmClient
++/// <param name="temperature">Sent only when set; null leaves the provider's default, which is what
++/// every run did before <c>LLM_TEMPERATURE</c> existed.</param>
++internal class AnthropicClient(IHttpTransport transport, string model, double? temperature = null) : ILlmClient
+ {
+     public MessageResponse Request(object requestBody)
+     {
+@@ -28,6 +30,9 @@ internal class AnthropicClient(IHttpTransport transport, string model) : ILlmCli
+             };
+         }
+ 
++        if (temperature is { } value)
++            node["temperature"] = value;
++
+         var body = transport.Post("/v1/messages", node.ToJsonString());
+         return JsonSerializer.Deserialize<MessageResponse>(body)
+             ?? throw new InvalidOperationException("Empty response from Claude.");
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Infra/LlmClientFactory.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Infra/LlmClientFactory.cs
+index 9292da0..1962e86 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Infra/LlmClientFactory.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Infra/LlmClientFactory.cs
+@@ -23,13 +23,14 @@ public static class LlmClientFactory
+     {
+         var engine = Environment.GetEnvironmentVariable("LLM_ENGINE")
+             ?? throw new InvalidOperationException("LLM_ENGINE is not configured. Add it to the .env file.");
++        var temperature = ExecutorTemperature();
+ 
+         return engine.ToLowerInvariant() switch
+         {
+-            "ollama" => CreateOllama(),
+-            "claude" => CreateClaudeWithModel(null),
+-            "openai" => CreateOpenAi(),
+-            "openrouter" => CreateOpenRouter(),
++            "ollama" => CreateOllama(temperature),
++            "claude" => CreateClaudeWithModel(null, temperature),
++            "openai" => CreateOpenAi(temperature),
++            "openrouter" => CreateOpenRouter(temperature),
+             // These read CLAUDE_CODE_MODEL themselves and treat blank as "the CLI decides".
+             // Reading the same variable here reports what was asked for; blank stays null, which
+             // is the honest answer, because the choice is not visible from this side.
+@@ -40,6 +41,25 @@ public static class LlmClientFactory
+         };
+     }
+ 
++    /// <summary>
++    /// <c>LLM_TEMPERATURE</c>, for the executor only: the judge is built through
++    /// <see cref="CreateClaude"/> and keeps its own settings. Unset means the provider's default,
++    /// which is 1.0 on OpenAI and the setting that varies the answer most; the golden set in CI runs
++    /// at 0 so a change is measured against the model's past and not against its dice.
++    /// </summary>
++    public static double? ExecutorTemperature()
++    {
++        var configured = Environment.GetEnvironmentVariable("LLM_TEMPERATURE");
++        if (string.IsNullOrWhiteSpace(configured))
++            return null;
++
++        return double.TryParse(configured, System.Globalization.NumberStyles.Float,
++            System.Globalization.CultureInfo.InvariantCulture, out var value) && value >= 0
++            ? value
++            : throw new InvalidOperationException(
++                $"LLM_TEMPERATURE '{configured}' is not a non-negative number (use a dot: 0.2).");
++    }
++
+     private static string? CliModel()
+     {
+         var model = Environment.GetEnvironmentVariable("CLAUDE_CODE_MODEL");
+@@ -49,7 +69,7 @@ public static class LlmClientFactory
+     // Builds a Claude (Anthropic HTTP) client. The judge uses this with a stronger model.
+     public static ILlmClient CreateClaude(string? model = null) => CreateClaudeWithModel(model).Client;
+ 
+-    private static (ILlmClient Client, string? Model) CreateClaudeWithModel(string? model)
++    private static (ILlmClient Client, string? Model) CreateClaudeWithModel(string? model, double? temperature = null)
+     {
+         var apiKey = Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY")
+             ?? throw new InvalidOperationException("ANTHROPIC_API_KEY is not configured. Add it to the .env file.");
+@@ -65,10 +85,10 @@ public static class LlmClientFactory
+         http.DefaultRequestHeaders.Add("x-api-key", apiKey);
+         http.DefaultRequestHeaders.Add("anthropic-version", "2023-06-01");
+ 
+-        return (new AnthropicClient(Resilient(http), resolvedModel), resolvedModel);
++        return (new AnthropicClient(Resilient(http), resolvedModel, temperature), resolvedModel);
+     }
+ 
+-    private static (ILlmClient Client, string? Model) CreateOllama()
++    private static (ILlmClient Client, string? Model) CreateOllama(double? temperature)
+     {
+         var model = Environment.GetEnvironmentVariable("OLLAMA_MODEL")
+             ?? throw new InvalidOperationException("OLLAMA_MODEL is not configured. Add it to the .env file.");
+@@ -78,10 +98,10 @@ public static class LlmClientFactory
+         // retries a timeout from scratch: a limit sized for a hosted API would throw away minutes
+         // of local work on every attempt. Hosted engines keep their two minutes.
+         var http = new HttpClient { BaseAddress = new Uri(host), Timeout = TimeoutFrom("OLLAMA_TIMEOUT_SECONDS", 600) };
+-        return (new OllamaClient(Resilient(http), model), model);
++        return (new OllamaClient(Resilient(http), model, temperature), model);
+     }
+ 
+-    private static (ILlmClient Client, string? Model) CreateOpenAi()
++    private static (ILlmClient Client, string? Model) CreateOpenAi(double? temperature)
+     {
+         var apiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY")
+             ?? throw new InvalidOperationException("OPENAI_API_KEY is not configured. Add it to the .env file.");
+@@ -95,10 +115,10 @@ public static class LlmClientFactory
+         };
+         http.DefaultRequestHeaders.Add("Authorization", $"Bearer {apiKey}");
+ 
+-        return (new OpenAiClient(Resilient(http), model), model);
++        return (new OpenAiClient(Resilient(http), model, temperature), model);
+     }
+ 
+-    private static (ILlmClient Client, string? Model) CreateOpenRouter()
++    private static (ILlmClient Client, string? Model) CreateOpenRouter(double? temperature)
+     {
+         var apiKey = Environment.GetEnvironmentVariable("OPENROUTER_API_KEY")
+             ?? throw new InvalidOperationException("OPENROUTER_API_KEY is not configured. Add it to the .env file.");
+@@ -115,7 +135,7 @@ public static class LlmClientFactory
+         };
+         http.DefaultRequestHeaders.Add("Authorization", $"Bearer {apiKey}");
+ 
+-        return (new OpenRouterClient(Resilient(http), model), model);
++        return (new OpenRouterClient(Resilient(http), model, temperature), model);
+     }
+ 
+     // A per-request limit from the environment, falling back to the engine's own default.
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Infra/OllamaClient.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Infra/OllamaClient.cs
+index 4701323..f50db7c 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Infra/OllamaClient.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Infra/OllamaClient.cs
+@@ -6,7 +6,9 @@ using CodeReviewerAgent.Core.Llm;
+ 
+ namespace CodeReviewerAgent.Infra;
+ 
+-internal class OllamaClient(IHttpTransport transport, string model) : ILlmClient
++/// <param name="temperature">Sent only when set; null leaves the provider's default, which is what
++/// every run did before <c>LLM_TEMPERATURE</c> existed.</param>
++internal class OllamaClient(IHttpTransport transport, string model, double? temperature = null) : ILlmClient
+ {
+     public MessageResponse Request(object requestBody)
+     {
+@@ -37,6 +39,10 @@ internal class OllamaClient(IHttpTransport transport, string model) : ILlmClient
+             ["stream"] = false,
+         };
+ 
++        // Ollama takes sampling settings under "options", not at the top level.
++        if (temperature is { } value)
++            ollamaRequest["options"] = new JsonObject { ["temperature"] = value };
++
+         // Pass the JSON schema as Ollama's structured-output format.
+         if (anthropic.TryGetProperty("json_schema", out var schema))
+             ollamaRequest["format"] = JsonNode.Parse(schema.GetRawText());
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Infra/OpenAiClient.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Infra/OpenAiClient.cs
+index 56bac8c..640028c 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Infra/OpenAiClient.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Infra/OpenAiClient.cs
+@@ -6,7 +6,9 @@ using CodeReviewerAgent.Core.Llm;
+ 
+ namespace CodeReviewerAgent.Infra;
+ 
+-internal class OpenAiClient(IHttpTransport transport, string model) : ILlmClient
++/// <param name="temperature">Sent only when set; null leaves the provider's default, which is what
++/// every run did before <c>LLM_TEMPERATURE</c> existed.</param>
++internal class OpenAiClient(IHttpTransport transport, string model, double? temperature = null) : ILlmClient
+ {
+     public MessageResponse Request(object requestBody)
+     {
+@@ -38,6 +40,9 @@ internal class OpenAiClient(IHttpTransport transport, string model) : ILlmClient
+         if (anthropic.TryGetProperty("max_tokens", out var maxTokens))
+             openAiRequest["max_completion_tokens"] = maxTokens.GetInt32();
+ 
++        if (temperature is { } value)
++            openAiRequest["temperature"] = value;
++
+         // Structured output: OpenAI wraps the schema in response_format.json_schema (strict).
+         if (anthropic.TryGetProperty("json_schema", out var schema))
+         {
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Infra/OpenRouterClient.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Infra/OpenRouterClient.cs
+index 5f9d55b..0a325e8 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Infra/OpenRouterClient.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Infra/OpenRouterClient.cs
+@@ -5,7 +5,9 @@ using CodeReviewerAgent.Core.Llm;
+ 
+ namespace CodeReviewerAgent.Infra;
+ 
+-internal class OpenRouterClient(IHttpTransport transport, string model) : ILlmClient
++/// <param name="temperature">Sent only when set; null leaves the provider's default, which is what
++/// every run did before <c>LLM_TEMPERATURE</c> existed.</param>
++internal class OpenRouterClient(IHttpTransport transport, string model, double? temperature = null) : ILlmClient
+ {
+     public MessageResponse Request(object requestBody)
+     {
+@@ -42,6 +44,9 @@ internal class OpenRouterClient(IHttpTransport transport, string model) : ILlmCl
+         if (anthropic.TryGetProperty("max_tokens", out var maxTokens))
+             openRouterRequest["max_tokens"] = maxTokens.GetInt32();
+ 
++        if (temperature is { } value)
++            openRouterRequest["temperature"] = value;
++
+         // Structured output: same response_format.json_schema shape as OpenAI.
+         if (anthropic.TryGetProperty("json_schema", out var schema))
+         {
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Tests/GoldenRegressionTests.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Tests/GoldenRegressionTests.cs
+new file mode 100644
+index 0000000..cca7050
+--- /dev/null
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Tests/GoldenRegressionTests.cs
+@@ -0,0 +1,115 @@
++using CodeReviewerAgent.Core.Golden;
++using Xunit;
++
++namespace CodeReviewerAgent.Tests;
++
++public class GoldenRegressionTests
++{
++    private static readonly GoldenConfiguration Ci = new("gpt-4o-mini", "globs", "v3", 5, Temperature: 0);
++
++    private static GoldenCaseResult Case(string name, int cleanRounds, string promptVersion = "v3") =>
++        new(name, GoldenKind.Detection, null, promptVersion, Successes: 5, Runs: 5, MissDetail: null, CleanRounds: cleanRounds);
++
++    private static GoldenBaseline Baseline(params (string Name, int Clean)[] cases) =>
++        GoldenBaseline.From(Ci, cases.Select(c => Case(c.Name, c.Clean)));
++
++    [Fact]
++    public void Compare_TheSameRun_PassesEveryCase()
++    {
++        var report = GoldenRegression.Compare(Baseline(("sql-injection", 5), ("off-by-one", 4)), Ci,
++            [Case("sql-injection", 5), Case("off-by-one", 4)]);
++
++        Assert.False(report.Failed);
++        Assert.All(report.Cases, c => Assert.False(c.Regressed));
++    }
++
++    [Theory]
++    [InlineData(5, 4, false)] // one round down: within the tolerance
++    [InlineData(5, 3, false)] // two down: still what identical runs did in phase 0
++    [InlineData(5, 2, true)]  // three down: a regression
++    [InlineData(2, 5, false)] // better is never a regression
++    [InlineData(1, 0, false)]
++    public void Compare_FailsOnlyBeyondTheTolerance(int before, int now, bool regressed)
++    {
++        var report = GoldenRegression.Compare(Baseline(("sql-injection", before)), Ci, [Case("sql-injection", now)]);
++
++        Assert.Equal(regressed, report.Failed);
++        Assert.Equal(regressed, Assert.Single(report.Cases).Regressed);
++    }
++
++    [Fact]
++    public void Compare_ACaseMissingFromTheBaseline_IsReportedAndDoesNotFail()
++    {
++        var report = GoldenRegression.Compare(Baseline(("sql-injection", 5)), Ci,
++            [Case("sql-injection", 5), Case("brand-new-case", 0)]);
++
++        Assert.False(report.Failed);
++        Assert.True(report.Cases.Single(c => c.Name == "brand-new-case").IsNew);
++    }
++
++    [Fact]
++    public void Compare_ABaselineFromAnotherConfiguration_IsRefusedNotCompared()
++    {
++        var otherModel = Ci with { Model = "claude-haiku-4-5" };
++
++        var report = GoldenRegression.Compare(Baseline(("sql-injection", 5)), otherModel, [Case("sql-injection", 5)]);
++
++        Assert.True(report.Failed);
++        Assert.Contains("claude-haiku-4-5", report.Mismatch);
++        Assert.Empty(report.Cases);
++    }
++
++    [Fact]
++    public void Compare_ABaselineAtAnotherTemperature_IsRefused()
++    {
++        var atDefault = Ci with { Temperature = null };
++
++        var report = GoldenRegression.Compare(Baseline(("sql-injection", 5)), atDefault, [Case("sql-injection", 5)]);
++
++        Assert.True(report.Failed);
++        Assert.Contains("temperature 0", report.Mismatch);
++        Assert.Contains("default temperature", report.Mismatch);
++    }
++
++    [Fact]
++    public void Compare_OnlyLooksAtTheConfiguredPromptVersion()
++    {
++        // A comparison run carries both sides; the other version's collapse is not this baseline's business.
++        var report = GoldenRegression.Compare(Baseline(("sql-injection", 5)), Ci,
++            [Case("sql-injection", 5), Case("sql-injection", 0, promptVersion: "v5")]);
++
++        Assert.False(report.Failed);
++        Assert.Single(report.Cases);
++    }
++
++    [Fact]
++    public void Markdown_NamesTheRegressedCase()
++    {
++        var report = GoldenRegression.Compare(Baseline(("sql-injection", 5)), Ci, [Case("sql-injection", 2)]);
++
++        var markdown = report.ToMarkdown();
++        Assert.Contains("| sql-injection | 5 | 2 | **regressed** |", markdown);
++        Assert.Contains("**Regression.**", markdown);
++    }
++
++    [Fact]
++    public void Baseline_RoundTripsThroughItsFile()
++    {
++        var path = Path.Combine(Path.GetTempPath(), $"cra-baseline-{Guid.NewGuid():N}.json");
++        try
++        {
++            var written = Baseline(("sql-injection", 5), ("extension-block", 0));
++            written.Save(path);
++
++            var read = GoldenBaseline.Load(path);
++
++            Assert.Equal(Ci, read.Configuration);
++            Assert.Equal(new GoldenBaselineCase(5, 5), read.Cases["sql-injection"]);
++            Assert.Equal(new GoldenBaselineCase(5, 0), read.Cases["extension-block"]);
++        }
++        finally
++        {
++            File.Delete(path);
++        }
++    }
++}
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Tests/GoldenRoundStoreTests.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Tests/GoldenRoundStoreTests.cs
+index 689c7d6..237f08c 100644
+--- a/src/CodeReviewerAgent/CodeReviewerAgent.Tests/GoldenRoundStoreTests.cs
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Tests/GoldenRoundStoreTests.cs
+@@ -71,6 +71,32 @@ public class GoldenRoundStoreTests
+         finally { File.Delete(path); }
+     }
+ 
++    /// <summary>
++    /// A round sampled at the provider's default is not a round at temperature 0. Records written
++    /// before the temperature existed read as the default, so they never leak into a run at 0.
++    /// </summary>
++    [Fact]
++    public void Find_IgnoresRoundsFromAnotherTemperature()
++    {
++        var path = TempPath();
++        try
++        {
++            new FileGoldenRoundStore(path, "gpt-4o-mini", "globs")
++                .Record("sql-injection", "v3", 0, Review("at the default"));
++            new FileGoldenRoundStore(path, "gpt-4o-mini", "globs", temperature: 0)
++                .Record("sql-injection", "v3", 1, Review("at zero"));
++
++            var atZero = new FileGoldenRoundStore(path, "gpt-4o-mini", "globs", temperature: 0);
++            var atDefault = new FileGoldenRoundStore(path, "gpt-4o-mini", "globs");
++
++            Assert.Null(atZero.Find("sql-injection", "v3", 0));
++            Assert.Equal("at zero", atZero.Find("sql-injection", "v3", 1)!.Summary);
++            Assert.Equal("at the default", atDefault.Find("sql-injection", "v3", 0)!.Summary);
++            Assert.Null(atDefault.Find("sql-injection", "v3", 1));
++        }
++        finally { File.Delete(path); }
++    }
++
+     /// <summary>
+     /// A run that cannot name its own model cannot claim a stored round was produced by it. It
+     /// still records, so the work is not lost; it just refuses to resume.
+diff --git a/src/CodeReviewerAgent/CodeReviewerAgent.Tests/LlmTemperatureTests.cs b/src/CodeReviewerAgent/CodeReviewerAgent.Tests/LlmTemperatureTests.cs
+new file mode 100644
+index 0000000..27f49ec
+--- /dev/null
++++ b/src/CodeReviewerAgent/CodeReviewerAgent.Tests/LlmTemperatureTests.cs
+@@ -0,0 +1,91 @@
++using System.Text.Json.Nodes;
++using CodeReviewerAgent.Infra;
++using Xunit;
++
++namespace CodeReviewerAgent.Tests;
++
++/// <summary>
++/// The temperature reaches the provider only when it was asked for. Absent, the request is exactly
++/// what it was before <c>LLM_TEMPERATURE</c> existed, so every stored run stays comparable.
++/// </summary>
++[Collection(EnvironmentCollection.Name)]
++public class LlmTemperatureTests
++{
++    private static readonly object Request = new
++    {
++        max_tokens = 100,
++        system = "review",
++        messages = new[] { new { role = "user", content = "diff" } },
++    };
++
++    /// <summary>Keeps the last request body and answers with an empty completion in either shape.</summary>
++    private sealed class RecordingTransport : IHttpTransport
++    {
++        public JsonObject? Last { get; private set; }
++
++        public string Post(string path, string json)
++        {
++            Last = JsonNode.Parse(json)!.AsObject();
++            return """{"model":"m","choices":[{"message":{"content":"{}"}}],"message":{"content":"{}"},"content":[]}""";
++        }
++    }
++
++    [Fact]
++    public void OpenAi_SendsTheTemperature_OnlyWhenSet()
++    {
++        var withTemperature = new RecordingTransport();
++        new OpenAiClient(withTemperature, "gpt-4o-mini", 0).Request(Request);
++        var without = new RecordingTransport();
++        new OpenAiClient(without, "gpt-4o-mini").Request(Request);
++
++        Assert.Equal(0, withTemperature.Last!["temperature"]!.GetValue<double>());
++        Assert.False(without.Last!.ContainsKey("temperature"));
++    }
++
++    [Fact]
++    public void Ollama_SendsTheTemperature_UnderOptions()
++    {
++        var transport = new RecordingTransport();
++
++        new OllamaClient(transport, "qwen3:8b", 0.2).Request(Request);
++
++        Assert.Equal(0.2, transport.Last!["options"]!["temperature"]!.GetValue<double>());
++        Assert.False(transport.Last.ContainsKey("temperature"));
++    }
++
++    [Theory]
++    [InlineData(null, null)]
++    [InlineData("", null)]
++    [InlineData("0", 0.0)]
++    [InlineData("0.7", 0.7)]
++    public void ExecutorTemperature_ReadsTheVariable(string? configured, double? expected)
++    {
++        var previous = Environment.GetEnvironmentVariable("LLM_TEMPERATURE");
++        try
++        {
++            Environment.SetEnvironmentVariable("LLM_TEMPERATURE", configured);
++            Assert.Equal(expected, LlmClientFactory.ExecutorTemperature());
++        }
++        finally
++        {
++            Environment.SetEnvironmentVariable("LLM_TEMPERATURE", previous);
++        }
++    }
++
++    [Theory]
++    [InlineData("hot")]
++    [InlineData("-1")]
++    public void ExecutorTemperature_RejectsWhatIsNotATemperature(string configured)
++    {
++        var previous = Environment.GetEnvironmentVariable("LLM_TEMPERATURE");
++        try
++        {
++            Environment.SetEnvironmentVariable("LLM_TEMPERATURE", configured);
++            Assert.Throws<InvalidOperationException>(() => LlmClientFactory.ExecutorTemperature());
++        }
++        finally
++        {
++            Environment.SetEnvironmentVariable("LLM_TEMPERATURE", previous);
++        }
++    }
++}
