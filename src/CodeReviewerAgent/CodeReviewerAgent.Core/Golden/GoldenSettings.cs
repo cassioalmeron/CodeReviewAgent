@@ -23,6 +23,7 @@ namespace CodeReviewerAgent.Core.Golden;
 /// <param name="SkillPromptVersion">Which versioned skill prompts the rounds use (<c>SKILL_PROMPT_VERSION</c>).</param>
 /// <param name="Pattern">How the rounds review (<c>REVIEW_PATTERN</c>); it is also recorded on the run.</param>
 /// <param name="Set">Which eval set the run reviews (<c>--set</c>); the golden set when none is named.</param>
+/// <param name="AdvisorEngine">The advisor's engine name, for estimating its cost when the client reports none (<c>ADVISOR_ENGINE</c>).</param>
 public sealed record GoldenSettings(
     int Runs = 3,
     int Parallelism = 4,
@@ -30,9 +31,10 @@ public sealed record GoldenSettings(
     string? Engine = null,
     string SkillPromptVersion = Skill.SkillPrompt.DefaultVersion,
     string Pattern = ReviewSettings.SinglePattern,
-    string Set = GoldenEvaluator.GoldenSet)
+    string Set = GoldenEvaluator.GoldenSet,
+    string? AdvisorEngine = null)
 {
     /// <summary>The settings one side of the run reviews under.</summary>
     public ReviewSettings Review(string promptVersion) =>
-        new(promptVersion, Engine, SkillPromptVersion, Skills, Pattern);
+        new(promptVersion, Engine, SkillPromptVersion, Skills, Pattern, AdvisorEngine);
 }

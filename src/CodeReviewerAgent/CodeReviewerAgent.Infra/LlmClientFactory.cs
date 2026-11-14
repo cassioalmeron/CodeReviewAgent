@@ -19,10 +19,32 @@ public static class LlmClientFactory
     /// to whatever the CLI itself picks — and null must match no configuration, never any.
     /// </para>
     /// </summary>
-    public static (ILlmClient Client, string? Model) CreateWithModel()
+    public static (ILlmClient Client, string? Model) CreateWithModel() => CreateEngine("LLM_ENGINE");
+
+    /// <summary>
+    /// The advisor's client: the engine named by <c>ADVISOR_ENGINE</c>, with that engine's own model
+    /// variable, so the advisor can sit on another provider than the executor. It takes the executor's
+    /// temperature, <c>LLM_TEMPERATURE</c>, because the hints are part of what the second review is
+    /// measured on and a run pinned at 0 should not vary through the advisor.
+    /// </summary>
+    public static ILlmClient CreateAdvisor() => CreateEngine("ADVISOR_ENGINE").Client;
+
+    /// <summary>
+    /// The advisor's client when <paramref name="reviewPattern"/> is the advisor pattern, null under any
+    /// other. Under another pattern <c>ADVISOR_ENGINE</c> is not even read, so a leftover value cannot
+    /// break a review that never escalates.
+    /// </summary>
+    public static ILlmClient? CreateAdvisorFor(string reviewPattern) =>
+        string.Equals(reviewPattern, ReviewSettings.AdvisorPattern, StringComparison.OrdinalIgnoreCase)
+            ? CreateAdvisor()
+            : null;
+
+    // The engine comes from the named variable and the rest from that engine's own variables, so the
+    // executor and the advisor share every creator below.
+    private static (ILlmClient Client, string? Model) CreateEngine(string engineVariable)
     {
-        var engine = Environment.GetEnvironmentVariable("LLM_ENGINE")
-            ?? throw new InvalidOperationException("LLM_ENGINE is not configured. Add it to the .env file.");
+        var engine = Environment.GetEnvironmentVariable(engineVariable)
+            ?? throw new InvalidOperationException($"{engineVariable} is not configured. Add it to the .env file.");
         var temperature = ExecutorTemperature();
 
         return engine.ToLowerInvariant() switch
@@ -37,7 +59,7 @@ public static class LlmClientFactory
             "claude-code" => (new ClaudeCodeClient(), CliModel()),
             "claude-cli" => (new ClaudeCliClient(), CliModel()),
             _ => throw new InvalidOperationException(
-                $"Unknown LLM_ENGINE '{engine}'. Supported values: 'ollama', 'claude', 'openai', 'openrouter', 'claude-code', 'claude-cli'."),
+                $"Unknown {engineVariable} '{engine}'. Supported values: 'ollama', 'claude', 'openai', 'openrouter', 'claude-code', 'claude-cli'."),
         };
     }
 

@@ -34,14 +34,15 @@ from the executable and loads every one it finds, nearest first, never overwriti
 set, and a variable already exported in the shell wins over every file. Start from the configuration
 template at the repository root, described in the Readme's Configuration section.
 
-Four variables decide what a command does and what it costs:
+These variables decide what a command does and what it costs:
 
 | Variable | What it decides |
 |---|---|
 | `LLM_ENGINE` | which provider is called; `ollama` and the Claude subscription engines cost nothing per call |
 | `PROMPT_VERSION` | which file under `assets/prompts/` is sent as the system prompt |
 | `STORAGE` | where reviews and assessments are written |
-| `REVIEW_PATTERN` | `single`, the default, is one call to the model; `voting` is four parallel reviews, one per subject, merged. Voting multiplies the cost of a review by about four, so it is never the default and is not what CI runs |
+| `REVIEW_PATTERN` | `single`, the default, is one call to the model; `voting` is four parallel reviews, one per subject, merged. Voting multiplies the cost of a review by about four, so it is never the default and is not what CI runs; `advisor` is one review, and when it has no Bug and no Security finding a stronger model says where to look and the review is made again with those hints. It needs `ADVISOR_ENGINE` and is not what CI runs |
+| `ADVISOR_ENGINE` | read only when `REVIEW_PATTERN=advisor`: the engine of the advisor model, with the same values as `LLM_ENGINE` and that engine's own model variable (`OPENROUTER_MODEL` for `openrouter`). Name an engine other than `LLM_ENGINE`: two models on one engine would read the same model variable. A run under `advisor` without it stops with a message naming it |
 
 **One warning about running anything with `dotnet run`.** The Console has a `launchSettings.json`,
 and `dotnet run` applies its first profile when none is asked for. That profile sets `SKILLS`, and a

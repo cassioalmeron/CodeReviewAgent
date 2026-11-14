@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using CodeReviewerAgent.Core.Advisor;
 
 namespace CodeReviewerAgent.Core;
 
@@ -67,6 +68,9 @@ public record Finding(
 /// Kept apart from <paramref name="DiscardedFindings"/>, which means the cited line is not in the diff.
 /// Always zero for a single review.
 /// </param>
+/// <param name="Advisor">
+/// What the advisor pattern did with this review, null under any other pattern.
+/// </param>
 public record ReviewResult(
     string? Summary,
     List<Finding>? Findings,
@@ -80,4 +84,5 @@ public record ReviewResult(
     string? Diff = null,
     string? Skills = null,
     int DiscardedFindings = 0,
-    int OutOfScopeFindings = 0);
+    int OutOfScopeFindings = 0,
+    AdvisorTrace? Advisor = null);

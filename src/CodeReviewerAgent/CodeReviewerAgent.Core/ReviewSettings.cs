@@ -30,19 +30,28 @@ namespace CodeReviewerAgent.Core;
 /// <param name="Pattern">
 /// How the review is made (<c>REVIEW_PATTERN</c>): <c>single</c>, the default, is one call to the
 /// model; <c>voting</c> is four parallel reviews, one per subject, merged. Voting multiplies the
-/// cost of a review by about four, so it is never the default.
+/// cost of a review by about four, so it is never the default; <c>advisor</c> is one review, and when
+/// it shows no Bug and no Security finding a stronger model says where to look and the review is
+/// made again with those hints.
+/// </param>
+/// <param name="AdvisorEngine">
+/// The advisor's engine name (<c>ADVISOR_ENGINE</c>), used only to estimate the advisor call's cost
+/// when the client does not report one. Null estimates nothing.
 /// </param>
 public sealed record ReviewSettings(
     string PromptVersion,
     string? Engine = null,
     string SkillPromptVersion = "v1",
     string? Skills = null,
-    string Pattern = ReviewSettings.SinglePattern)
+    string Pattern = ReviewSettings.SinglePattern,
+    string? AdvisorEngine = null)
 {
     public const string SinglePattern = "single";
     public const string VotingPattern = "voting";
+    public const string AdvisorPattern = "advisor";
 
     public static bool IsKnownPattern(string pattern) =>
         string.Equals(pattern, SinglePattern, StringComparison.OrdinalIgnoreCase)
-        || string.Equals(pattern, VotingPattern, StringComparison.OrdinalIgnoreCase);
+        || string.Equals(pattern, VotingPattern, StringComparison.OrdinalIgnoreCase)
+        || string.Equals(pattern, AdvisorPattern, StringComparison.OrdinalIgnoreCase);
 }

@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using CodeReviewerAgent.Core.Advisor;
 using CodeReviewerAgent.Core.Diff;
 using CodeReviewerAgent.Core.Llm;
 using CodeReviewerAgent.Core.Skill;
@@ -15,7 +16,14 @@ public class CodeReviewer
         Converters = { new JsonStringEnumConverter() },
     };
 
+    private const string AdvisorPrompt = "advisor-v1";
+    private const string AdvisorHintsPrompt = "advisor-hints-v1";
+
+    // Out of the 16000-token budget this leaves 4000 for the answer, so a model that reasons long still replies.
+    private const int AdvisorReasoningMaxTokens = 12000;
+
     private readonly ILlmClient _client;
+    private readonly ILlmClient? _advisor;
     private readonly string _diff;
     private readonly ReviewSettings _settings;
     private readonly ISkillSelector _skillSelector;
@@ -32,18 +40,26 @@ public class CodeReviewer
     /// review. Everything the caller can see in the returned result is left for the caller to
     /// report; null stays silent, which is what the golden set's parallel rounds want.
     /// </param>
+    /// <param name="advisor">
+    /// The stronger model that tells the second review where to look. Required, and used, only under
+    /// the advisor pattern.
+    /// </param>
     public CodeReviewer(
         ILlmClient client, string diff, ReviewSettings settings,
         ISkillSelector? skillSelector = null, ISkillSource? skills = null,
-        IProgress<string>? progress = null)
+        IProgress<string>? progress = null, ILlmClient? advisor = null)
     {
         _client = client;
+        _advisor = advisor;
         _diff = diff;
         _settings = settings;
         if (!ReviewSettings.IsKnownPattern(settings.Pattern))
             throw new ArgumentException(
-                $"Unknown review pattern '{settings.Pattern}'; expected '{ReviewSettings.SinglePattern}' or '{ReviewSettings.VotingPattern}'.",
+                $"Unknown review pattern '{settings.Pattern}'; expected '{ReviewSettings.SinglePattern}', '{ReviewSettings.VotingPattern}' or '{ReviewSettings.AdvisorPattern}'.",
                 nameof(settings));
+        if (IsAdvisor && advisor is null)
+            throw new ArgumentException(
+                $"The '{ReviewSettings.AdvisorPattern}' review pattern needs an advisor client.", nameof(advisor));
         _skillSelector = skillSelector ?? SkillSelectorFactory.Create(
             client, settings.Skills, settings.SkillPromptVersion, settings.Engine, progress);
         _skills = skills ?? new FileSkillSource();
@@ -81,7 +97,7 @@ public class CodeReviewer
         // totals, so an assessment never reports less than the run actually spent.
         // Return the validated review (with derived line numbers). Persistence is a
         // separate step: the caller stores it through the repository.
-        return merged.Result with
+        var first = merged.Result with
         {
             Engine = _settings.Engine,
             Model = merged.Model,
@@ -93,10 +109,74 @@ public class CodeReviewer
             OutputTokens = merged.OutputTokens + skills.OutputTokens,
             Diff = diff,
         };
+
+        if (!IsAdvisor)
+            return first;
+
+        return AdvisorTrigger.ShouldEscalate(first.Findings ?? [])
+            ? Escalate(first)
+            : first with { Advisor = new AdvisorTrace(false, null, 0m, 0, 0, 0) };
+    }
+
+    /// <summary>
+    /// Always escalates; whether to is the caller's decision. The advisor reads the diff and the
+    /// findings of <paramref name="first"/> and says where to look, then the executor reviews again
+    /// under the same system prompt, with the hints after the diff. That second review is the final
+    /// one: its findings replace the first's, and the cost, tokens and latency cover all three calls.
+    /// When the advisor gives no hint, or its reply cannot be read (the trace is then marked failed),
+    /// there is no second review: the first review stands, and the totals cover the first review and
+    /// the advisor.
+    /// </summary>
+    public ReviewResult Escalate(ReviewResult first)
+    {
+        if (_advisor is null)
+            throw new InvalidOperationException(
+                $"Escalating needs an advisor client, and none was given to this {nameof(CodeReviewer)}.");
+
+        var stopwatch = Stopwatch.StartNew();
+        var diff = first.Diff ?? DiffFilter.ExcludeMarkdown(_diff);
+        var advice = Advise(_advisor, diff, first.Findings ?? []);
+
+        // With nothing to look at again, a second review is the first one repeated: the first review stands.
+        if (advice.Hints.Count == 0)
+        {
+            stopwatch.Stop();
+            return first with
+            {
+                Cost = first.Cost + advice.Trace.Cost,
+                LatencyMs = first.LatencyMs + stopwatch.ElapsedMilliseconds,
+                InputTokens = first.InputTokens + advice.Trace.InputTokens,
+                OutputTokens = first.OutputTokens + advice.Trace.OutputTokens,
+                Diff = diff,
+                Advisor = advice.Trace,
+            };
+        }
+
+        var second = ReviewOnce(
+            _settings.PromptVersion, diff, DiffParser.Parse(diff), GuidelinesOf(first.Skills), null,
+            HintsBlock(advice.Hints));
+        stopwatch.Stop();
+
+        return second.Result with
+        {
+            Engine = first.Engine,
+            Model = second.Model ?? first.Model,
+            PromptVersion = first.PromptVersion,
+            Skills = first.Skills,
+            Cost = first.Cost + advice.Trace.Cost + second.Cost,
+            LatencyMs = first.LatencyMs + stopwatch.ElapsedMilliseconds,
+            InputTokens = first.InputTokens + advice.Trace.InputTokens + second.InputTokens,
+            OutputTokens = first.OutputTokens + advice.Trace.OutputTokens + second.OutputTokens,
+            Diff = diff,
+            Advisor = advice.Trace,
+        };
     }
 
     private bool IsVoting =>
         string.Equals(_settings.Pattern, ReviewSettings.VotingPattern, StringComparison.OrdinalIgnoreCase);
+
+    private bool IsAdvisor =>
+        string.Equals(_settings.Pattern, ReviewSettings.AdvisorPattern, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>What one call to the model produced, grounded and with its own cost.</summary>
     private sealed record ReviewPass(
@@ -106,10 +186,12 @@ public class CodeReviewer
     /// One call to the model with the prompt of <paramref name="promptVersion"/>. When
     /// <paramref name="scope"/> is given, a finding whose category is outside it is dropped before
     /// the grounding and counted apart, so <see cref="ReviewResult.DiscardedFindings"/> keeps
-    /// meaning "the cited line is not in the diff".
+    /// meaning "the cited line is not in the diff". <paramref name="extraUserContent"/> goes in the
+    /// user message after the diff, so the system prompt stays the one the first review sent.
     /// </summary>
     private ReviewPass ReviewOnce(
-        string promptVersion, string diff, ParsedDiff parsedDiff, string guidelines, IReadOnlyList<Category>? scope)
+        string promptVersion, string diff, ParsedDiff parsedDiff, string guidelines, IReadOnlyList<Category>? scope,
+        string? extraUserContent = null)
     {
         // Send the diff to the LLM, using the versioned system prompt and a JSON
         // schema so the model returns structured output (summary + findings).
@@ -118,11 +200,11 @@ public class CodeReviewer
         var requestBody = new
         {
             max_tokens = 16000,
-            system = LoadSystemPrompt(promptVersion) + guidelines,
+            system = $"{LoadPrompt($"review-{promptVersion}")}{guidelines}",
             json_schema = BuildSchema(),
             messages = new[]
             {
-                new { role = "user", content = $"```diff\n{diff}\n```" },
+                new { role = "user", content = DiffBlock(diff, extraUserContent) },
             },
         };
 
@@ -230,12 +312,133 @@ public class CodeReviewer
             activated, selection.InputTokens, selection.OutputTokens, selection.Cost);
     }
 
-    private static string LoadSystemPrompt(string version)
+    /// <summary>What the advisor call returned and what it cost, apart from the reviews.</summary>
+    private sealed record AdvisorPass(IReadOnlyList<AdvisorHint> Hints, AdvisorTrace Trace);
+
+    private sealed record AdvisorAnswer(List<AdvisorHint>? Hints);
+
+    private AdvisorPass Advise(ILlmClient advisor, string diff, IReadOnlyList<Finding> findings)
     {
-        var path = Path.Combine(AppContext.BaseDirectory, "assets", "prompts", $"review-{version}.md");
+        var response = advisor.Request(new
+        {
+            max_tokens = 16000,
+            reasoning = new { max_tokens = AdvisorReasoningMaxTokens },
+            system = LoadPrompt(AdvisorPrompt),
+            json_schema = BuildAdvisorSchema(),
+            messages = new[]
+            {
+                new { role = "user", content = DiffBlock(diff, FindingsBlock(findings)) },
+            },
+        });
+
+        var content = string.Join("\n", (response?.Content ?? [])
+            .Where(b => b.Type == "text")
+            .Select(b => b.Text));
+
+        var inputTokens = response?.Usage?.InputTokens ?? 0;
+        var outputTokens = response?.Usage?.OutputTokens ?? 0;
+
+        // A reply that cannot be read is a failed call, not a call with nothing to say; it was billed all the same.
+        var parsed = ParseAdvisorHints(content);
+        var failed = parsed is null;
+
+        // The schema asks for an empty snippet when a hint points at a region, so a blank one is no snippet.
+        var hints = (parsed ?? [])
+            .Where(h => !string.IsNullOrWhiteSpace(h.File) && !string.IsNullOrWhiteSpace(h.Check))
+            .Select(h => string.IsNullOrWhiteSpace(h.Snippet) ? h with { Snippet = null } : h)
+            .ToList();
+
+        var cost = response?.Cost
+            ?? CostCalculator.Estimate(_settings.AdvisorEngine, response?.Model, inputTokens, outputTokens);
+
+        return new AdvisorPass(
+            hints, new AdvisorTrace(true, response?.Model, cost, inputTokens, outputTokens, hints.Count, failed));
+    }
+
+    private static string DiffBlock(string diff, string? after) =>
+        after is null ? $"```diff\n{diff}\n```" : $"```diff\n{diff}\n```\n\n{after}";
+
+    private static string FindingsBlock(IReadOnlyList<Finding> findings)
+    {
+        if (findings.Count == 0)
+            return "First review findings: none.";
+
+        var lines = findings.Select(f =>
+            $"- file: {f.File}\n  snippet: {f.CodeSnippet}\n  category: {f.Category?.ToString().ToLowerInvariant()}\n  problem: {f.Problem}");
+        return $"First review findings:\n{string.Join("\n", lines)}";
+    }
+
+    private static string HintsBlock(IReadOnlyList<AdvisorHint> hints)
+    {
+        var lines = hints.Select(h => h.Snippet is null
+            ? $"- file: {h.File}\n  check: {h.Check}"
+            : $"- file: {h.File}\n  snippet: {h.Snippet}\n  check: {h.Check}");
+        return $"{LoadPrompt(AdvisorHintsPrompt).TrimEnd()}\n\n{string.Join("\n", lines)}";
+    }
+
+    // Rebuilt from the names the first review recorded, so a second review started from a stored
+    // first review gets the same system prompt without paying for the selection again.
+    private string GuidelinesOf(string? skillNames)
+    {
+        if (string.IsNullOrEmpty(skillNames))
+            return SkillPrompt.Guidelines([], _settings.SkillPromptVersion);
+
+        var names = skillNames.Split(',');
+        var activated = _skills.Catalog()
+            .Where(s => names.Contains(s.Name, StringComparer.OrdinalIgnoreCase))
+            .Select(_skills.Activate)
+            .ToList();
+        return SkillPrompt.Guidelines(activated, _settings.SkillPromptVersion);
+    }
+
+    private static string LoadPrompt(string name)
+    {
+        var path = Path.Combine(AppContext.BaseDirectory, "assets", "prompts", $"{name}.md");
         if (!File.Exists(path))
-            throw new FileNotFoundException($"Review prompt not found: {path}");
+            throw new FileNotFoundException($"Prompt not found: {path}");
         return File.ReadAllText(path);
+    }
+
+    private static object BuildAdvisorSchema() => new
+    {
+        type = "object",
+        properties = new
+        {
+            hints = new
+            {
+                type = "array",
+                items = new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        file = new { type = "string" },
+                        snippet = new { type = "string" },
+                        check = new { type = "string" },
+                    },
+                    required = new[] { "file", "snippet", "check" },
+                    additionalProperties = false,
+                },
+            },
+        },
+        required = new[] { "hints" },
+        additionalProperties = false,
+    };
+
+    /// <summary>The hints of the reply, or null when the reply is empty or is not JSON (likely cut off at the token limit).</summary>
+    private static IReadOnlyList<AdvisorHint>? ParseAdvisorHints(string content)
+    {
+        if (string.IsNullOrWhiteSpace(content))
+            return null;
+
+        try
+        {
+            return JsonSerializer.Deserialize<AdvisorAnswer>(content, JsonOptions)?.Hints ?? [];
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     // JSON schema for the structured review output (summary + findings).

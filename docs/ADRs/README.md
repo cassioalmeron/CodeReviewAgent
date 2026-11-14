@@ -25,6 +25,7 @@ The records are in chronological order. Read together, they trace the project fr
 | [008](ADR-008-voting-pattern-off-by-default.md) | Build the Voting pattern and leave it off by default, keeping the single call as the agent's path | 2026-11-01 |
 | [016](ADR-016-sectioning-scoring-judge-measured-off.md) | Measure Sectioning on the scoring judge and leave it off, keeping the single call as the project's judge | 2026-11-06 |
 | [017](ADR-017-cost-based-model-routing-measured-off.md) | Measure cost-based model routing and leave it off, keeping one model per run | 2026-11-07 |
+| [018](ADR-018-advisor-category-alarm.md) | Escalate to a strong advisor when the cheap review has no Bug and no Security finding, measured and left off | 2026-11-14 |
 
 ADR-008 comes last despite its number. It was reserved early for the parallelization decision, stayed empty while that decision was postponed, and was written once the golden set could measure the two patterns against each other.
 
@@ -43,3 +44,5 @@ Four of these records build on each other rather than standing alone.
 ADR-016 closes that thread by turning it on ADR-014 itself. ADR-014 had blamed an absolute scale for scores that could not tell reviews apart, without separating the scale from the single call that produced them. ADR-016 split the call into one per criterion, wrote four floors first, and the scores came back more saturated instead of less, so the scale keeps the blame. A diagnosis that survives a test that could have knocked it down is worth more than one nobody tried.
 
 **Building a mechanism in order to decide against it.** ADR-008, ADR-016 and ADR-017 each end with a mechanism built, measured and switched off. The first two were switched off because the measurement rejected them. The third is different: cost-based routing delivered what it promised, improving four of the five floors, and it was still switched off, because it doubles the cost of a review that costs cents and it worsens the one floor that catches a model accusing correct code. A measurement that passes and a decision that declines are not in conflict; the measurement answers what the mechanism does, not whether it is worth it.
+
+ADR-018 adds a fourth. The advisor was the first column on the 25 cases to pass the detection floor, and it was left off by a ruler written before the paid run: it still failed the trap floors and cost more than the strong model everywhere.

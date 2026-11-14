@@ -143,7 +143,7 @@ public static class RoutingReportCommand
         return outputFile;
     }
 
-    private static List<(GoldenCase Case, string Diff)>? LoadCases(TextWriter error)
+    internal static List<(GoldenCase Case, string Diff)>? LoadCases(TextWriter error)
     {
         var cases = new List<(GoldenCase, string)>();
         foreach (var set in Sets)

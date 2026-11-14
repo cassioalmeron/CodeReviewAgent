@@ -3,6 +3,7 @@ using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using CodeReviewerAgent.Core;
+using CodeReviewerAgent.Core.Advisor;
 using CodeReviewerAgent.Core.Diff;
 using CodeReviewerAgent.Core.Golden;
 using CodeReviewerAgent.Core.Judge;
@@ -75,7 +76,7 @@ if (args is ["eval", ..])
     var (evalClient, evalModel) = LlmClientFactory.CreateWithModel();
     RunGoldenSet(
         Budgeted(evalClient, ResolvedReviewSettings().Engine, evalModel, costBudget), evalModel,
-        evalFilter, evalSet);
+        evalFilter, evalSet, ResolvedAdvisor(costBudget));
     return;
 }
 
@@ -84,6 +85,21 @@ if (args is ["eval", ..])
 if (args is ["routing-report", ..])
 {
     RunRoutingReport(args[1..]);
+    return;
+}
+
+// `advisor-run` — the advisor pattern over the rounds already recorded for the cheap model: only a round
+// the alarm fires on is escalated. `--dry-run` makes no call and needs no key.
+if (args is ["advisor-run", ..])
+{
+    RunAdvisorRun(args[1..], costBudget);
+    return;
+}
+
+// `advisor-report` — compare cheap, strong and advisor from round store files only: no model call.
+if (args is ["advisor-report", ..])
+{
+    RunAdvisorReport(args[1..]);
     return;
 }
 
@@ -215,7 +231,7 @@ static void RunJson(string[] args, CostBudget? budget)
     var jsonReviewSettings = ResolvedReviewSettings();
     var review = new CodeReviewer(
         Budgeted(LlmClientFactory.Create(), jsonReviewSettings.Engine, model: null, budget), diff,
-        jsonReviewSettings, progress: ConsoleProgress.Out).Review();
+        jsonReviewSettings, progress: ConsoleProgress.Out, advisor: ResolvedAdvisor(budget)).Review();
     var reviewId = repos.Reviews.GetOrAdd(new Review
     {
         ProjectId = project.Id,
@@ -334,7 +350,9 @@ static void JudgeAssessment(int assessmentId, CostBudget? budget)
 static void RunAll(CostBudget? budget)
 {
     var (executor, executorModel) = LlmClientFactory.CreateWithModel();
-    RunGoldenSet(Budgeted(executor, ResolvedReviewSettings().Engine, executorModel, budget), executorModel);
+    RunGoldenSet(
+        Budgeted(executor, ResolvedReviewSettings().Engine, executorModel, budget), executorModel,
+        advisor: ResolvedAdvisor(budget));
     RunPairwiseJudge(budget);
 }
 
@@ -346,7 +364,8 @@ static void RunPairwiseJudge(CostBudget? budget) => JudgeRunner.Run(
     ResolvedThinkingDisabled(), ConsoleProgress.Out);
 
 static void RunGoldenSet(
-    ILlmClient executor, string? executorModel, string? filter = null, string set = GoldenEvaluator.GoldenSet)
+    ILlmClient executor, string? executorModel, string? filter = null, string set = GoldenEvaluator.GoldenSet,
+    ILlmClient? advisor = null)
 {
     var repos = RepositoryFactory.Create();
     var temperature = LlmClientFactory.ExecutorTemperature();
@@ -374,7 +393,7 @@ static void RunGoldenSet(
 
     // The evaluation without repositories, and the writing done here: the golden run has to carry the
     // path of its report, and the report only exists after the run is scored.
-    var result = GoldenEvaluator.Run(executor, promptVersions, filter, store, ResolvedGoldenSettings() with { Set = set });
+    var result = GoldenEvaluator.Run(executor, promptVersions, filter, store, ResolvedGoldenSettings() with { Set = set }, advisor);
 
     // A run that died still writes every round it bought, both to the store and to the repositories.
     // What it has no right to produce is a report: a rate over a partial set is not a smaller
@@ -468,6 +487,54 @@ static void RunRoutingReport(string[] reportArgs)
     }
 
     Environment.ExitCode = RoutingReportCommand.Run(options!, Console.Out, Console.Error);
+}
+
+static void RunAdvisorRun(string[] runArgs, CostBudget? budget)
+{
+    if (!AdvisorRunCommand.TryParse(runArgs, ResolvedPromptVersion(), out var options, out var parseError))
+    {
+        Console.Error.WriteLine(parseError);
+        Console.Error.WriteLine($"Usage: {AdvisorRunCommand.Usage}");
+        Environment.ExitCode = 1;
+        return;
+    }
+
+    // The clients, and the keys they read, exist only for a paid run.
+    AdvisorRunClients? clients = null;
+    if (!options!.DryRun)
+    {
+        var (executor, executorModel) = LlmClientFactory.CreateWithModel();
+        if (executorModel != options.CheapModel)
+        {
+            // The recorded rounds are keyed on the model: calling another one would store its reviews under this name.
+            Console.Error.WriteLine(
+                $"LLM_ENGINE resolves to model '{executorModel ?? "unknown"}', but --cheap is '{options.CheapModel}'.");
+            Environment.ExitCode = 1;
+            return;
+        }
+
+        var engine = Setting("LLM_ENGINE");
+        var advisorEngine = Setting("ADVISOR_ENGINE");
+        clients = new AdvisorRunClients(
+            Budgeted(executor, engine, executorModel, budget),
+            Budgeted(LlmClientFactory.CreateAdvisor(), advisorEngine, model: null, budget),
+            engine, advisorEngine, ResolvedGoldenSettings().Parallelism);
+    }
+
+    Environment.ExitCode = AdvisorRunCommand.Run(options, clients, Console.Out, Console.Error);
+}
+
+static void RunAdvisorReport(string[] reportArgs)
+{
+    if (!AdvisorReportCommand.TryParse(reportArgs, ResolvedPromptVersion(), out var options, out var parseError))
+    {
+        Console.Error.WriteLine(parseError);
+        Console.Error.WriteLine($"Usage: {AdvisorReportCommand.Usage}");
+        Environment.ExitCode = 1;
+        return;
+    }
+
+    Environment.ExitCode = AdvisorReportCommand.Run(options!, Console.Out, Console.Error);
 }
 
 static string? Setting(string name) =>
@@ -583,7 +650,7 @@ static void AssessReview(int reviewId, CostBudget? budget)
     var assessSettings = ResolvedReviewSettings();
     var result = new CodeReviewer(
         Budgeted(LlmClientFactory.Create(), assessSettings.Engine, model: null, budget), review.Content,
-        assessSettings, progress: ConsoleProgress.Out).Review();
+        assessSettings, progress: ConsoleProgress.Out, advisor: ResolvedAdvisor(budget)).Review();
     PrintReview(result);
     var assessmentId = repos.Assessments.Save(Assessment.FromReview(reviewId, result));
     Console.WriteLine($"Assessment saved with id {assessmentId}");
@@ -678,7 +745,8 @@ static void ReviewAndPublish(string[] args, CostBudget? budget)
         });
 
         var review = new CodeReviewer(
-            client, content, ResolvedReviewSettings(), progress: ConsoleProgress.Out).Review();
+            client, content, ResolvedReviewSettings(), progress: ConsoleProgress.Out,
+            advisor: ResolvedAdvisor(budget)).Review();
         PrintReview(review);
         Console.WriteLine($"Report saved to {ReportGenerator.Save(review)}");
         repos.Assessments.Save(Assessment.FromReview(reviewId, review));
@@ -741,7 +809,8 @@ static ReviewSettings ResolvedReviewSettings() => new(
     Environment.GetEnvironmentVariable("LLM_ENGINE"),
     Environment.GetEnvironmentVariable("SKILL_PROMPT_VERSION") ?? SkillPrompt.DefaultVersion,
     Environment.GetEnvironmentVariable("SKILLS"),
-    ResolvedReviewPattern());
+    ResolvedReviewPattern(),
+    ResolvedAdvisorEngine());
 
 // How the review is made: one call (the default) or the voting pattern. Read once, for both the
 // review and the golden run, so the two cannot disagree.
@@ -755,7 +824,19 @@ static GoldenSettings ResolvedGoldenSettings() => new(
     Environment.GetEnvironmentVariable("SKILLS"),
     Environment.GetEnvironmentVariable("LLM_ENGINE"),
     Environment.GetEnvironmentVariable("SKILL_PROMPT_VERSION") ?? SkillPrompt.DefaultVersion,
-    ResolvedReviewPattern());
+    ResolvedReviewPattern(),
+    AdvisorEngine: ResolvedAdvisorEngine());
+
+// The advisor exists only under the advisor pattern; under any other, ADVISOR_ENGINE is never read.
+static string? ResolvedAdvisorEngine() =>
+    string.Equals(ResolvedReviewPattern(), ReviewSettings.AdvisorPattern, StringComparison.OrdinalIgnoreCase)
+        ? Environment.GetEnvironmentVariable("ADVISOR_ENGINE")
+        : null;
+
+static ILlmClient? ResolvedAdvisor(CostBudget? budget) =>
+    LlmClientFactory.CreateAdvisorFor(ResolvedReviewPattern()) is { } advisor
+        ? Budgeted(advisor, ResolvedAdvisorEngine(), model: null, budget)
+        : null;
 
 static int ResolvedSkillEvalRuns() =>
     int.TryParse(Environment.GetEnvironmentVariable("SKILL_EVAL_RUNS"), out var n) && n > 0 ? n : 3;

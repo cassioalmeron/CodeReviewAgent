@@ -76,9 +76,10 @@ public static class GoldenEvaluator
     /// </summary>
     public static GoldenRunResult Run(
         ILlmClient client, RepositoryContext repositories, IReadOnlyList<string> promptVersions,
-        string? filter = null, IGoldenRoundStore? store = null, GoldenSettings? settings = null)
+        string? filter = null, IGoldenRoundStore? store = null, GoldenSettings? settings = null,
+        ILlmClient? advisor = null)
     {
-        var result = Run(client, promptVersions, filter, store, settings);
+        var result = Run(client, promptVersions, filter, store, settings, advisor);
         Persist(result, repositories);
         return result;
     }
@@ -107,7 +108,7 @@ public static class GoldenEvaluator
     /// </param>
     public static GoldenRunResult Run(
         ILlmClient client, IReadOnlyList<string> promptVersions, string? filter = null,
-        IGoldenRoundStore? store = null, GoldenSettings? settings = null)
+        IGoldenRoundStore? store = null, GoldenSettings? settings = null, ILlmClient? advisor = null)
     {
         settings ??= new GoldenSettings();
         var (cases, diffs, runs) = Prepare(filter, settings.Runs, settings.Set);
@@ -118,7 +119,7 @@ public static class GoldenEvaluator
 
         try
         {
-            ReviewEveryRound(rounds, client, cases, diffs, promptVersions, store, settings);
+            ReviewEveryRound(rounds, client, cases, diffs, promptVersions, store, settings, advisor);
             clock.Stop();
 
             return new GoldenRunResult(
@@ -175,7 +176,8 @@ public static class GoldenEvaluator
     private static void ReviewEveryRound(
         RoundBuffer rounds,
         ILlmClient client, IReadOnlyList<GoldenCase> cases, IReadOnlyList<string> diffs,
-        IReadOnlyList<string> promptVersions, IGoldenRoundStore? store, GoldenSettings settings)
+        IReadOnlyList<string> promptVersions, IGoldenRoundStore? store, GoldenSettings settings,
+        ILlmClient? advisor)
     {
         Parallel.For(0, rounds.Length, ParallelOptions(settings.Parallelism), slot =>
         {
@@ -191,7 +193,8 @@ public static class GoldenEvaluator
                 return;
             }
 
-            var review = new CodeReviewer(client, diffs[caseIndex], settings.Review(promptVersion)).Review();
+            var review = new CodeReviewer(
+                client, diffs[caseIndex], settings.Review(promptVersion), advisor: advisor).Review();
             // Durable before the next paid call goes out, not batched until the run finishes.
             store?.Record(cases[caseIndex].Name, promptVersion, runIndex, review);
             rounds.Record(slot, review);

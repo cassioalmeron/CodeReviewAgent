@@ -44,6 +44,10 @@ internal class OpenRouterClient(IHttpTransport transport, string model, double? 
         if (anthropic.TryGetProperty("max_tokens", out var maxTokens))
             openRouterRequest["max_tokens"] = maxTokens.GetInt32();
 
+        // The advisor caps its reasoning here; a body without it sends nothing extra.
+        if (anthropic.TryGetProperty("reasoning", out var reasoning))
+            openRouterRequest["reasoning"] = JsonNode.Parse(reasoning.GetRawText());
+
         if (temperature is { } value)
             openRouterRequest["temperature"] = value;
 
