@@ -1,0 +1,260 @@
+﻿using Microsoft.EntityFrameworkCore;
+using CodeReviewerAgent.Core;
+using CodeReviewerAgent.Core.Golden;
+using CodeReviewerAgent.Core.Llm;
+using CodeReviewerAgent.Infra;
+using Xunit;
+
+namespace CodeReviewerAgent.Tests.Core.Golden;
+
+/// <summary>
+/// The golden set's durable record of paid rounds. What matters here is not that the file
+/// round-trips — it is that a stored round is only ever reused by the configuration that
+/// produced it, because a round silently borrowed from another model is a wrong result that
+/// looks exactly like a right one.
+/// </summary>
+public class GoldenRoundStoreTests
+{
+    private static ReviewResult Review(string summary) =>
+        new(summary, [], "claude", "haiku", "v3", 0.01m, 100, 10, 20);
+
+    private static string TempPath() =>
+        Path.Combine(Path.GetTempPath(), $"cra-rounds-{Guid.NewGuid():N}.jsonl");
+
+    [Fact]
+    public void Record_MakesTheRoundAvailableToTheNextRun()
+    {
+        var path = TempPath();
+        try
+        {
+            new FileGoldenRoundStore(path, "haiku", "off")
+                .Record("sql-injection", "v3", 0, Review("found it"));
+
+            var resumed = new FileGoldenRoundStore(path, "haiku", "off");
+
+            Assert.Equal(1, resumed.ResumableCount);
+            Assert.Equal("found it", resumed.Find("sql-injection", "v3", 0)?.Summary);
+            Assert.Null(resumed.Find("sql-injection", "v3", 1));
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void Find_IgnoresRoundsFromAnotherModel()
+    {
+        var path = TempPath();
+        try
+        {
+            new FileGoldenRoundStore(path, "haiku", "off")
+                .Record("sql-injection", "v3", 0, Review("found it"));
+
+            var otherModel = new FileGoldenRoundStore(path, "sonnet", "off");
+
+            Assert.Equal(0, otherModel.ResumableCount);
+            Assert.Null(otherModel.Find("sql-injection", "v3", 0));
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void Find_IgnoresRoundsFromAnotherSkillsCondition()
+    {
+        var path = TempPath();
+        try
+        {
+            new FileGoldenRoundStore(path, "haiku", "off")
+                .Record("sql-injection", "v3", 0, Review("found it"));
+
+            Assert.Null(new FileGoldenRoundStore(path, "haiku", "all").Find("sql-injection", "v3", 0));
+        }
+        finally { File.Delete(path); }
+    }
+
+    /// <summary>
+    /// A round sampled at the provider's default is not a round at temperature 0. Records written
+    /// before the temperature existed read as the default, so they never leak into a run at 0.
+    /// </summary>
+    [Fact]
+    public void Find_IgnoresRoundsFromAnotherTemperature()
+    {
+        var path = TempPath();
+        try
+        {
+            new FileGoldenRoundStore(path, "gpt-4o-mini", "globs")
+                .Record("sql-injection", "v3", 0, Review("at the default"));
+            new FileGoldenRoundStore(path, "gpt-4o-mini", "globs", temperature: 0)
+                .Record("sql-injection", "v3", 1, Review("at zero"));
+
+            var atZero = new FileGoldenRoundStore(path, "gpt-4o-mini", "globs", temperature: 0);
+            var atDefault = new FileGoldenRoundStore(path, "gpt-4o-mini", "globs");
+
+            Assert.Null(atZero.Find("sql-injection", "v3", 0));
+            Assert.Equal("at zero", atZero.Find("sql-injection", "v3", 1)!.Summary);
+            Assert.Equal("at the default", atDefault.Find("sql-injection", "v3", 0)!.Summary);
+            Assert.Null(atDefault.Find("sql-injection", "v3", 1));
+        }
+        finally { File.Delete(path); }
+    }
+
+    /// <summary>
+    /// A review made by four voting calls is not the one a single call makes. A round stored under
+    /// one pattern must never be offered to a run of the other, in either direction.
+    /// </summary>
+    [Fact]
+    public void GoldenRoundStoreTests_Find_IgnoresRoundsFromAnotherPattern()
+    {
+        var path = TempPath();
+        try
+        {
+            new FileGoldenRoundStore(path, "haiku", "off", pattern: "single")
+                .Record("sql-injection", "v3", 0, Review("by one call"));
+            new FileGoldenRoundStore(path, "haiku", "off", pattern: "voting")
+                .Record("sql-injection", "v3", 1, Review("by four calls"));
+
+            var voting = new FileGoldenRoundStore(path, "haiku", "off", pattern: "voting");
+            var single = new FileGoldenRoundStore(path, "haiku", "off", pattern: "single");
+
+            Assert.Null(voting.Find("sql-injection", "v3", 0));
+            Assert.Equal("by four calls", voting.Find("sql-injection", "v3", 1)!.Summary);
+            Assert.Equal("by one call", single.Find("sql-injection", "v3", 0)!.Summary);
+            Assert.Null(single.Find("sql-injection", "v3", 1));
+            Assert.Equal(1, voting.ResumableCount);
+            Assert.Equal(1, single.ResumableCount);
+        }
+        finally { File.Delete(path); }
+    }
+
+    /// <summary>
+    /// Records written before the pattern existed were single calls. They stay reusable by a
+    /// single run, and are never offered to a voting one.
+    /// </summary>
+    [Fact]
+    public void GoldenRoundStoreTests_Find_ReadsARecordWithoutAPatternAsSingle()
+    {
+        var path = TempPath();
+        try
+        {
+            new FileGoldenRoundStore(path, "haiku", "off")
+                .Record("sql-injection", "v3", 0, Review("written before the pattern"));
+            var withPattern = File.ReadAllText(path);
+            Assert.Contains("\"pattern\":\"single\"", withPattern);
+            File.WriteAllText(path, withPattern.Replace(",\"pattern\":\"single\"", ""));
+            Assert.DoesNotContain("\"pattern\":", File.ReadAllText(path));
+
+            var single = new FileGoldenRoundStore(path, "haiku", "off", pattern: "single");
+            var voting = new FileGoldenRoundStore(path, "haiku", "off", pattern: "voting");
+
+            Assert.Equal("written before the pattern", single.Find("sql-injection", "v3", 0)!.Summary);
+            Assert.Null(voting.Find("sql-injection", "v3", 0));
+        }
+        finally { File.Delete(path); }
+    }
+
+    /// <summary>
+    /// A run that cannot name its own model cannot claim a stored round was produced by it. It
+    /// still records, so the work is not lost; it just refuses to resume.
+    /// </summary>
+    [Fact]
+    public void UnknownModel_RecordsButNeverResumes()
+    {
+        var path = TempPath();
+        try
+        {
+            var store = new FileGoldenRoundStore(path, model: null, skills: "off");
+            store.Record("sql-injection", "v3", 0, Review("found it"));
+
+            Assert.Equal(0, store.ResumableCount);
+            Assert.Null(store.Find("sql-injection", "v3", 0));
+            Assert.Single(FileGoldenRoundStore.Load(path));
+        }
+        finally { File.Delete(path); }
+    }
+
+    /// <summary>
+    /// The whole point of JSON Lines: the run that died mid-write is the one being resumed, so
+    /// a truncated last line must cost that line and nothing else.
+    /// </summary>
+    [Fact]
+    public void Load_KeepsEverythingBeforeALineACrashTruncated()
+    {
+        var path = TempPath();
+        try
+        {
+            var store = new FileGoldenRoundStore(path, "haiku", "off");
+            store.Record("sql-injection", "v3", 0, Review("first"));
+            store.Record("hardcoded-secret", "v3", 0, Review("second"));
+            File.AppendAllText(path, "{\"case\":\"off-by-one\",\"promptVer");
+
+            Assert.Equal(2, FileGoldenRoundStore.Load(path).Count);
+            Assert.Equal(2, new FileGoldenRoundStore(path, "haiku", "off").ResumableCount);
+        }
+        finally { File.Delete(path); }
+    }
+
+    /// <summary>
+    /// The end that matters: a second run over the same configuration spends nothing, because
+    /// every round it needs is already on disk.
+    /// </summary>
+    [Fact]
+    public void SecondRun_ReusesEveryRoundAndCallsTheModelNoFurtherTimes()
+    {
+        var path = TempPath();
+        var dbPath = Path.Combine(Path.GetTempPath(), $"cra-golden-{Guid.NewGuid():N}.db");
+        try
+        {
+            using var context = new CodeReviewDbContext(
+                o => new SqliteProviderStrategy().Configure(o, $"Data Source={dbPath}"));
+            context.Database.Migrate();
+
+            const string model = "haiku";
+            var client = new CountingLlmClient(model);
+            var caseCount = GoldenEvaluator.LoadCases().Count;
+
+            RunOnce(context, client, new FileGoldenRoundStore(path, model, "off"));
+            var afterFirst = client.Calls;
+
+            var second = new FileGoldenRoundStore(path, model, "off");
+            Assert.Equal(caseCount, second.ResumableCount);
+
+            RunOnce(context, client, second);
+
+            Assert.Equal(caseCount, afterFirst);
+            Assert.Equal(afterFirst, client.Calls);
+        }
+        finally
+        {
+            File.Delete(path);
+            try { File.Delete(dbPath); } catch { /* pooled connection may hold the file */ }
+        }
+    }
+
+    // One round, skills off: what this class measures is the reuse, not the selection. It used to
+    // be GOLDEN_RUNS and SKILLS in the process environment.
+    private static void RunOnce(CodeReviewDbContext context, ILlmClient client, IGoldenRoundStore store) =>
+        GoldenEvaluator.Run(
+            client,
+            TestRepositories.For(context),
+            ["v3"],
+            filter: null,
+            store: store,
+            settings: new GoldenSettings(Runs: 1, Skills: "off"));
+
+    /// <summary>Answers anything, and counts how many times it was asked.</summary>
+    private sealed class CountingLlmClient(string? model) : ILlmClient
+    {
+        private int _calls;
+
+        public int Calls => Volatile.Read(ref _calls);
+
+        public MessageResponse Request(object requestBody)
+        {
+            Interlocked.Increment(ref _calls);
+            return new MessageResponse
+            {
+                Model = model,
+                Content = [new ContentBlock { Type = "text", Text = "{\"summary\":\"none\",\"findings\":[]}" }],
+                Usage = new Usage { InputTokens = 10, OutputTokens = 20 },
+            };
+        }
+    }
+}
